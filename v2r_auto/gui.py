@@ -6,6 +6,7 @@ import queue
 import sys
 import threading
 import tkinter as tk
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -49,6 +50,7 @@ class AutomationApp(tk.Tk):
             directory.mkdir(parents=True, exist_ok=True)
 
         self.log_queue: queue.Queue[str] = queue.Queue()
+        self.ui_queue: queue.Queue[tuple[str, object]] = queue.Queue()
         self.logger = self._configure_logging()
         self.browser = V2RBrowser(
             BrowserConfig(
@@ -58,7 +60,8 @@ class AutomationApp(tk.Tk):
             self.logger,
         )
         self.stop_event = threading.Event()
-        self.worker: threading.Thread | None = None
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="v2r-browser")
+        self.worker: Future | None = None
         self._create_variables()
         self._build_ui()
         self.after(100, self._drain_logs)
@@ -212,42 +215,48 @@ class AutomationApp(tk.Tk):
             self.local_csv.set(selected)
 
     def _open_login(self) -> None:
-        self._run_background(self.browser.open_login_window)
+        sheet_url = self.sheet_url.get().strip()
+        self._run_background(lambda: self.browser.open_login_window(sheet_url))
 
-    def _get_csv_path(self) -> Path:
-        if self.local_csv.get().strip():
-            return Path(self.local_csv.get().strip())
-        if not self.sheet_url.get().strip():
+    def _get_csv_path(self, local_csv: str, sheet_url: str) -> Path:
+        if local_csv:
+            return Path(local_csv)
+        if not sheet_url:
             raise ValueError("Google 시트 URL 또는 CSV 파일을 입력하세요")
-        return self.browser.download_sheet(self.sheet_url.get().strip())
+        return self.browser.download_sheet(sheet_url)
 
-    def _load_jobs(self):
+    def _load_jobs(
+        self,
+        local_csv: str,
+        sheet_url: str,
+        defaults: SheetDefaults,
+    ):
         return load_jobs(
-            self._get_csv_path(),
-            SheetDefaults(
-                cafe=self.default_cafe.get(),
-                board=self.default_board.get(),
-                account=self.default_account.get(),
-            ),
+            self._get_csv_path(local_csv, sheet_url),
+            defaults,
         )
 
     def _check_data(self) -> None:
+        local_csv = self.local_csv.get().strip()
+        sheet_url = self.sheet_url.get().strip()
+        defaults = SheetDefaults(
+            cafe=self.default_cafe.get(),
+            board=self.default_board.get(),
+            account=self.default_account.get(),
+        )
+
         def work() -> None:
-            jobs = self._load_jobs()
+            jobs = self._load_jobs(local_csv, sheet_url, defaults)
             errors = sum(bool(job.validate()) for job in jobs)
             self.logger.info("데이터 확인 완료: %s건, 필수값 누락 %s건", len(jobs), errors)
-            self.after(
-                0,
-                lambda: messagebox.showinfo(
-                    "데이터 확인",
-                    f"총 {len(jobs)}건\n필수값 누락 {errors}건",
-                ),
+            self.ui_queue.put(
+                ("info", ("데이터 확인", f"총 {len(jobs)}건\n필수값 누락 {errors}건"))
             )
 
         self._run_background(work)
 
     def _start(self) -> None:
-        if self.worker and self.worker.is_alive():
+        if self.worker and not self.worker.done():
             return
         if not self.dry_run.get():
             confirmed = messagebox.askyesno(
@@ -256,15 +265,34 @@ class AutomationApp(tk.Tk):
             )
             if not confirmed:
                 return
+        try:
+            delay_seconds = max(10, self.delay_seconds.get())
+        except (tk.TclError, ValueError):
+            messagebox.showerror("입력 오류", "글 사이 간격은 숫자로 입력하세요")
+            return
         self.stop_event.clear()
         self.start_button.configure(state=tk.DISABLED)
         self.stop_button.configure(state=tk.NORMAL)
         self.progress.configure(value=0)
         self.progress_text.set("데이터 준비 중")
+        local_csv = self.local_csv.get().strip()
+        sheet_url = self.sheet_url.get().strip()
+        defaults = SheetDefaults(
+            cafe=self.default_cafe.get(),
+            board=self.default_board.get(),
+            account=self.default_account.get(),
+        )
+        email = self.email.get().strip()
+        password = self.password.get()
+        options = RunOptions(
+            dry_run=self.dry_run.get(),
+            delay_seconds=delay_seconds,
+            skip_duplicates=self.skip_duplicates.get(),
+        )
 
         def work() -> None:
             try:
-                jobs = self._load_jobs()
+                jobs = self._load_jobs(local_csv, sheet_url, defaults)
                 runner = AutomationRunner(
                     browser=self.browser,
                     history_path=self.data_dir / "history.json",
@@ -273,31 +301,25 @@ class AutomationApp(tk.Tk):
                 )
                 _, report_path = runner.run(
                     jobs=jobs,
-                    email=self.email.get().strip(),
-                    password=self.password.get(),
-                    options=RunOptions(
-                        dry_run=self.dry_run.get(),
-                        delay_seconds=max(10, self.delay_seconds.get()),
-                        skip_duplicates=self.skip_duplicates.get(),
-                    ),
+                    email=email,
+                    password=password,
+                    options=options,
                     stop_event=self.stop_event,
                     progress=self._set_progress,
                 )
-                self.after(
-                    0,
-                    lambda: messagebox.showinfo(
-                        "작업 완료",
-                        f"작업이 완료되었습니다.\n결과: {report_path}",
-                    ),
+                self.ui_queue.put(
+                    (
+                        "info",
+                        ("작업 완료", f"작업이 완료되었습니다.\n결과: {report_path}"),
+                    )
                 )
             except Exception as exc:
                 self.logger.exception("자동화 실행 실패")
-                self.after(0, lambda: messagebox.showerror("실행 실패", str(exc)))
+                self.ui_queue.put(("error", ("실행 실패", str(exc))))
             finally:
-                self.after(0, self._worker_finished)
+                self.ui_queue.put(("finished", None))
 
-        self.worker = threading.Thread(target=work, daemon=True)
-        self.worker.start()
+        self.worker = self.executor.submit(work)
 
     def _stop(self) -> None:
         self.stop_event.set()
@@ -306,15 +328,14 @@ class AutomationApp(tk.Tk):
 
     def _set_progress(self, completed: int, total: int) -> None:
         percent = 0 if total == 0 else int(completed / total * 100)
-        self.after(0, lambda: self.progress.configure(value=percent))
-        self.after(0, lambda: self.progress_text.set(f"{completed}/{total} ({percent}%)"))
+        self.ui_queue.put(("progress", (completed, total, percent)))
 
     def _worker_finished(self) -> None:
         self.start_button.configure(state=tk.NORMAL)
         self.stop_button.configure(state=tk.DISABLED)
 
     def _run_background(self, callback) -> None:
-        if self.worker and self.worker.is_alive():
+        if self.worker and not self.worker.done():
             messagebox.showwarning("작업 중", "현재 작업이 끝난 뒤 다시 시도하세요")
             return
 
@@ -323,12 +344,28 @@ class AutomationApp(tk.Tk):
                 callback()
             except Exception as exc:
                 self.logger.exception("작업 실패")
-                self.after(0, lambda: messagebox.showerror("오류", str(exc)))
+                self.ui_queue.put(("error", ("오류", str(exc))))
 
-        self.worker = threading.Thread(target=work, daemon=True)
-        self.worker.start()
+        self.worker = self.executor.submit(work)
 
     def _drain_logs(self) -> None:
+        while True:
+            try:
+                kind, payload = self.ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "progress":
+                completed, total, percent = payload
+                self.progress.configure(value=percent)
+                self.progress_text.set(f"{completed}/{total} ({percent}%)")
+            elif kind == "info":
+                title, message = payload
+                messagebox.showinfo(title, message)
+            elif kind == "error":
+                title, message = payload
+                messagebox.showerror(title, message)
+            elif kind == "finished":
+                self._worker_finished()
         while True:
             try:
                 message = self.log_queue.get_nowait()
@@ -352,10 +389,9 @@ class AutomationApp(tk.Tk):
 
     def _on_close(self) -> None:
         self.stop_event.set()
-        try:
-            self.browser.close()
-        finally:
-            self.destroy()
+        self.executor.submit(self.browser.close)
+        self.executor.shutdown(wait=False)
+        self.destroy()
 
 
 def main() -> None:

@@ -46,3 +46,15 @@ def test_requires_title_and_body_columns(tmp_path: Path) -> None:
 
     with pytest.raises(SheetSchemaError, match="필수 열"):
         load_jobs(path)
+
+
+def test_handles_whitespace_around_headers(tmp_path: Path) -> None:
+    path = write_csv(
+        tmp_path,
+        " 제목 , 본문 , 카페명 , 게시판명 \n제목 A,본문 A,카페 A,게시판 A\n",
+    )
+
+    jobs = load_jobs(path)
+
+    assert jobs[0].title == "제목 A"
+    assert jobs[0].body == "본문 A"

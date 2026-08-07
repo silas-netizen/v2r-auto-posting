@@ -7,15 +7,26 @@ from pathlib import Path
 from .models import PostJob
 
 
+class HistoryCorruptedError(RuntimeError):
+    pass
+
+
 class HistoryStore:
     def __init__(self, path: Path):
         self.path = path
         self._items: dict[str, dict[str, str]] = {}
         if path.exists():
             try:
-                self._items = json.loads(path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                self._items = {}
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as exc:
+                raise HistoryCorruptedError(
+                    f"중복 이력 파일을 읽지 못했습니다. 파일을 확인하세요: {path}"
+                ) from exc
+            if not isinstance(loaded, dict):
+                raise HistoryCorruptedError(
+                    f"중복 이력 파일 형식이 올바르지 않습니다: {path}"
+                )
+            self._items = loaded
 
     @staticmethod
     def key(job: PostJob) -> str:

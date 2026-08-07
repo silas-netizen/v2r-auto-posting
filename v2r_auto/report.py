@@ -7,7 +7,7 @@ from .models import RunResult
 
 def write_report(result: RunResult, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
-    stamp = result.finished_at.strftime("%Y%m%d_%H%M%S")
+    stamp = result.finished_at.strftime("%Y%m%d_%H%M%S_%f")
     path = output_dir / f"실행결과_{stamp}.txt"
     mode = "검증 모드(실제 발행 없음)" if result.dry_run else "실제 발행 모드"
     lines = [

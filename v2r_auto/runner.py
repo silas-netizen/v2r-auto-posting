@@ -75,7 +75,17 @@ class AutomationRunner:
                 job.status = JobStatus.SUCCESS
                 job.message = "입력 검증 완료" if options.dry_run else "발행 완료"
                 if not options.dry_run:
-                    self.history.record(job)
+                    try:
+                        self.history.record(job)
+                    except Exception as history_error:
+                        job.message = (
+                            "발행 완료, 중복 이력 저장 실패 - 재실행 전 결과를 확인하세요: "
+                            f"{history_error}"
+                        )
+                        self.logger.exception(
+                            "행 %s 발행은 완료됐지만 중복 이력을 저장하지 못했습니다",
+                            job.row_number,
+                        )
             except Exception as exc:
                 job.status = JobStatus.FAILED
                 job.message = str(exc)

@@ -8,7 +8,13 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from selenium import webdriver
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
+from selenium.common.exceptions import (
+    NoAlertPresentException,
+    NoSuchElementException,
+    NoSuchWindowException,
+    TimeoutException,
+    UnexpectedAlertPresentException,
+)
 from selenium.webdriver import ChromeOptions
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -38,6 +44,8 @@ class V2RBrowser:
         self.config = config
         self.logger = logger
         self.driver: webdriver.Chrome | None = None
+        self.v2r_handle: str | None = None
+        self.google_handle: str | None = None
 
     def start(self) -> None:
         if self.driver:
@@ -59,11 +67,14 @@ class V2RBrowser:
         )
         self.logger.info("Chrome을 시작합니다")
         self.driver = webdriver.Chrome(options=options)
+        self.v2r_handle = self.driver.current_window_handle
 
     def close(self) -> None:
         if self.driver:
             self.driver.quit()
             self.driver = None
+            self.v2r_handle = None
+            self.google_handle = None
 
     @property
     def wait(self) -> WebDriverWait:
@@ -71,11 +82,40 @@ class V2RBrowser:
             raise AutomationError("브라우저가 시작되지 않았습니다")
         return WebDriverWait(self.driver, self.config.timeout_seconds)
 
-    def open_login_window(self) -> None:
+    def open_login_window(self, sheet_url: str = "") -> None:
         self.start()
         assert self.driver
-        self.driver.get(V2R_LIST_URL)
+        self._navigate(V2R_LIST_URL, self.v2r_handle)
+        self.v2r_handle = self.driver.current_window_handle
+        if sheet_url:
+            self.driver.switch_to.new_window("tab")
+            self.google_handle = self.driver.current_window_handle
+            self._navigate(sheet_url, self.google_handle)
+            self.logger.info("Google Sheets 로그인 확인 탭을 열었습니다")
         self.logger.info("로그인 준비 창을 열었습니다. Google과 V2R 로그인을 확인하세요")
+
+    def _switch_to_handle(self, preferred: str | None = None) -> None:
+        assert self.driver
+        handles = self.driver.window_handles
+        if not handles:
+            raise AutomationError("열려 있는 Chrome 창이 없습니다")
+        target = preferred if preferred in handles else handles[0]
+        try:
+            self.driver.switch_to.window(target)
+        except NoSuchWindowException:
+            self.driver.switch_to.window(self.driver.window_handles[0])
+
+    def _navigate(self, url: str, preferred_handle: str | None = None) -> None:
+        assert self.driver
+        self._switch_to_handle(preferred_handle)
+        try:
+            self.driver.get(url)
+        except UnexpectedAlertPresentException:
+            try:
+                self.driver.switch_to.alert.dismiss()
+            except NoAlertPresentException:
+                pass
+            self.driver.get(url)
 
     @staticmethod
     def _sheet_export_url(sheet_url: str) -> str:
@@ -94,12 +134,14 @@ class V2RBrowser:
     def download_sheet(self, sheet_url: str) -> Path:
         self.start()
         assert self.driver
+        self._switch_to_handle(self.google_handle)
+        self.google_handle = self.driver.current_window_handle
         before = {path: path.stat().st_mtime for path in self.config.download_dir.glob("*.csv")}
         self.logger.info("Google Sheets 데이터를 내려받습니다")
-        self.driver.get(self._sheet_export_url(sheet_url))
+        request_started = time.time()
+        self._navigate(self._sheet_export_url(sheet_url), self.google_handle)
         deadline = time.monotonic() + self.config.timeout_seconds
         while time.monotonic() < deadline:
-            active = list(self.config.download_dir.glob("*.crdownload"))
             candidates = sorted(
                 self.config.download_dir.glob("*.csv"),
                 key=lambda path: path.stat().st_mtime,
@@ -107,7 +149,8 @@ class V2RBrowser:
             )
             for candidate in candidates:
                 if candidate not in before or candidate.stat().st_mtime > before[candidate]:
-                    if not active:
+                    related_download = candidate.with_suffix(candidate.suffix + ".crdownload")
+                    if candidate.stat().st_mtime >= request_started and not related_download.exists():
                         self.logger.info("Google Sheets 다운로드 완료: %s", candidate.name)
                         return candidate
             time.sleep(0.5)
@@ -122,12 +165,26 @@ class V2RBrowser:
     def ensure_v2r_login(self, email: str, password: str) -> None:
         self.start()
         assert self.driver
-        self.driver.get(V2R_LIST_URL)
+        self._navigate(V2R_LIST_URL, self.v2r_handle)
+        self.v2r_handle = self.driver.current_window_handle
+
+        def login_state(driver):
+            if driver.find_elements(By.CSS_SELECTOR, "input[type='password']"):
+                return "login"
+            if "/nc/board" in driver.current_url and any(
+                text in driver.page_source for text in ("글쓰기", "게시글", "카페명")
+            ):
+                return "authenticated"
+            return False
+
         try:
-            password_input = self.driver.find_element(By.CSS_SELECTOR, "input[type='password']")
-        except NoSuchElementException:
+            state = self.wait.until(login_state)
+        except TimeoutException as exc:
+            raise AutomationError("V2R 로그인 화면 또는 게시글 목록을 확인하지 못했습니다") from exc
+        if state == "authenticated":
             self.logger.info("기존 V2R 로그인 세션을 사용합니다")
             return
+        password_input = self.driver.find_element(By.CSS_SELECTOR, "input[type='password']")
 
         if not email or not password:
             raise AutomationError("V2R 로그인이 필요하지만 아이디 또는 비밀번호가 비어 있습니다")
@@ -145,12 +202,22 @@ class V2RBrowser:
             raise AutomationError("V2R 로그인에 실패했습니다. 계정 정보나 추가 인증을 확인하세요") from exc
         self.logger.info("V2R 로그인 완료")
 
-    def _click_text(self, texts: tuple[str, ...]) -> None:
+    @staticmethod
+    def _xpath_literal(value: str) -> str:
+        if "'" not in value:
+            return f"'{value}'"
+        if '"' not in value:
+            return f'"{value}"'
+        parts = value.split("'")
+        return "concat(" + ", \"'\", ".join(f"'{part}'" for part in parts) + ")"
+
+    def _click_text(self, texts: tuple[str, ...], exact_only: bool = False) -> None:
         assert self.driver
         for text in texts:
+            literal = self._xpath_literal(text)
             xpath = (
                 "//*[self::button or self::a or @role='button']"
-                f"[normalize-space()='{text}' or contains(normalize-space(), '{text}')]"
+                f"[normalize-space()={literal}]"
             )
             elements = self.driver.find_elements(By.XPATH, xpath)
             for element in elements:
@@ -158,12 +225,25 @@ class V2RBrowser:
                     self.driver.execute_script("arguments[0].scrollIntoView({block:'center'});", element)
                     element.click()
                     return
+        if not exact_only:
+            for text in texts:
+                literal = self._xpath_literal(text)
+                xpath = (
+                    "//*[self::button or self::a or @role='button']"
+                    f"[contains(normalize-space(), {literal})]"
+                )
+                elements = self.driver.find_elements(By.XPATH, xpath)
+                for element in elements:
+                    if element.is_displayed() and element.is_enabled():
+                        element.click()
+                        return
         raise AutomationError(f"버튼을 찾지 못했습니다: {' / '.join(texts)}")
 
     def _field_near_label(self, label: str):
         assert self.driver
+        literal = self._xpath_literal(label)
         xpath = (
-            f"//*[self::label or self::div or self::span][contains(normalize-space(), '{label}')]"
+            f"//*[self::label or self::div or self::span][contains(normalize-space(), {literal})]"
             "/following::*[self::input or self::textarea][1]"
         )
         elements = self.driver.find_elements(By.XPATH, xpath)
@@ -187,9 +267,10 @@ class V2RBrowser:
         if not value:
             return
         assert self.driver
+        label_literal = self._xpath_literal(label)
         label_elements = self.driver.find_elements(
             By.XPATH,
-            f"//*[self::label or self::div or self::span][contains(normalize-space(), '{label}')]",
+            f"//*[self::label or self::div or self::span][contains(normalize-space(), {label_literal})]",
         )
         for label_element in label_elements:
             if not label_element.is_displayed():
@@ -204,9 +285,10 @@ class V2RBrowser:
         else:
             raise AutomationError(f"선택란을 찾지 못했습니다: {label}")
 
+        value_literal = self._xpath_literal(value)
         option_xpath = (
             f"//*[@role='option' or self::li or self::div]"
-            f"[normalize-space()='{value}' or contains(normalize-space(), '{value}')]"
+            f"[normalize-space()={value_literal}]"
         )
         try:
             option = self.wait.until(EC.element_to_be_clickable((By.XPATH, option_xpath)))
@@ -238,7 +320,8 @@ class V2RBrowser:
     def fill_post(self, job: PostJob, dry_run: bool) -> None:
         self.start()
         assert self.driver
-        self.driver.get(V2R_WRITE_URL)
+        self._navigate(V2R_WRITE_URL, self.v2r_handle)
+        self.v2r_handle = self.driver.current_window_handle
         self.wait.until(lambda driver: driver.execute_script("return document.readyState") == "complete")
 
         self._select_option("카페", job.cafe)
@@ -269,7 +352,7 @@ class V2RBrowser:
             self.logger.info("행 %s 입력 검증 완료(저장하지 않음)", job.row_number)
             return
 
-        self._click_text(("저장", "발행"))
+        self._click_text(("저장",), exact_only=True)
         try:
             self.wait.until(
                 lambda driver: "/nc/write" not in driver.current_url

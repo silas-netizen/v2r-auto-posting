@@ -85,7 +85,7 @@ def load_jobs(path: str | Path, defaults: SheetDefaults | None = None) -> list[P
 
     with csv_path.open("r", encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream)
-        headers = [header.strip() for header in (reader.fieldnames or []) if header]
+        headers = [header for header in (reader.fieldnames or []) if header and header.strip()]
         if not headers:
             raise SheetSchemaError("첫 행에서 열 이름을 찾지 못했습니다")
 

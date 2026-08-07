@@ -1,10 +1,14 @@
 from datetime import datetime
 from pathlib import Path
+import threading
+
+import pytest
 
 from v2r_auto.browser import V2RBrowser
-from v2r_auto.history import HistoryStore
+from v2r_auto.history import HistoryCorruptedError, HistoryStore
 from v2r_auto.models import JobStatus, PostJob, RunResult
 from v2r_auto.report import write_report
+from v2r_auto.runner import AutomationRunner, RunOptions
 
 
 def sample_job() -> PostJob:
@@ -47,3 +51,49 @@ def test_report_is_utf8_bom_text(tmp_path: Path) -> None:
 
     assert path.read_bytes().startswith(b"\xef\xbb\xbf")
     assert "발행 완료" in path.read_text(encoding="utf-8-sig")
+
+
+def test_rejects_corrupted_history(tmp_path: Path) -> None:
+    path = tmp_path / "history.json"
+    path.write_text("[]", encoding="utf-8")
+
+    with pytest.raises(HistoryCorruptedError):
+        HistoryStore(path)
+
+
+class FakeBrowser:
+    def __init__(self):
+        self.filled: list[PostJob] = []
+
+    def ensure_v2r_login(self, email: str, password: str) -> None:
+        return None
+
+    def fill_post(self, job: PostJob, dry_run: bool) -> None:
+        assert dry_run
+        self.filled.append(job)
+
+
+def test_runner_dry_run_never_publishes(tmp_path: Path) -> None:
+    browser = FakeBrowser()
+    runner = AutomationRunner(
+        browser=browser,  # type: ignore[arg-type]
+        history_path=tmp_path / "history.json",
+        report_dir=tmp_path,
+        logger=__import__("logging").getLogger("test"),
+    )
+    progress: list[tuple[int, int]] = []
+
+    result, report = runner.run(
+        jobs=[sample_job()],
+        email="",
+        password="",
+        options=RunOptions(dry_run=True, delay_seconds=0),
+        stop_event=threading.Event(),
+        progress=lambda current, total: progress.append((current, total)),
+    )
+
+    assert result.succeeded == 1
+    assert result.jobs[0].message == "입력 검증 완료"
+    assert browser.filled
+    assert report.exists()
+    assert progress[-1] == (1, 1)
