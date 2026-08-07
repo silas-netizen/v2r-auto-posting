@@ -81,11 +81,22 @@ def _is_completed(value: str) -> bool:
     }
 
 
-def load_jobs(path: str | Path, defaults: SheetDefaults | None = None) -> list[PostJob]:
+def load_jobs(
+    path: str | Path,
+    defaults: SheetDefaults | None = None,
+    selected_row_number: int | None = None,
+) -> list[PostJob]:
+    """Load all post jobs, or only one Google Sheet row when requested.
+
+    ``selected_row_number`` uses the visible spreadsheet number: the header is row 1,
+    so the first original post is row 2.
+    """
     defaults = defaults or SheetDefaults()
     csv_path = Path(path)
     if not csv_path.exists():
         raise FileNotFoundError(f"시트 파일이 없습니다: {csv_path}")
+    if selected_row_number is not None and selected_row_number < 2:
+        raise ValueError("시트 행 번호는 2 이상이어야 합니다")
 
     with csv_path.open("r", encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream)
@@ -103,7 +114,12 @@ def load_jobs(path: str | Path, defaults: SheetDefaults | None = None) -> list[P
 
         comment_headers = _comment_headers(headers)
         jobs: list[PostJob] = []
+        selected_row_found = False
         for row_number, row in enumerate(reader, start=2):
+            if selected_row_number is not None and row_number != selected_row_number:
+                continue
+            if selected_row_number is not None:
+                selected_row_found = True
             title = _clean_cell(row.get(mapping["title"]))
             body = _clean_cell(row.get(mapping["body"]))
             if not title and not body:
@@ -131,6 +147,12 @@ def load_jobs(path: str | Path, defaults: SheetDefaults | None = None) -> list[P
                 job.message = "시트에서 이미 완료로 표시됨"
             jobs.append(job)
 
+    if selected_row_number is not None and not selected_row_found:
+        raise SheetSchemaError(f"입력한 시트 행 {selected_row_number}을 찾지 못했습니다")
     if not jobs:
+        if selected_row_number is not None:
+            raise SheetSchemaError(
+                f"시트 행 {selected_row_number}에 처리할 원고가 없습니다"
+            )
         raise SheetSchemaError("처리할 글이 없습니다")
     return jobs

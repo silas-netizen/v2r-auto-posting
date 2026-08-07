@@ -58,3 +58,24 @@ def test_handles_whitespace_around_headers(tmp_path: Path) -> None:
 
     assert jobs[0].title == "제목 A"
     assert jobs[0].body == "본문 A"
+
+
+def test_loads_only_the_requested_google_sheet_row(tmp_path: Path) -> None:
+    path = write_csv(
+        tmp_path,
+        "키워드,제목,본문\n첫째,제목 A,본문 A\n둘째,제목 B,본문 B\n",
+    )
+
+    jobs = load_jobs(path, selected_row_number=3)
+
+    assert len(jobs) == 1
+    assert jobs[0].row_number == 3
+    assert jobs[0].keyword == "둘째"
+    assert jobs[0].title == "제목 B"
+
+
+def test_requested_google_sheet_row_must_exist(tmp_path: Path) -> None:
+    path = write_csv(tmp_path, "제목,본문\n제목 A,본문 A\n")
+
+    with pytest.raises(SheetSchemaError, match="행 9"):
+        load_jobs(path, selected_row_number=9)

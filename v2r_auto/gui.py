@@ -90,6 +90,7 @@ class AutomationApp(tk.Tk):
     def _create_variables(self) -> None:
         self.sheet_url = tk.StringVar()
         self.local_csv = tk.StringVar()
+        self.sheet_row = tk.StringVar()
         self.email = tk.StringVar()
         self.password = tk.StringVar()
         self.default_cafe = tk.StringVar()
@@ -104,7 +105,7 @@ class AutomationApp(tk.Tk):
         outer = ttk.Frame(self, padding=16)
         outer.pack(fill=tk.BOTH, expand=True)
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(9, weight=1)
+        outer.rowconfigure(10, weight=1)
 
         ttk.Label(outer, text=APP_NAME, font=("", 18, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 14)
@@ -117,11 +118,17 @@ class AutomationApp(tk.Tk):
             self.local_csv,
             button=("찾기", self._choose_csv),
         )
-        self._entry_row(outer, 3, "V2R 아이디", self.email)
-        self._entry_row(outer, 4, "V2R 비밀번호", self.password, show="*")
+        self._entry_row(
+            outer,
+            3,
+            "시트 행 번호 (선택)",
+            self.sheet_row,
+        )
+        self._entry_row(outer, 4, "V2R 아이디", self.email)
+        self._entry_row(outer, 5, "V2R 비밀번호", self.password, show="*")
 
         defaults = ttk.LabelFrame(outer, text="시트에 값이 없을 때 사용할 기본값", padding=10)
-        defaults.grid(row=5, column=0, columnspan=3, sticky="ew", pady=10)
+        defaults.grid(row=6, column=0, columnspan=3, sticky="ew", pady=10)
         for column in range(6):
             defaults.columnconfigure(column, weight=1 if column % 2 else 0)
         ttk.Label(defaults, text="카페").grid(row=0, column=0, padx=(0, 5))
@@ -132,7 +139,7 @@ class AutomationApp(tk.Tk):
         ttk.Entry(defaults, textvariable=self.default_account).grid(row=0, column=5, sticky="ew")
 
         options = ttk.Frame(outer)
-        options.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        options.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         ttk.Checkbutton(
             options,
             text="검증 모드(실제 발행하지 않음)",
@@ -153,7 +160,7 @@ class AutomationApp(tk.Tk):
         ).pack(side=tk.LEFT, padx=5)
 
         actions = ttk.Frame(outer)
-        actions.grid(row=7, column=0, columnspan=3, sticky="ew")
+        actions.grid(row=8, column=0, columnspan=3, sticky="ew")
         ttk.Button(actions, text="1. 로그인 준비", command=self._open_login).pack(side=tk.LEFT)
         ttk.Button(actions, text="2. 데이터 확인", command=self._check_data).pack(
             side=tk.LEFT, padx=6
@@ -170,7 +177,7 @@ class AutomationApp(tk.Tk):
         )
 
         progress_frame = ttk.Frame(outer)
-        progress_frame.grid(row=8, column=0, columnspan=3, sticky="ew", pady=10)
+        progress_frame.grid(row=9, column=0, columnspan=3, sticky="ew", pady=10)
         progress_frame.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_frame, maximum=100)
         self.progress.grid(row=0, column=0, sticky="ew")
@@ -179,7 +186,7 @@ class AutomationApp(tk.Tk):
         )
 
         log_frame = ttk.LabelFrame(outer, text="실시간 로그", padding=8)
-        log_frame.grid(row=9, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=10, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state=tk.DISABLED)
@@ -230,15 +237,34 @@ class AutomationApp(tk.Tk):
         local_csv: str,
         sheet_url: str,
         defaults: SheetDefaults,
+        selected_row_number: int | None,
     ):
         return load_jobs(
             self._get_csv_path(local_csv, sheet_url),
             defaults,
+            selected_row_number,
         )
+
+    def _selected_row_number(self) -> int | None:
+        value = self.sheet_row.get().strip()
+        if not value:
+            return None
+        try:
+            row_number = int(value)
+        except ValueError as exc:
+            raise ValueError("시트 행 번호는 2 이상의 숫자로 입력하세요") from exc
+        if row_number < 2:
+            raise ValueError("시트 행 번호는 2 이상의 숫자로 입력하세요")
+        return row_number
 
     def _check_data(self) -> None:
         local_csv = self.local_csv.get().strip()
         sheet_url = self.sheet_url.get().strip()
+        try:
+            selected_row_number = self._selected_row_number()
+        except ValueError as exc:
+            messagebox.showerror("입력 오류", str(exc))
+            return
         defaults = SheetDefaults(
             cafe=self.default_cafe.get(),
             board=self.default_board.get(),
@@ -246,7 +272,12 @@ class AutomationApp(tk.Tk):
         )
 
         def work() -> None:
-            jobs = self._load_jobs(local_csv, sheet_url, defaults)
+            jobs = self._load_jobs(
+                local_csv,
+                sheet_url,
+                defaults,
+                selected_row_number,
+            )
             errors = sum(bool(job.validate()) for job in jobs)
             self.logger.info("데이터 확인 완료: %s건, 필수값 누락 %s건", len(jobs), errors)
             self.ui_queue.put(
@@ -267,8 +298,12 @@ class AutomationApp(tk.Tk):
                 return
         try:
             delay_seconds = max(10, self.delay_seconds.get())
+            selected_row_number = self._selected_row_number()
         except (tk.TclError, ValueError):
-            messagebox.showerror("입력 오류", "글 사이 간격은 숫자로 입력하세요")
+            messagebox.showerror(
+                "입력 오류",
+                "글 사이 간격과 시트 행 번호는 올바른 숫자로 입력하세요",
+            )
             return
         self.stop_event.clear()
         self.start_button.configure(state=tk.DISABLED)
@@ -292,7 +327,12 @@ class AutomationApp(tk.Tk):
 
         def work() -> None:
             try:
-                jobs = self._load_jobs(local_csv, sheet_url, defaults)
+                jobs = self._load_jobs(
+                    local_csv,
+                    sheet_url,
+                    defaults,
+                    selected_row_number,
+                )
                 runner = AutomationRunner(
                     browser=self.browser,
                     history_path=self.data_dir / "history.json",
