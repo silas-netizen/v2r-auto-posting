@@ -21,11 +21,11 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
+from .content import ParsedArticle
 from .models import PostJob
 
 
 V2R_LIST_URL = "https://v2r.daboja.im/nc/board?view=list"
-V2R_WRITE_URL = "https://v2r.daboja.im/nc/write"
 
 
 class AutomationError(RuntimeError):
@@ -317,14 +317,20 @@ class V2RBrowser:
         editor.send_keys(body)
         self.driver.switch_to.default_content()
 
-    def fill_post(self, job: PostJob, dry_run: bool) -> None:
+    def open_se_one_writer(self) -> None:
+        """Open the only supported new-post flow: 글쓰기 → SE-ONE 글쓰기."""
         self.start()
         assert self.driver
-        self._navigate(V2R_WRITE_URL, self.v2r_handle)
+        self._navigate(V2R_LIST_URL, self.v2r_handle)
         self.v2r_handle = self.driver.current_window_handle
         self.wait.until(lambda driver: driver.execute_script("return document.readyState") == "complete")
+        self._click_text(("글쓰기",), exact_only=True)
+        self._click_text(("SE-ONE 글쓰기",), exact_only=True)
+        self.wait.until(lambda driver: driver.execute_script("return document.readyState") == "complete")
 
+    def _fill_se_one_fields(self, job: PostJob) -> None:
         self._select_option("카페", job.cafe)
+        # SE-ONE requires an account before it enables the board selector.
         if job.account:
             self._select_option("계정", job.account)
         self._select_option("게시판", job.board)
@@ -334,31 +340,35 @@ class V2RBrowser:
             "input[placeholder*='제목'], textarea[placeholder*='제목']",
         )
         self._fill_editor(job.body)
-
         if job.tags:
             self._fill_input(
                 "태그",
                 ", ".join(job.tags),
                 "input[placeholder*='태그']",
             )
+
+    def fill_post(self, job: PostJob, dry_run: bool) -> None:
+        self.open_se_one_writer()
+
         if job.publish_at:
             self.logger.warning(
                 "행 %s 예약시간 '%s'은 화면 형식 확인이 필요해 즉시 발행으로 유지합니다",
                 job.row_number,
                 job.publish_at,
             )
+        self._fill_se_one_fields(job)
 
         if dry_run:
             self.logger.info("행 %s 입력 검증 완료(저장하지 않음)", job.row_number)
             return
 
-        self._click_text(("저장",), exact_only=True)
+        self._click_text(("등록",), exact_only=True)
         try:
             self.wait.until(
-                lambda driver: "/nc/write" not in driver.current_url
+                lambda driver: "/nc/board" in driver.current_url
                 or any(
                     word in driver.page_source
-                    for word in ("저장되었습니다", "발행되었습니다", "작성 완료")
+                    for word in ("등록되었습니다", "발행되었습니다", "작성 완료")
                 )
             )
         except TimeoutException as exc:
@@ -366,3 +376,18 @@ class V2RBrowser:
                 "저장 후 완료 신호를 확인하지 못했습니다. 목록에서 결과를 확인하세요"
             ) from exc
         job.post_url = self.driver.current_url
+
+    def open_revision_reservation(self) -> None:
+        """Open the revision editor for the source post currently being viewed."""
+        self._click_text(("수정 글 예약",), exact_only=True)
+        self.wait.until(lambda driver: driver.execute_script("return document.readyState") == "complete")
+
+    def fill_revision_article(self, article: ParsedArticle) -> None:
+        """Fill content only; publication timing remains unchanged by design."""
+        self._fill_input(
+            "제목",
+            article.title,
+            "input[placeholder*='제목'], textarea[placeholder*='제목']",
+        )
+        self._fill_editor(article.body)
+        self._fill_input("태그", article.tag, "input[placeholder*='태그']")
