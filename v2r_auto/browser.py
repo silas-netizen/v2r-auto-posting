@@ -38,6 +38,7 @@ class BrowserConfig:
     profile_dir: Path
     download_dir: Path
     timeout_seconds: int = 20
+    debugger_address: str | None = None
 
 
 class V2RBrowser:
@@ -54,25 +55,30 @@ class V2RBrowser:
         self.config.profile_dir.mkdir(parents=True, exist_ok=True)
         self.config.download_dir.mkdir(parents=True, exist_ok=True)
         options = ChromeOptions()
-        options.add_argument(f"--user-data-dir={self.config.profile_dir}")
-        options.add_argument("--start-maximized")
-        options.add_argument("--disable-notifications")
-        options.add_experimental_option(
-            "prefs",
-            {
-                "download.default_directory": str(self.config.download_dir.resolve()),
-                "download.prompt_for_download": False,
-                "download.directory_upgrade": True,
-                "safebrowsing.enabled": True,
-            },
-        )
-        self.logger.info("Chrome을 시작합니다")
+        if self.config.debugger_address:
+            options.debugger_address = self.config.debugger_address
+            self.logger.info("이미 열린 Chrome에 연결합니다")
+        else:
+            options.add_argument(f"--user-data-dir={self.config.profile_dir}")
+            options.add_argument("--start-maximized")
+            options.add_argument("--disable-notifications")
+            options.add_experimental_option(
+                "prefs",
+                {
+                    "download.default_directory": str(self.config.download_dir.resolve()),
+                    "download.prompt_for_download": False,
+                    "download.directory_upgrade": True,
+                    "safebrowsing.enabled": True,
+                },
+            )
+            self.logger.info("Chrome을 시작합니다")
         self.driver = webdriver.Chrome(options=options)
         self.v2r_handle = self.driver.current_window_handle
 
     def close(self) -> None:
         if self.driver:
-            self.driver.quit()
+            if not self.config.debugger_address:
+                self.driver.quit()
             self.driver = None
             self.v2r_handle = None
             self.google_handle = None
