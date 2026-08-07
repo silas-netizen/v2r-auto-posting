@@ -26,6 +26,7 @@ from .models import PostJob
 
 
 V2R_LIST_URL = "https://v2r.daboja.im/nc/board?view=list"
+V2R_SE_ONE_URL = "https://v2r.daboja.im/nc/seone"
 
 
 class AutomationError(RuntimeError):
@@ -318,14 +319,11 @@ class V2RBrowser:
         self.driver.switch_to.default_content()
 
     def open_se_one_writer(self) -> None:
-        """Open the only supported new-post flow: 글쓰기 → SE-ONE 글쓰기."""
+        """Open the only supported new-post flow using V2R's direct SE-ONE URL."""
         self.start()
         assert self.driver
-        self._navigate(V2R_LIST_URL, self.v2r_handle)
+        self._navigate(V2R_SE_ONE_URL, self.v2r_handle)
         self.v2r_handle = self.driver.current_window_handle
-        self.wait.until(lambda driver: driver.execute_script("return document.readyState") == "complete")
-        self._click_text(("글쓰기",), exact_only=True)
-        self._click_text(("SE-ONE 글쓰기",), exact_only=True)
         self.wait.until(lambda driver: driver.execute_script("return document.readyState") == "complete")
 
     def _fill_se_one_fields(self, job: PostJob) -> None:

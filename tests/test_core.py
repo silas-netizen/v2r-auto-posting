@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from v2r_auto.browser import V2RBrowser
+from v2r_auto.browser import V2R_SE_ONE_URL, V2RBrowser
 from v2r_auto.history import HistoryCorruptedError, HistoryStore
 from v2r_auto.models import JobStatus, PostJob, RunResult
 from v2r_auto.report import write_report
@@ -27,6 +27,10 @@ def test_google_sheet_export_url() -> None:
         "https://docs.google.com/spreadsheets/d/abc_123/edit?gid=987#gid=987"
     )
     assert url == "https://docs.google.com/spreadsheets/d/abc_123/export?format=csv&gid=987"
+
+
+def test_se_one_uses_direct_v2r_url() -> None:
+    assert V2R_SE_ONE_URL == "https://v2r.daboja.im/nc/seone"
 
 
 def test_history_round_trip(tmp_path: Path) -> None:
