@@ -1,11 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_all
+
+selenium_datas, selenium_binaries, selenium_hiddenimports = collect_all("selenium")
+
 a = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=[],
+    binaries=selenium_binaries,
+    datas=selenium_datas,
+    hiddenimports=selenium_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
