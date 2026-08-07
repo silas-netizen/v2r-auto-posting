@@ -1,0 +1,4 @@
+{
+  "name": "v2r-auto-posting",
+  "install": "./scripts/cloud-agent-install.sh"
+}

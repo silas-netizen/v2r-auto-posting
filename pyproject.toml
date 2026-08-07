@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "v2r-auto-posting"
+version = "0.1.0"
+description = "V2R 자동 글 발행 프로그램 - automated multi-platform blog post publisher"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+    "requests>=2.32",
+    "PyYAML>=6.0",
+    "python-frontmatter>=1.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.6",
+    "responses>=0.25",
+]
+
+[project.scripts]
+v2r-autopost = "v2r_autopost.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]

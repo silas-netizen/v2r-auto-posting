@@ -1,0 +1,25 @@
+# V2R 자동 글 발행 프로그램 - example configuration.
+#
+# Copy this file to config/config.yaml and adjust. Secrets are read from
+# environment variables via ${VAR} placeholders, so nothing sensitive needs to
+# be committed. Run with:  v2r-autopost --config config/config.yaml publish
+
+posts_dir: posts
+
+# Optional: interval hint (seconds) for the `run` command.
+schedule_cron: null
+
+targets:
+  # Console dry-run target: prints what would be published. No credentials.
+  - name: console
+    type: dryrun
+    enabled: true
+
+  # WordPress target using the REST API + an application password.
+  # Enable this and provide the environment variables to publish for real.
+  - name: my-wordpress
+    type: wordpress
+    enabled: false
+    site_url: ${WORDPRESS_SITE_URL}
+    username: ${WORDPRESS_USERNAME}
+    app_password: ${WORDPRESS_APP_PASSWORD}
