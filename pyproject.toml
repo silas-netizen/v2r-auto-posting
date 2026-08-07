@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "v2r-auto-posting"
+version = "0.1.0"
+description = "Google Sheets to V2R posting automation for Windows"
+requires-python = ">=3.11"
+dependencies = [
+  "selenium>=4.34",
+]
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6.14"]
+test = ["pytest>=8.4"]
+
+[tool.setuptools]
+packages = ["v2r_auto"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
