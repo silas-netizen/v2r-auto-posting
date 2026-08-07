@@ -370,6 +370,11 @@ class V2RBrowser:
         self._navigate(V2R_SE_ONE_URL, self.v2r_handle)
         self.v2r_handle = self.driver.current_window_handle
         self.wait.until(lambda driver: driver.execute_script("return document.readyState") == "complete")
+        self.wait.until(
+            EC.visibility_of_element_located(
+                (By.CSS_SELECTOR, "input[placeholder='카페 검색']")
+            )
+        )
 
     def _fill_se_one_fields(self, job: PostJob) -> None:
         self._select_option("카페", job.cafe)
