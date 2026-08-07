@@ -274,6 +274,45 @@ class V2RBrowser:
         if not value:
             return
         assert self.driver
+        se_one_placeholders = {
+            "카페": "카페 검색",
+            "게시판": "게시판 검색",
+            "말머리": "말머리 검색",
+        }
+        if label in se_one_placeholders:
+            selectors = [f"input[placeholder='{se_one_placeholders[label]}']"]
+        elif label == "계정":
+            selectors = ["input[placeholder='닉네임 or 계정 검색']"]
+        else:
+            selectors = []
+        for selector in selectors:
+            inputs = [
+                item
+                for item in self.driver.find_elements(By.CSS_SELECTOR, selector)
+                if item.is_displayed()
+            ]
+            if inputs:
+                input_element = inputs[0]
+                input_element.click()
+                input_element.send_keys(Keys.CONTROL, "a")
+                input_element.send_keys(value)
+                break
+        else:
+            input_element = None
+
+        if input_element is not None:
+            value_literal = self._xpath_literal(value)
+            option_xpath = (
+                f"//*[@role='option' or self::li or self::div]"
+                f"[normalize-space()={value_literal}]"
+            )
+            try:
+                option = self.wait.until(EC.element_to_be_clickable((By.XPATH, option_xpath)))
+                option.click()
+                return
+            except TimeoutException as exc:
+                raise AutomationError(f"'{label}'에서 '{value}' 항목을 찾지 못했습니다") from exc
+
         label_literal = self._xpath_literal(label)
         label_elements = self.driver.find_elements(
             By.XPATH,
