@@ -29,6 +29,10 @@ def _normalize(value: str) -> str:
     return re.sub(r"[\s_\-()]+", "", value or "").strip().lower()
 
 
+def _clean_cell(value: str | None) -> str:
+    return (value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
 NORMALIZED_ALIASES = {
     key: {_normalize(alias) for alias in aliases} for key, aliases in ALIASES.items()
 }
@@ -100,26 +104,26 @@ def load_jobs(path: str | Path, defaults: SheetDefaults | None = None) -> list[P
         comment_headers = _comment_headers(headers)
         jobs: list[PostJob] = []
         for row_number, row in enumerate(reader, start=2):
-            title = (row.get(mapping["title"]) or "").strip()
-            body = (row.get(mapping["body"]) or "").strip()
+            title = _clean_cell(row.get(mapping["title"]))
+            body = _clean_cell(row.get(mapping["body"]))
             if not title and not body:
                 continue
 
-            status_value = (row.get(mapping.get("status", ""), "") or "").strip()
+            status_value = _clean_cell(row.get(mapping.get("status", ""), ""))
             job = PostJob(
                 row_number=row_number,
-                keyword=(row.get(mapping.get("keyword", ""), "") or "").strip(),
+                keyword=_clean_cell(row.get(mapping.get("keyword", ""), "")),
                 title=title,
                 body=body,
-                cafe=(row.get(mapping.get("cafe", ""), "") or defaults.cafe).strip(),
-                board=(row.get(mapping.get("board", ""), "") or defaults.board).strip(),
-                account=(row.get(mapping.get("account", ""), "") or defaults.account).strip(),
-                publish_at=(row.get(mapping.get("publish_at", ""), "") or "").strip(),
+                cafe=_clean_cell(row.get(mapping.get("cafe", ""), "") or defaults.cafe),
+                board=_clean_cell(row.get(mapping.get("board", ""), "") or defaults.board),
+                account=_clean_cell(row.get(mapping.get("account", ""), "") or defaults.account),
+                publish_at=_clean_cell(row.get(mapping.get("publish_at", ""), "")),
                 tags=_split_tags(row.get(mapping.get("tags", ""), "") or ""),
                 comments=[
-                    (row.get(header) or "").strip()
+                    _clean_cell(row.get(header))
                     for header in comment_headers
-                    if (row.get(header) or "").strip()
+                    if _clean_cell(row.get(header))
                 ],
             )
             if _is_completed(status_value):
