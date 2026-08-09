@@ -30,6 +30,7 @@ from .models import AffiliateJob, PostJob
 V2R_LIST_URL = "https://v2r.daboja.im/nc/board?view=list"
 V2R_SE_ONE_URL = "https://v2r.daboja.im/nc/seone"
 AFFILIATE_CAFE_DELAYS = {"씨씨앙": 4, "양평맘": 10}
+AFFILIATE_CAFE_BOARDS = {"씨씨앙": "자유 수다방", "양평맘": "자유 수다방"}
 
 
 class AutomationError(RuntimeError):
@@ -272,9 +273,9 @@ class V2RBrowser:
         candidate = cls._normalize_option_text(option_text)
         if candidate == wanted:
             return True
-        # Cafe display names contain extra branding, but account IDs must never
-        # choose a similarly spelled account.
-        return label != "계정" and bool(wanted) and wanted in candidate
+        # Only the cafe display name contains extra branding. Board and account
+        # values must always be selected by their exact displayed text.
+        return label == "카페" and bool(wanted) and wanted in candidate
 
     def _click_matching_option(self, label: str, value: str) -> None:
         """Choose a visible drop-down item by exact or whitespace-insensitive text."""
@@ -425,34 +426,6 @@ class V2RBrowser:
 
         self._click_matching_option(label, value)
 
-    def _select_only_option(self, label: str) -> None:
-        """Select the sole available option for an affiliate cafe's fixed board."""
-        assert self.driver
-        placeholders = {
-            "게시판": "input[placeholder*='게시판'], input[name*='board' i]",
-        }
-        selector = placeholders.get(label)
-        if not selector:
-            raise AutomationError(f"자동 선택을 지원하지 않는 항목입니다: {label}")
-        inputs = [
-            item
-            for item in self.driver.find_elements(
-                By.CSS_SELECTOR, selector
-            )
-            if item.is_displayed()
-        ]
-        if not inputs:
-            raise AutomationError(f"선택란을 찾지 못했습니다: {label}")
-        input_element = inputs[0]
-        input_element.click()
-        # V2R's board menu uses custom div items rather than native option/li
-        # elements. Each affiliate cafe exposes one board, so choose its first item.
-        self.wait.until(
-            lambda driver: input_element.get_attribute("aria-expanded") in {"true", None}
-        )
-        input_element.send_keys(Keys.ARROW_DOWN)
-        input_element.send_keys(Keys.ENTER)
-
     def _fill_editor(self, body: str) -> None:
         assert self.driver
         editors = [
@@ -530,8 +503,11 @@ class V2RBrowser:
             raise AutomationError("배정된 일상 글이 없습니다")
         self._select_option("카페", job.cafe)
         self._select_option("계정", job.account)
-        # 씨씨앙과 양평맘은 각각 사용할 수 있는 게시판이 하나뿐입니다.
-        self._select_only_option("게시판")
+        try:
+            board = AFFILIATE_CAFE_BOARDS[job.cafe]
+        except KeyError as exc:
+            raise AutomationError(f"제휴 카페 게시판을 알 수 없습니다: {job.cafe}") from exc
+        self._select_option("게시판", board)
         self._fill_input(
             "제목",
             job.daily_post.title,
