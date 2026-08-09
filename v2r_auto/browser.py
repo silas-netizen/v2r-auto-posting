@@ -33,7 +33,7 @@ V2R_SE_ONE_URL = "https://v2r.daboja.im/nc/seone"
 AFFILIATE_CAFE_DELAYS = {"씨씨앙": 4, "양평맘": 10}
 AFFILIATE_CAFE_BOARDS = {"씨씨앙": "자유 수다방", "양평맘": "이모저모 이야기"}
 AFFILIATE_CAFE_SEARCH_TERMS = {"씨씨앙": "씨씨앙", "양평맘": "양평"}
-SE_ONE_FIELD_INDEX = {"카페": 0, "계정": 1, "게시판": 2, "말머리": 3}
+SE_ONE_SELECTION_INDEX = {"카페": 0, "계정": 1, "게시판": 2, "말머리": 3}
 
 
 class AutomationError(RuntimeError):
@@ -298,31 +298,56 @@ class V2RBrowser:
         input_element.send_keys(Keys.ARROW_DOWN)
         input_element.send_keys(Keys.ENTER)
 
-    def _visible_se_one_inputs(self):
+    def _visible_se_one_selections(self):
         assert self.driver
         return [
             item
-            for item in self.driver.find_elements(By.CSS_SELECTOR, "input")
+            for item in self.driver.find_elements(By.CSS_SELECTOR, ".n-base-selection")
             if item.is_displayed()
-            and (item.get_attribute("type") or "text").lower()
-            not in {"hidden", "checkbox", "radio", "button", "submit"}
         ]
 
-    def _se_one_field_input(self, label: str, selectors: list[str]):
+    def _se_one_option_matches(self, label: str, value: str, option_text: str) -> bool:
+        if label == "계정":
+            return any(
+                self._normalize_option_text(line) == self._normalize_option_text(value)
+                for line in option_text.splitlines()
+            )
+        return self._option_text_matches(label, value, option_text)
+
+    def _select_se_one_option(self, label: str, value: str, selection_index: int) -> None:
         assert self.driver
-        for selector in selectors:
-            inputs = [
+        selections = self._visible_se_one_selections()
+        if len(selections) <= selection_index:
+            raise AutomationError(f"SE-ONE {label} 선택칸을 찾지 못했습니다")
+        selection = selections[selection_index]
+        self.driver.execute_script(
+            "arguments[0].scrollIntoView({block: 'center'});", selection
+        )
+        selection.click()
+
+        def option():
+            options = [
                 item
-                for item in self.driver.find_elements(By.CSS_SELECTOR, selector)
+                for item in self.driver.find_elements(
+                    By.CSS_SELECTOR, ".n-base-select-option"
+                )
                 if item.is_displayed()
             ]
-            if inputs:
-                return inputs[0]
-        field_index = SE_ONE_FIELD_INDEX.get(label)
-        visible_inputs = self._visible_se_one_inputs()
-        if field_index is not None and len(visible_inputs) > field_index:
-            return visible_inputs[field_index]
-        return None
+            return next(
+                (
+                    item
+                    for item in options
+                    if self._se_one_option_matches(label, value, item.text)
+                ),
+                False,
+            )
+
+        try:
+            self.wait.until(lambda driver: option()).click()
+        except TimeoutException as exc:
+            raise AutomationError(
+                f"SE-ONE {label} 목록에서 '{value}' 항목을 찾지 못했습니다"
+            ) from exc
 
     def _click_text(self, texts: tuple[str, ...], exact_only: bool = False) -> None:
         assert self.driver
@@ -380,6 +405,13 @@ class V2RBrowser:
         if not value:
             return
         assert self.driver
+        if label in SE_ONE_SELECTION_INDEX:
+            self._select_se_one_option(
+                label,
+                value,
+                SE_ONE_SELECTION_INDEX[label],
+            )
+            return
         se_one_placeholders = {
             "카페": (
                 "input[placeholder*='카페']",
@@ -403,7 +435,16 @@ class V2RBrowser:
             ]
         else:
             selectors = []
-        input_element = self._se_one_field_input(label, selectors)
+        input_element = None
+        for selector in selectors:
+            inputs = [
+                item
+                for item in self.driver.find_elements(By.CSS_SELECTOR, selector)
+                if item.is_displayed()
+            ]
+            if inputs:
+                input_element = inputs[0]
+                break
         if input_element is not None:
             input_element.click()
             input_element.send_keys(Keys.CONTROL, "a")
@@ -442,13 +483,20 @@ class V2RBrowser:
 
     def _fill_editor(self, body: str) -> None:
         assert self.driver
-        editors = [
+        smart_editor_iframes = [
+            element
+            for element in self.driver.find_elements(
+                By.CSS_SELECTOR, "iframe[title*='스마트 에디터']"
+            )
+            if element.is_displayed()
+        ]
+        editors = smart_editor_iframes or [
             element
             for element in self.driver.find_elements(
                 By.CSS_SELECTOR,
                 "[contenteditable='true'], .ProseMirror, .ql-editor, .tox-edit-area iframe",
             )
-            if element.is_displayed()
+            if element.is_displayed() and element.get_attribute("title") != "Channel chat"
         ]
         if not editors:
             raise AutomationError("본문 편집기를 찾지 못했습니다")
@@ -470,7 +518,7 @@ class V2RBrowser:
         self.wait.until(lambda driver: driver.execute_script("return document.readyState") == "complete")
         try:
             self.wait.until(
-                lambda driver: len(self._visible_se_one_inputs()) >= 4
+                lambda driver: len(self._visible_se_one_selections()) >= 4
             )
         except TimeoutException as exc:
             visible_inputs = self.driver.execute_script(
@@ -583,12 +631,13 @@ class V2RBrowser:
             if method == "Network.requestWillBeSent":
                 request = params.get("request", {})
                 url = str(request.get("url", ""))
-                if not url.startswith("https://v2r.daboja.im/"):
-                    continue
                 parsed = urlparse(url)
+                if parsed.netloc != "api-v2r.daboja.im":
+                    continue
                 request_id = str(params.get("requestId", ""))
                 requests[request_id] = {
                     "method": request.get("method", ""),
+                    "host": parsed.netloc,
                     "path": parsed.path,
                     "query_keys": sorted(parse_qs(parsed.query).keys()),
                     "payload": self._request_payload_summary(request.get("postData")),
@@ -762,6 +811,9 @@ class V2RBrowser:
         input_element.send_keys(Keys.CONTROL, "a")
         input_element.send_keys(content)
 
+    def _select_comment_account(self, account: str) -> None:
+        self._select_se_one_option("계정", account, selection_index=4)
+
     def _click_reply_for(self, parent_text: str) -> None:
         assert self.driver
         literal = self._xpath_literal(parent_text)
@@ -816,7 +868,7 @@ class V2RBrowser:
                 self._click_reply_for(parent_text)
             account = account_map.get(node.label)
             if account:
-                self._select_option("계정", account)
+                self._select_comment_account(account)
             self._fill_comment_input(node.text)
             self._reserve_comment()
             for child in node.children:
