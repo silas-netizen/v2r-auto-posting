@@ -1,8 +1,10 @@
 import logging
+import random
 import threading
 from pathlib import Path
 
-from v2r_auto.models import JobStatus
+from v2r_auto.daily_posts import assign_daily_posts, load_daily_posts
+from v2r_auto.models import DailyPost, JobStatus
 from v2r_auto.runner import AffiliateRunner
 from v2r_auto.sheet import load_affiliate_jobs
 
@@ -55,6 +57,24 @@ def test_missing_values_in_columns_a_to_e_skip_affiliate_row(tmp_path: Path) -> 
     assert jobs[0].keyword == "정상 키워드"
 
 
+def test_daily_posts_are_matched_to_cafe_without_reuse(tmp_path: Path) -> None:
+    path = tmp_path / "daily.csv"
+    path.write_text(
+        "번호,제목,내용,카페\n"
+        '1,분류,"제목 : 첫 일상\n본문 : 첫 본문",양평맘\n'
+        '2,분류,"제목 : 둘 일상\n본문 : 둘 본문",양평맘\n',
+        encoding="utf-8-sig",
+    )
+    jobs = [
+        load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0],
+        load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0],
+    ]
+
+    assign_daily_posts(jobs, load_daily_posts(path), random.Random(1))
+
+    assert {job.daily_post.title for job in jobs if job.daily_post} == {"첫 일상", "둘 일상"}
+
+
 class FakeAffiliateBrowser:
     def __init__(self) -> None:
         self.published = []
@@ -84,6 +104,10 @@ def test_affiliate_runner_uses_single_revision_flow(tmp_path: Path) -> None:
         dry_run=True,
         stop_event=threading.Event(),
         progress=lambda current, total: None,
+        daily_posts=[
+            DailyPost(row_number=2, cafe="양평맘", title="일상", body="내용"),
+        ],
+        source_sheet_url="https://docs.google.com/spreadsheets/d/example/edit?gid=0",
     )
 
     assert result.succeeded == 1

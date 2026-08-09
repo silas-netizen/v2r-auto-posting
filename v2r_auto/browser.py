@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -16,7 +17,7 @@ from selenium.common.exceptions import (
     TimeoutException,
     UnexpectedAlertPresentException,
 )
-from selenium.webdriver import ChromeOptions
+from selenium.webdriver import ActionChains, ChromeOptions
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
@@ -170,6 +171,47 @@ class V2RBrowser:
         raise AutomationError(
             "시트를 내려받지 못했습니다. 공유 권한 또는 Google 로그인을 확인하세요"
         )
+
+    def update_completion_link(
+        self,
+        sheet_url: str,
+        row_number: int,
+        completion_url: str,
+    ) -> None:
+        """Write the published revision URL into column F of the source Sheet."""
+        self.start()
+        assert self.driver
+        if not completion_url:
+            raise AutomationError("F열에 입력할 완료 링크가 없습니다")
+        parsed = urlparse(sheet_url)
+        gid = parse_qs(parsed.query).get("gid", ["0"])[0]
+        if parsed.fragment.startswith("gid="):
+            gid = parsed.fragment.split("=", 1)[1].split("&", 1)[0]
+        sheet_url_with_range = (
+            f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            f"?{parsed.query}#gid={gid}&range=F{row_number}"
+        )
+        self._navigate(sheet_url_with_range, self.google_handle)
+        self.google_handle = self.driver.current_window_handle
+        cell_label = f"F{row_number}"
+        cell = self.wait.until(
+            lambda driver: next(
+                (
+                    item
+                    for item in driver.find_elements(
+                        By.CSS_SELECTOR, f"[aria-label='{cell_label}']"
+                    )
+                    if item.is_displayed()
+                ),
+                None,
+            )
+        )
+        ActionChains(self.driver).double_click(cell).perform()
+        cell.send_keys(Keys.CONTROL, "a")
+        cell.send_keys(completion_url)
+        cell.send_keys(Keys.ENTER)
+        self.logger.info("시트 F%s에 완료 링크를 입력했습니다", row_number)
+        self._switch_to_handle(self.v2r_handle)
 
     def ensure_v2r_login(self, email: str, password: str) -> None:
         self.start()
@@ -431,17 +473,19 @@ class V2RBrowser:
                 "input[placeholder*='태그']",
             )
 
-    def _fill_affiliate_daily_fields(self, job: AffiliateJob, daily_title: str) -> None:
+    def _fill_affiliate_daily_fields(self, job: AffiliateJob) -> None:
+        if job.daily_post is None:
+            raise AutomationError("배정된 일상 글이 없습니다")
         self._select_option("카페", job.cafe)
         self._select_option("계정", job.account)
         # 씨씨앙과 양평맘은 각각 사용할 수 있는 게시판이 하나뿐입니다.
         self._select_only_option("게시판")
         self._fill_input(
             "제목",
-            daily_title,
+            job.daily_post.title,
             "input[placeholder*='제목'], textarea[placeholder*='제목']",
         )
-        self._fill_editor("오늘도 편안한 하루 보내세요.")
+        self._fill_editor(job.daily_post.body)
 
     def fill_post(self, job: PostJob, dry_run: bool) -> None:
         self.open_se_one_writer()
@@ -458,10 +502,14 @@ class V2RBrowser:
             self.logger.info("행 %s 입력 검증 완료(저장하지 않음)", job.row_number)
             return
 
+        job.post_url = self._submit_registration()
+
+    def _submit_registration(self) -> str:
         self._click_text(("등록",), exact_only=True)
         try:
             self.wait.until(
                 lambda driver: "/nc/board" in driver.current_url
+                or "/nc/articleDetail/" in driver.current_url
                 or any(
                     word in driver.page_source
                     for word in ("등록되었습니다", "발행되었습니다", "작성 완료")
@@ -471,7 +519,8 @@ class V2RBrowser:
             raise AutomationError(
                 "저장 후 완료 신호를 확인하지 못했습니다. 목록에서 결과를 확인하세요"
             ) from exc
-        job.post_url = self.driver.current_url
+        assert self.driver
+        return self.driver.current_url
 
     def open_revision_reservation(self) -> None:
         """Open the revision editor for the source post currently being viewed."""
@@ -538,18 +587,93 @@ class V2RBrowser:
         )
         self.logger.info("%s 수정 글 예약 시간 설정: %s", cafe, scheduled_at.strftime("%m-%d %H:%M"))
 
-    def _affiliate_comment_mapping_ready(self, job: AffiliateJob) -> None:
-        raise AutomationError(
-            "제휴 댓글 계정 6개 매핑이 아직 프로그램 설정에 등록되지 않았습니다. "
-            "일상 글은 등록하지 않았습니다."
+    def _fill_comment_input(self, content: str) -> None:
+        assert self.driver
+        candidates = [
+            item
+            for item in self.driver.find_elements(
+                By.CSS_SELECTOR, "textarea, [contenteditable='true']"
+            )
+            if item.is_displayed()
+            and "ProseMirror" not in (item.get_attribute("class") or "")
+        ]
+        if not candidates:
+            raise AutomationError("댓글 입력창을 찾지 못했습니다")
+        input_element = candidates[-1]
+        input_element.click()
+        input_element.send_keys(Keys.CONTROL, "a")
+        input_element.send_keys(content)
+
+    def _click_reply_for(self, parent_text: str) -> None:
+        assert self.driver
+        literal = self._xpath_literal(parent_text)
+        parents = self.driver.find_elements(
+            By.XPATH,
+            f"//*[contains(normalize-space(), {literal})]",
         )
+        for element in parents:
+            if not element.is_displayed():
+                continue
+            ancestor = element
+            for _ in range(6):
+                buttons = ancestor.find_elements(
+                    By.XPATH,
+                    ".//*[self::button or @role='button'][normalize-space()='답글쓰기']",
+                )
+                for button in buttons:
+                    if button.is_displayed() and button.is_enabled():
+                        button.click()
+                        return
+                ancestor = ancestor.find_element(By.XPATH, "..")
+        raise AutomationError(f"댓글의 답글쓰기 버튼을 찾지 못했습니다: {parent_text[:30]}")
+
+    def _reserve_comment(self) -> None:
+        self._click_text(("예약",), exact_only=True)
+
+    def _publish_revision_comments(self, job: AffiliateJob) -> None:
+        fixed_labels = (
+            "댓글1",
+            "댓글2",
+            "대대댓글2",
+            "댓글3",
+            "댓글4",
+            "댓글5",
+        )
+        fixed_accounts = (
+            "quilliant",
+            "hunnede",
+            "prtchht",
+            "chocobbn",
+            "chenallo",
+            "colpith",
+        )
+        account_map = dict(zip(fixed_labels, random.SystemRandom().sample(fixed_accounts, 6)))
+        self.logger.info(
+            "행 %s 댓글 고정 계정 순서를 무작위로 배정했습니다",
+            job.row_number,
+        )
+
+        def publish_node(node, parent_text: str | None = None) -> None:
+            if parent_text:
+                self._click_reply_for(parent_text)
+            account = account_map.get(node.label)
+            if account:
+                self._select_option("계정", account)
+            self._fill_comment_input(node.text)
+            self._reserve_comment()
+            for child in node.children:
+                publish_node(child, node.text)
+
+        for comment in job.comments:
+            publish_node(comment)
 
     def publish_affiliate_revision(self, job: AffiliateJob, dry_run: bool) -> str:
         """Create a daily post, immediately reserve its revision, and register it."""
-        daily_title = f"오늘의 일상 {datetime.now():%Y%m%d-%H%M%S}"
+        if job.daily_post is None:
+            raise AutomationError("배정된 일상 글이 없습니다")
         if dry_run:
             self.open_se_one_writer()
-            self._fill_affiliate_daily_fields(job, daily_title)
+            self._fill_affiliate_daily_fields(job)
             self.logger.info(
                 "행 %s 제휴 흐름 검증 완료: 일상 글 → 수정 글 예약(%s시간) → 원고 적용",
                 job.row_number,
@@ -557,6 +681,12 @@ class V2RBrowser:
             )
             return ""
 
-        # Do not create a daily post until every required comment account is configured.
-        self._affiliate_comment_mapping_ready(job)
-        raise AssertionError("unreachable")
+        self.open_se_one_writer()
+        self._fill_affiliate_daily_fields(job)
+        self._submit_registration()
+        job.daily_post_url = self._open_published_article(job.daily_post.title)
+        self.open_revision_reservation()
+        self._set_revision_schedule(job.cafe)
+        self.fill_revision_article(job.article)
+        self._publish_revision_comments(job)
+        return self._submit_registration()

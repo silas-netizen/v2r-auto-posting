@@ -59,6 +59,7 @@ class AffiliateJob:
     message: str = ""
     daily_post_url: str = ""
     revision_url: str = ""
+    daily_post: "DailyPost | None" = None
 
     @property
     def title(self) -> str:
@@ -92,9 +93,17 @@ class AffiliateJob:
             errors.append("카페명은 씨씨앙 또는 양평맘만 사용할 수 있습니다")
         if not self.account.strip():
             errors.append("작성계정이 없습니다")
-        if self.article_type.strip() not in {"질문형", "후기형"}:
-            errors.append("원고유형은 질문형 또는 후기형이어야 합니다")
+        if not self.article_type.strip():
+            errors.append("원고유형이 없습니다")
         return errors
+
+
+@dataclass(frozen=True, slots=True)
+class DailyPost:
+    row_number: int
+    cafe: str
+    title: str
+    body: str
 
 
 @dataclass(slots=True)

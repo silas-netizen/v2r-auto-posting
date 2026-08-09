@@ -3,9 +3,16 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from .daily_posts import load_daily_posts
 from .gui import AutomationApp
 from .runner import AffiliateRunner
 from .sheet import load_affiliate_jobs
+
+
+DAILY_POST_SHEET_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1vSON0Rej9anDQXcAOXyBrCr50B4MMqZ79FahF4cDPJw/edit?gid=1842684291#gid=1842684291"
+)
 
 
 class AffiliateAutomationApp(AutomationApp):
@@ -16,8 +23,6 @@ class AffiliateAutomationApp(AutomationApp):
 
     def _create_variables(self) -> None:
         self.sheet_url = tk.StringVar()
-        self.email = tk.StringVar()
-        self.password = tk.StringVar()
         self.dry_run = tk.BooleanVar(value=True)
         self.progress_text = tk.StringVar(value="대기 중")
 
@@ -25,7 +30,7 @@ class AffiliateAutomationApp(AutomationApp):
         outer = ttk.Frame(self, padding=16)
         outer.pack(fill=tk.BOTH, expand=True)
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(7, weight=1)
+        outer.rowconfigure(5, weight=1)
 
         ttk.Label(outer, text=self.app_name, font=("", 18, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
@@ -35,11 +40,9 @@ class AffiliateAutomationApp(AutomationApp):
             text="일상 글 작성 → 수정 글 예약 → 시트 원고·댓글 입력 → 등록",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
         self._entry_row(outer, 2, "Google 시트 URL", self.sheet_url)
-        self._entry_row(outer, 3, "V2R 아이디", self.email)
-        self._entry_row(outer, 4, "V2R 비밀번호", self.password, show="*")
 
         actions = ttk.Frame(outer)
-        actions.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(8, 10))
+        actions.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 10))
         ttk.Checkbutton(
             actions,
             text="검증 모드(실제 등록하지 않음)",
@@ -57,7 +60,7 @@ class AffiliateAutomationApp(AutomationApp):
         self.stop_button.pack(side=tk.LEFT, padx=6)
 
         progress_frame = ttk.Frame(outer)
-        progress_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        progress_frame.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         progress_frame.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_frame, maximum=100)
         self.progress.grid(row=0, column=0, sticky="ew")
@@ -66,7 +69,7 @@ class AffiliateAutomationApp(AutomationApp):
         )
 
         log_frame = ttk.LabelFrame(outer, text="실시간 로그", padding=8)
-        log_frame.grid(row=7, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=5, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state=tk.DISABLED)
@@ -85,8 +88,9 @@ class AffiliateAutomationApp(AutomationApp):
     def _load_affiliate_jobs(self, sheet_url: str):
         if not sheet_url:
             raise ValueError("Google 시트 URL을 입력하세요")
-        csv_path = self._get_csv_path("", sheet_url)
-        return load_affiliate_jobs(csv_path)
+        source_csv = self._get_csv_path("", sheet_url)
+        daily_csv = self.browser.download_sheet(DAILY_POST_SHEET_URL)
+        return load_affiliate_jobs(source_csv), load_daily_posts(daily_csv)
 
     def _check_data(self) -> None:
         try:
@@ -98,17 +102,19 @@ class AffiliateAutomationApp(AutomationApp):
             return
 
         def work() -> None:
-            jobs = self._load_affiliate_jobs(sheet_url)
+            jobs, daily_posts = self._load_affiliate_jobs(sheet_url)
             self.logger.info(
-                "처리 대상 확인 완료: %s건",
+                "처리 대상 확인 완료: 원고 %s건 / 일상 글 %s건",
                 len(jobs),
+                len(daily_posts),
             )
             self.ui_queue.put(
                 (
                     "info",
                     (
                         "처리 대상 확인",
-                        f"A~E열이 모두 채워진 원고 {len(jobs)}건",
+                        f"A~E열이 모두 채워진 원고 {len(jobs)}건\n"
+                        f"제휴 일상 글 {len(daily_posts)}건",
                     ),
                 )
             )
@@ -133,8 +139,6 @@ class AffiliateAutomationApp(AutomationApp):
             if not confirmed:
                 return
 
-        email = self.email.get().strip()
-        password = self.password.get()
         dry_run = self.dry_run.get()
         self.stop_event.clear()
         self.start_button.configure(state=tk.DISABLED)
@@ -144,7 +148,7 @@ class AffiliateAutomationApp(AutomationApp):
 
         def work() -> None:
             try:
-                jobs = self._load_affiliate_jobs(sheet_url)
+                jobs, daily_posts = self._load_affiliate_jobs(sheet_url)
                 runner = AffiliateRunner(
                     browser=self.browser,
                     report_dir=self.report_dir,
@@ -152,11 +156,13 @@ class AffiliateAutomationApp(AutomationApp):
                 )
                 _, report_path = runner.run(
                     jobs=jobs,
-                    email=email,
-                    password=password,
+                    email="",
+                    password="",
                     dry_run=dry_run,
                     stop_event=self.stop_event,
                     progress=self._set_progress,
+                    daily_posts=daily_posts,
+                    source_sheet_url=sheet_url,
                 )
                 self.ui_queue.put(
                     (

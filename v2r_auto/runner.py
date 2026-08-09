@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Callable
 
 from .browser import V2RBrowser
+from .daily_posts import assign_daily_posts
 from .history import HistoryStore
-from .models import AffiliateJob, JobStatus, PostJob, RunResult
+from .models import AffiliateJob, DailyPost, JobStatus, PostJob, RunResult
 from .report import write_report
 
 
@@ -128,8 +129,11 @@ class AffiliateRunner:
         dry_run: bool,
         stop_event: threading.Event,
         progress: Callable[[int, int], None],
+        daily_posts: list[DailyPost],
+        source_sheet_url: str,
     ) -> tuple[RunResult, Path]:
         started_at = datetime.now()
+        assign_daily_posts(jobs, daily_posts)
         self.browser.ensure_v2r_login(email, password)
 
         total = len(jobs)
@@ -161,6 +165,22 @@ class AffiliateRunner:
                 job.revision_url = self.browser.publish_affiliate_revision(job, dry_run)
                 job.status = JobStatus.SUCCESS
                 job.message = "전체 흐름 검증 완료" if dry_run else "수정 발행 완료"
+                if not dry_run:
+                    try:
+                        self.browser.update_completion_link(
+                            source_sheet_url,
+                            job.row_number,
+                            job.revision_url,
+                        )
+                    except Exception as sheet_error:
+                        job.message = (
+                            "수정 발행 완료, F열 완료 링크 입력 실패 - "
+                            f"결과 URL: {job.revision_url} / {sheet_error}"
+                        )
+                        self.logger.exception(
+                            "행 %s 수정 발행은 완료됐지만 F열 링크 입력에 실패했습니다",
+                            job.row_number,
+                        )
             except Exception as exc:
                 job.status = JobStatus.FAILED
                 job.message = str(exc)
