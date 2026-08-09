@@ -37,6 +37,20 @@ def test_completion_link_skips_affiliate_row(tmp_path: Path) -> None:
     assert jobs[0].status == JobStatus.SKIPPED
 
 
+def test_missing_values_in_columns_a_to_e_skip_affiliate_row(tmp_path: Path) -> None:
+    path = tmp_path / "affiliate.csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크\n"
+        '"키워드","제목 : 제목\n본문 : 본문",양평맘,,질문형,\n',
+        encoding="utf-8-sig",
+    )
+
+    jobs = load_affiliate_jobs(path, selected_row_number=2)
+
+    assert jobs[0].status == JobStatus.SKIPPED
+    assert "작성계정" in jobs[0].message
+
+
 class FakeAffiliateBrowser:
     def __init__(self) -> None:
         self.published = []

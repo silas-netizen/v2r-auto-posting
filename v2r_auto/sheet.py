@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .content import ContentFormatError, parse_article
+from .content import ContentFormatError, ParsedArticle, parse_article
 from .models import AffiliateJob, JobStatus, PostJob
 
 
@@ -195,10 +195,41 @@ def load_affiliate_jobs(
 
             keyword = _clean_cell(row.get(AFFILIATE_COLUMNS["keyword"]))
             source = _clean_cell(row.get(AFFILIATE_COLUMNS["body"]))
-            if not keyword or not source:
-                raise SheetSchemaError(
-                    f"시트 행 {selected_row_number}에 키워드 또는 본문이 없습니다"
+            cafe = _clean_cell(row.get(AFFILIATE_COLUMNS["cafe"]))
+            account = _clean_cell(row.get(AFFILIATE_COLUMNS["account"]))
+            article_type = _clean_cell(row.get(AFFILIATE_COLUMNS["article_type"]))
+            missing_required = [
+                label
+                for label, value in (
+                    ("키워드", keyword),
+                    ("본문", source),
+                    ("카페명", cafe),
+                    ("작성계정", account),
+                    ("원고유형", article_type),
                 )
+                if not value
+            ]
+            if missing_required:
+                job = AffiliateJob(
+                    row_number=row_number,
+                    keyword=keyword,
+                    article=ParsedArticle(
+                        title="",
+                        body="",
+                        keyword=keyword,
+                        tag=re.sub(r"\s+", "", keyword),
+                        comments=[],
+                    ),
+                    cafe=cafe,
+                    account=account,
+                    article_type=article_type,
+                    completion_url=_clean_cell(
+                        row.get(AFFILIATE_COLUMNS["completion_url"])
+                    ),
+                    status=JobStatus.SKIPPED,
+                    message="A~E열 필수값 누락: " + ", ".join(missing_required),
+                )
+                return [job]
             try:
                 article = parse_article(keyword, source)
             except ContentFormatError as exc:
@@ -210,9 +241,9 @@ def load_affiliate_jobs(
                 row_number=row_number,
                 keyword=keyword,
                 article=article,
-                cafe=_clean_cell(row.get(AFFILIATE_COLUMNS["cafe"])),
-                account=_clean_cell(row.get(AFFILIATE_COLUMNS["account"])),
-                article_type=_clean_cell(row.get(AFFILIATE_COLUMNS["article_type"])),
+                cafe=cafe,
+                account=account,
+                article_type=article_type,
                 completion_url=_clean_cell(row.get(AFFILIATE_COLUMNS["completion_url"])),
             )
             if job.completion_url:
