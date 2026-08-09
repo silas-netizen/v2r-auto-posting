@@ -30,7 +30,7 @@ from .models import AffiliateJob, PostJob
 V2R_LIST_URL = "https://v2r.daboja.im/nc/board?view=list"
 V2R_SE_ONE_URL = "https://v2r.daboja.im/nc/seone"
 AFFILIATE_CAFE_DELAYS = {"씨씨앙": 4, "양평맘": 10}
-AFFILIATE_CAFE_BOARDS = {"씨씨앙": "자유 수다방", "양평맘": "자유 수다방"}
+AFFILIATE_CAFE_BOARDS = {"씨씨앙": "자유 수다방", "양평맘": "이모저모 이야기"}
 
 
 class AutomationError(RuntimeError):
@@ -267,14 +267,20 @@ class V2RBrowser:
     def _normalize_option_text(value: str) -> str:
         return re.sub(r"\s+", "", value or "").casefold()
 
+    @staticmethod
+    def _normalize_board_text(value: str) -> str:
+        return re.sub(r"[^0-9a-z가-힣]+", "", value or "", flags=re.IGNORECASE).casefold()
+
     @classmethod
     def _option_text_matches(cls, label: str, value: str, option_text: str) -> bool:
         wanted = cls._normalize_option_text(value)
         candidate = cls._normalize_option_text(option_text)
         if candidate == wanted:
             return True
+        if label == "게시판":
+            return cls._normalize_board_text(option_text) == cls._normalize_board_text(value)
         # Only the cafe display name contains extra branding. Board and account
-        # values must always be selected by their exact displayed text.
+        # values must remain exact apart from decorative board emoji.
         return label == "카페" and bool(wanted) and wanted in candidate
 
     def _click_matching_option(self, label: str, value: str) -> None:

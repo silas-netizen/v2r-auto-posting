@@ -47,6 +47,9 @@ def test_account_selection_never_uses_partial_id_matches() -> None:
 def test_board_selection_requires_exact_display_name() -> None:
     assert V2RBrowser._option_text_matches("게시판", "자유 수다방", "자유 수다방")
     assert not V2RBrowser._option_text_matches("게시판", "자유 수다방", "자유 게시판")
+    assert V2RBrowser._option_text_matches(
+        "게시판", "이모저모 이야기", "이모저모 이야기💘"
+    )
 
 
 def test_history_round_trip(tmp_path: Path) -> None:
