@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import random
 import re
@@ -54,6 +55,7 @@ class V2RBrowser:
         self.driver: webdriver.Chrome | None = None
         self.v2r_handle: str | None = None
         self.google_handle: str | None = None
+        self._api_capture_active = False
 
     def start(self) -> None:
         if self.driver:
@@ -78,6 +80,7 @@ class V2RBrowser:
                 },
             )
             self.logger.info("Chrome을 시작합니다")
+        options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
         self.driver = webdriver.Chrome(options=options)
         self.v2r_handle = self.driver.current_window_handle
 
@@ -88,6 +91,7 @@ class V2RBrowser:
             self.driver = None
             self.v2r_handle = None
             self.google_handle = None
+            self._api_capture_active = False
 
     @property
     def wait(self) -> WebDriverWait:
@@ -527,6 +531,77 @@ class V2RBrowser:
             "title": self.driver.title,
             "controls": controls,
         }
+
+    @staticmethod
+    def _request_payload_summary(post_data: str | None) -> dict[str, object]:
+        if not post_data:
+            return {}
+        try:
+            payload = json.loads(post_data)
+        except json.JSONDecodeError:
+            keys = [
+                part.split("=", 1)[0]
+                for part in post_data.split("&")
+                if "=" in part
+            ]
+            return {"format": "text", "keys": keys, "length": len(post_data)}
+        if isinstance(payload, dict):
+            return {"format": "json", "keys": sorted(payload.keys())}
+        return {"format": "json", "type": type(payload).__name__}
+
+    def start_api_capture(self) -> None:
+        """Start a safe network map capture without recording credentials or contents."""
+        self.start()
+        assert self.driver
+        try:
+            self.driver.get_log("performance")
+        except Exception as exc:
+            raise AutomationError(
+                "Chrome 네트워크 기록을 시작하지 못했습니다. 프로그램을 다시 실행하세요"
+            ) from exc
+        self._api_capture_active = True
+        self.logger.info("V2R 전체 API 확인 기록을 시작했습니다")
+
+    def finish_api_capture(self) -> list[dict[str, object]]:
+        """Return V2R request endpoints and payload key names captured since start."""
+        if not self._api_capture_active:
+            raise AutomationError("먼저 '전체 API 확인 시작'을 누르세요")
+        assert self.driver
+        try:
+            entries = self.driver.get_log("performance")
+        finally:
+            self._api_capture_active = False
+
+        requests: dict[str, dict[str, object]] = {}
+        for entry in entries:
+            try:
+                message = json.loads(entry["message"])["message"]
+            except (KeyError, TypeError, json.JSONDecodeError):
+                continue
+            method = message.get("method")
+            params = message.get("params", {})
+            if method == "Network.requestWillBeSent":
+                request = params.get("request", {})
+                url = str(request.get("url", ""))
+                if not url.startswith("https://v2r.daboja.im/"):
+                    continue
+                parsed = urlparse(url)
+                request_id = str(params.get("requestId", ""))
+                requests[request_id] = {
+                    "method": request.get("method", ""),
+                    "path": parsed.path,
+                    "query_keys": sorted(parse_qs(parsed.query).keys()),
+                    "payload": self._request_payload_summary(request.get("postData")),
+                }
+            elif method == "Network.responseReceived":
+                request_id = str(params.get("requestId", ""))
+                if request_id in requests:
+                    response = params.get("response", {})
+                    requests[request_id]["status"] = response.get("status")
+                    requests[request_id]["mime_type"] = response.get("mimeType", "")
+        captured = list(requests.values())
+        self.logger.info("V2R API 확인 기록 완료: %s건", len(captured))
+        return captured
 
     def save_screenshot(self, path: Path) -> None:
         self.start()

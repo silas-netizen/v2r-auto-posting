@@ -56,10 +56,16 @@ class AffiliateAutomationApp(AutomationApp):
         ttk.Button(actions, text="2. 화면 확인", command=self._inspect_form).pack(
             side=tk.LEFT, padx=6
         )
-        ttk.Button(actions, text="3. 대상 확인", command=self._check_data).pack(
+        ttk.Button(actions, text="3. API 확인 시작", command=self._start_api_capture).pack(
             side=tk.LEFT, padx=6
         )
-        self.start_button = ttk.Button(actions, text="4. 수정 발행 시작", command=self._start)
+        ttk.Button(actions, text="4. API 확인 저장", command=self._finish_api_capture).pack(
+            side=tk.LEFT, padx=6
+        )
+        ttk.Button(actions, text="5. 대상 확인", command=self._check_data).pack(
+            side=tk.LEFT, padx=6
+        )
+        self.start_button = ttk.Button(actions, text="6. 수정 발행 시작", command=self._start)
         self.start_button.pack(side=tk.LEFT)
         self.stop_button = ttk.Button(actions, text="중지", command=self._stop, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=6)
@@ -122,6 +128,43 @@ class AffiliateAutomationApp(AutomationApp):
                         "글은 등록하지 않았습니다.\n"
                         f"보고서: {report_path}\n"
                         f"화면: {screenshot_path}",
+                    ),
+                )
+            )
+
+        self._run_background(work)
+
+    def _start_api_capture(self) -> None:
+        def work() -> None:
+            self.browser.start_api_capture()
+            self.ui_queue.put(
+                (
+                    "info",
+                    (
+                        "API 확인 기록 중",
+                        "이제 크롬 V2R 화면에서 일상 글 작성부터 최종 등록까지 진행하세요.\n"
+                        "끝나면 프로그램에서 '4. API 확인 저장'을 누르세요.",
+                    ),
+                )
+            )
+
+        self._run_background(work)
+
+    def _finish_api_capture(self) -> None:
+        def work() -> None:
+            requests = self.browser.finish_api_capture()
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            report_path = self.report_dir / f"V2R_API_확인_{stamp}.json"
+            report_path.write_text(
+                json.dumps({"requests": requests}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            self.ui_queue.put(
+                (
+                    "info",
+                    (
+                        "API 확인 저장 완료",
+                        f"글 내용·비밀번호는 저장하지 않았습니다.\n결과: {report_path}",
                     ),
                 )
             )

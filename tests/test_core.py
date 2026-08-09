@@ -59,6 +59,13 @@ def test_board_selection_requires_exact_display_name() -> None:
     )
 
 
+def test_api_capture_summarizes_payload_keys_without_values() -> None:
+    assert V2RBrowser._request_payload_summary('{"title":"비밀 글","body":"본문"}') == {
+        "format": "json",
+        "keys": ["body", "title"],
+    }
+
+
 def test_history_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "history.json"
     job = sample_job()
