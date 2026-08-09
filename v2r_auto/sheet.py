@@ -46,6 +46,7 @@ AFFILIATE_COLUMNS = {
     "article_type": "원고유형",
     "completion_url": "완료 링크",
 }
+AFFILIATE_PREFIX_COLUMN = "말머리"
 
 
 @dataclass(slots=True)
@@ -229,6 +230,7 @@ def load_affiliate_jobs(
                 cafe=cafe,
                 account=account,
                 article_type=article_type,
+                prefix=_clean_cell(row.get(AFFILIATE_PREFIX_COLUMN)),
                 completion_url=_clean_cell(row.get(AFFILIATE_COLUMNS["completion_url"])),
             )
             if job.completion_url:

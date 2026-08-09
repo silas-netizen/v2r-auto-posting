@@ -1,8 +1,12 @@
 import logging
 import random
 import threading
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
+from v2r_auto.affiliate_api import AffiliateApiPublisher, _content_json
+from v2r_auto.content import parse_article
 from v2r_auto.daily_posts import assign_daily_posts, load_daily_posts
 from v2r_auto.models import DailyPost, JobStatus
 from v2r_auto.runner import AffiliateRunner
@@ -76,6 +80,49 @@ def test_daily_posts_are_matched_to_cafe_without_reuse(tmp_path: Path) -> None:
     assign_daily_posts(jobs, load_daily_posts(path), random.Random(1))
 
     assert {job.daily_post.title for job in jobs if job.daily_post} == {"첫 일상", "둘 일상"}
+
+
+def test_api_content_preserves_blank_lines_as_paragraphs() -> None:
+    document = json.loads(_content_json("첫 줄\n\n둘째 줄"))
+    paragraphs = document["document"]["components"][0]["value"]
+
+    assert [item["nodes"][0]["value"] for item in paragraphs] == [
+        "첫 줄",
+        "",
+        "둘째 줄",
+    ]
+
+
+def test_api_comments_keep_five_roots_and_seven_replies(tmp_path: Path) -> None:
+    job = load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0]
+    # Expand the small fixture to the production 12-label pattern.
+    job.article = parse_article(
+        "키워드",
+        "제목 : 제목\n본문 : 본문\n"
+        + "\n".join(
+            [
+                "댓글1: c1", "대댓글1: r1",
+                "댓글2: c2", "대댓글2: r2", "대대댓글2: rr2", "대대대댓글2: rrr2",
+                "댓글3: c3", "대댓글3: r3",
+                "댓글4: c4", "대댓글4: r4",
+                "댓글5: c5", "대댓글5: r5",
+            ]
+        ),
+    )
+    publisher = AffiliateApiPublisher(None, logging.getLogger("test"))
+    publisher._member = lambda cafe_id, account: {  # type: ignore[method-assign]
+        "member_key": f"key-{account}",
+        "naver_login_id": account,
+        "nick": account,
+    }
+
+    comments = publisher._comments(job, datetime.now(timezone.utc), 1)
+
+    assert len(comments) == 5
+    assert sum(len(root["comments"]) for root in comments) == 7
+    comment2 = comments[1]
+    assert comment2["comments"][1]["naver_login_id"] == comment2["naver_login_id"]
+    assert comment2["comments"][2]["naver_login_id"] != job.account
 
 
 class FakeAffiliateBrowser:

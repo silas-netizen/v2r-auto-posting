@@ -54,6 +54,7 @@ class AffiliateJob:
     cafe: str
     account: str
     article_type: str
+    prefix: str = ""
     completion_url: str = ""
     status: JobStatus = JobStatus.PENDING
     message: str = ""

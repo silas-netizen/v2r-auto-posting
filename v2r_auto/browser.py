@@ -878,25 +878,8 @@ class V2RBrowser:
             publish_node(comment)
 
     def publish_affiliate_revision(self, job: AffiliateJob, dry_run: bool) -> str:
-        """Create a daily post, immediately reserve its revision, and register it."""
-        if job.daily_post is None:
-            raise AutomationError("배정된 일상 글이 없습니다")
-        if dry_run:
-            self.open_se_one_writer()
-            self._fill_affiliate_daily_fields(job)
-            self.logger.info(
-                "행 %s 제휴 흐름 검증 완료: 일상 글 → 수정 글 예약(%s시간) → 원고 적용",
-                job.row_number,
-                AFFILIATE_CAFE_DELAYS[job.cafe],
-            )
-            return ""
+        """Run the live-verified affiliate flow through V2R's own API."""
+        from .affiliate_api import AffiliateApiPublisher
 
-        self.open_se_one_writer()
-        self._fill_affiliate_daily_fields(job)
-        self._submit_registration()
-        job.daily_post_url = self._open_published_article(job.daily_post.title)
-        self.open_revision_reservation()
-        self._set_revision_schedule(job.cafe)
-        self.fill_revision_article(job.article)
-        self._publish_revision_comments(job)
-        return self._submit_registration()
+        publisher = AffiliateApiPublisher(self, self.logger)
+        return publisher.publish(job, dry_run)
