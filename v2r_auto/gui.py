@@ -18,12 +18,12 @@ from .sheet import SheetDefaults, load_jobs
 APP_NAME = "V2R 자동 발행"
 
 
-def app_data_dir() -> Path:
+def app_data_dir(product_name: str = "V2RAutoPosting") -> Path:
     if sys.platform == "win32":
         root = Path(os.environ.get("LOCALAPPDATA", Path.home()))
     else:
         root = Path.home() / ".local" / "share"
-    return root / "V2RAutoPosting"
+    return root / product_name
 
 
 class TextQueueHandler(logging.Handler):
@@ -36,13 +36,16 @@ class TextQueueHandler(logging.Handler):
 
 
 class AutomationApp(tk.Tk):
+    app_name = APP_NAME
+    data_folder_name = "V2RAutoPosting"
+
     def __init__(self):
         super().__init__()
-        self.title(APP_NAME)
+        self.title(self.app_name)
         self.geometry("920x720")
         self.minsize(820, 650)
 
-        self.data_dir = app_data_dir()
+        self.data_dir = app_data_dir(self.data_folder_name)
         self.download_dir = self.data_dir / "downloads"
         self.report_dir = self.data_dir / "reports"
         self.log_dir = self.data_dir / "logs"

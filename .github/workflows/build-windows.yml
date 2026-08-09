@@ -27,11 +27,15 @@ jobs:
         run: python -m pytest
 
       - name: Build EXE
-        run: python -m PyInstaller --noconfirm --clean v2r-auto-posting.spec
+        run: |
+          python -m PyInstaller --noconfirm --clean v2r-auto-posting.spec
+          python -m PyInstaller --noconfirm --clean v2r-auto-affiliate.spec
 
-      - name: Upload Windows program
+      - name: Upload Windows programs
         uses: actions/upload-artifact@v4
         with:
           name: V2R-Auto-Posting-Windows
-          path: dist/V2R-Auto-Posting.exe
+          path: |
+            dist/V2R-Auto-Posting.exe
+            dist/V2R-Affiliate-Revision.exe
           if-no-files-found: error

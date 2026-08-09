@@ -5,7 +5,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .models import JobStatus, PostJob
+from .content import ContentFormatError, parse_article
+from .models import AffiliateJob, JobStatus, PostJob
 
 
 class SheetSchemaError(ValueError):
@@ -35,6 +36,15 @@ def _clean_cell(value: str | None) -> str:
 
 NORMALIZED_ALIASES = {
     key: {_normalize(alias) for alias in aliases} for key, aliases in ALIASES.items()
+}
+
+AFFILIATE_COLUMNS = {
+    "keyword": "키워드",
+    "body": "본문",
+    "cafe": "카페명",
+    "account": "작성계정",
+    "article_type": "원고유형",
+    "completion_url": "완료 링크",
 }
 
 
@@ -156,3 +166,58 @@ def load_jobs(
             )
         raise SheetSchemaError("처리할 글이 없습니다")
     return jobs
+
+
+def load_affiliate_jobs(
+    path: str | Path,
+    selected_row_number: int,
+) -> list[AffiliateJob]:
+    """Load one or more compact affiliate-cafe tasks from columns A–F."""
+    if selected_row_number < 2:
+        raise ValueError("시트 행 번호는 2 이상이어야 합니다")
+
+    csv_path = Path(path)
+    if not csv_path.exists():
+        raise FileNotFoundError(f"시트 파일이 없습니다: {csv_path}")
+
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        headers = [header for header in (reader.fieldnames or []) if header and header.strip()]
+        missing = [header for header in AFFILIATE_COLUMNS.values() if header not in headers]
+        if missing:
+            raise SheetSchemaError(
+                "제휴용 시트 열을 찾지 못했습니다: " + ", ".join(missing)
+            )
+
+        for row_number, row in enumerate(reader, start=2):
+            if row_number != selected_row_number:
+                continue
+
+            keyword = _clean_cell(row.get(AFFILIATE_COLUMNS["keyword"]))
+            source = _clean_cell(row.get(AFFILIATE_COLUMNS["body"]))
+            if not keyword or not source:
+                raise SheetSchemaError(
+                    f"시트 행 {selected_row_number}에 키워드 또는 본문이 없습니다"
+                )
+            try:
+                article = parse_article(keyword, source)
+            except ContentFormatError as exc:
+                raise SheetSchemaError(
+                    f"시트 행 {selected_row_number} 원고 형식 오류: {exc}"
+                ) from exc
+
+            job = AffiliateJob(
+                row_number=row_number,
+                keyword=keyword,
+                article=article,
+                cafe=_clean_cell(row.get(AFFILIATE_COLUMNS["cafe"])),
+                account=_clean_cell(row.get(AFFILIATE_COLUMNS["account"])),
+                article_type=_clean_cell(row.get(AFFILIATE_COLUMNS["article_type"])),
+                completion_url=_clean_cell(row.get(AFFILIATE_COLUMNS["completion_url"])),
+            )
+            if job.completion_url:
+                job.status = JobStatus.SKIPPED
+                job.message = "F열에 완료 링크가 있어 건너뜀"
+            return [job]
+
+    raise SheetSchemaError(f"입력한 시트 행 {selected_row_number}을 찾지 못했습니다")

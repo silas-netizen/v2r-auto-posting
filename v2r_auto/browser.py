@@ -4,6 +4,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -22,11 +23,12 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from .content import ParsedArticle
-from .models import PostJob
+from .models import AffiliateJob, PostJob
 
 
 V2R_LIST_URL = "https://v2r.daboja.im/nc/board?view=list"
 V2R_SE_ONE_URL = "https://v2r.daboja.im/nc/seone"
+AFFILIATE_CAFE_DELAYS = {"씨씨앙": 4, "양평맘": 10}
 
 
 class AutomationError(RuntimeError):
@@ -342,6 +344,40 @@ class V2RBrowser:
         except TimeoutException as exc:
             raise AutomationError(f"'{label}'에서 '{value}' 항목을 찾지 못했습니다") from exc
 
+    def _select_only_option(self, label: str) -> None:
+        """Select the sole available option for an affiliate cafe's fixed board."""
+        assert self.driver
+        placeholders = {
+            "게시판": "게시판 검색",
+        }
+        placeholder = placeholders.get(label)
+        if not placeholder:
+            raise AutomationError(f"자동 선택을 지원하지 않는 항목입니다: {label}")
+        inputs = [
+            item
+            for item in self.driver.find_elements(
+                By.CSS_SELECTOR, f"input[placeholder='{placeholder}']"
+            )
+            if item.is_displayed()
+        ]
+        if not inputs:
+            raise AutomationError(f"선택란을 찾지 못했습니다: {label}")
+        inputs[0].click()
+        options = self.wait.until(
+            lambda driver: [
+                item
+                for item in driver.find_elements(
+                    By.XPATH, "//*[@role='option' or self::li][normalize-space()]"
+                )
+                if item.is_displayed() and item.is_enabled()
+            ]
+        )
+        if len(options) != 1:
+            raise AutomationError(
+                f"'{label}' 항목이 하나여야 자동 선택할 수 있습니다. 현재 {len(options)}개입니다"
+            )
+        options[0].click()
+
     def _fill_editor(self, body: str) -> None:
         assert self.driver
         editors = [
@@ -395,6 +431,18 @@ class V2RBrowser:
                 "input[placeholder*='태그']",
             )
 
+    def _fill_affiliate_daily_fields(self, job: AffiliateJob, daily_title: str) -> None:
+        self._select_option("카페", job.cafe)
+        self._select_option("계정", job.account)
+        # 씨씨앙과 양평맘은 각각 사용할 수 있는 게시판이 하나뿐입니다.
+        self._select_only_option("게시판")
+        self._fill_input(
+            "제목",
+            daily_title,
+            "input[placeholder*='제목'], textarea[placeholder*='제목']",
+        )
+        self._fill_editor("오늘도 편안한 하루 보내세요.")
+
     def fill_post(self, job: PostJob, dry_run: bool) -> None:
         self.open_se_one_writer()
 
@@ -439,3 +487,76 @@ class V2RBrowser:
         )
         self._fill_editor(article.body)
         self._fill_input("태그", article.tag, "input[placeholder*='태그']")
+
+    def _open_published_article(self, title: str) -> str:
+        """Open the newly published daily post from its title if V2R returned to a list."""
+        assert self.driver
+        if "/articleDetail/" in self.driver.current_url:
+            return self.driver.current_url
+        title_literal = self._xpath_literal(title)
+        article_link = self.wait.until(
+            EC.element_to_be_clickable(
+                (By.XPATH, f"//a[normalize-space()={title_literal}]")
+            )
+        )
+        article_link.click()
+        self.wait.until(lambda driver: "/articleDetail/" in driver.current_url)
+        return self.driver.current_url
+
+    def _set_revision_schedule(self, cafe: str) -> None:
+        """Set the fixed revision time for each affiliate cafe."""
+        assert self.driver
+        hours = AFFILIATE_CAFE_DELAYS.get(cafe)
+        if hours is None:
+            raise AutomationError(f"수정 글 예약 시간을 알 수 없는 카페입니다: {cafe}")
+        scheduled_at = datetime.now() + timedelta(hours=hours)
+        datetime_inputs = [
+            item
+            for item in self.driver.find_elements(
+                By.CSS_SELECTOR, "input[type='datetime-local']"
+            )
+            if item.is_displayed()
+        ]
+        if len(datetime_inputs) != 1:
+            raise AutomationError(
+                "수정 글 예약 시간 입력란을 찾지 못했습니다. 화면 형식을 확인하세요"
+            )
+        value = scheduled_at.strftime("%Y-%m-%dT%H:%M")
+        self.driver.execute_script(
+            """
+            const input = arguments[0];
+            const value = arguments[1];
+            const setter = Object.getOwnPropertyDescriptor(
+                HTMLInputElement.prototype, 'value'
+            ).set;
+            setter.call(input, value);
+            input.dispatchEvent(new Event('input', {bubbles: true}));
+            input.dispatchEvent(new Event('change', {bubbles: true}));
+            """,
+            datetime_inputs[0],
+            value,
+        )
+        self.logger.info("%s 수정 글 예약 시간 설정: %s", cafe, scheduled_at.strftime("%m-%d %H:%M"))
+
+    def _affiliate_comment_mapping_ready(self, job: AffiliateJob) -> None:
+        raise AutomationError(
+            "제휴 댓글 계정 6개 매핑이 아직 프로그램 설정에 등록되지 않았습니다. "
+            "일상 글은 등록하지 않았습니다."
+        )
+
+    def publish_affiliate_revision(self, job: AffiliateJob, dry_run: bool) -> str:
+        """Create a daily post, immediately reserve its revision, and register it."""
+        daily_title = f"오늘의 일상 {datetime.now():%Y%m%d-%H%M%S}"
+        if dry_run:
+            self.open_se_one_writer()
+            self._fill_affiliate_daily_fields(job, daily_title)
+            self.logger.info(
+                "행 %s 제휴 흐름 검증 완료: 일상 글 → 수정 글 예약(%s시간) → 원고 적용",
+                job.row_number,
+                AFFILIATE_CAFE_DELAYS[job.cafe],
+            )
+            return ""
+
+        # Do not create a daily post until every required comment account is configured.
+        self._affiliate_comment_mapping_ready(job)
+        raise AssertionError("unreachable")
