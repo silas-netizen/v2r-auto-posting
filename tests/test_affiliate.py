@@ -42,7 +42,7 @@ def test_missing_values_in_columns_a_to_e_skip_affiliate_row(tmp_path: Path) -> 
     path.write_text(
         "키워드,본문,카페명,작성계정,원고유형,완료 링크\n"
         '"키워드","제목 : 제목\n본문 : 본문",양평맘,,질문형,\n',
-        '"정상 키워드","제목 : 정상 제목\n본문 : 정상 본문",씨씨앙,writer,후기형,\n',
+        + '"정상 키워드","제목 : 정상 제목\n본문 : 정상 본문",씨씨앙,writer,후기형,\n',
         encoding="utf-8-sig",
     )
 
