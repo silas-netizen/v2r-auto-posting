@@ -4,7 +4,12 @@ import threading
 
 import pytest
 
-from v2r_auto.browser import AFFILIATE_CAFE_SEARCH_TERMS, V2R_SE_ONE_URL, V2RBrowser
+from v2r_auto.browser import (
+    AFFILIATE_CAFE_SEARCH_TERMS,
+    SE_ONE_FIELD_INDEX,
+    V2R_SE_ONE_URL,
+    V2RBrowser,
+)
 from v2r_auto.history import HistoryCorruptedError, HistoryStore
 from v2r_auto.models import JobStatus, PostJob, RunResult
 from v2r_auto.report import write_report
@@ -38,6 +43,7 @@ def test_cafe_option_matching_ignores_display_whitespace() -> None:
         "양평 맘's 전원 Story"
     )
     assert AFFILIATE_CAFE_SEARCH_TERMS["양평맘"] == "양평"
+    assert SE_ONE_FIELD_INDEX == {"카페": 0, "계정": 1, "게시판": 2, "말머리": 3}
 
 
 def test_account_selection_never_uses_partial_id_matches() -> None:

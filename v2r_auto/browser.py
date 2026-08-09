@@ -32,6 +32,7 @@ V2R_SE_ONE_URL = "https://v2r.daboja.im/nc/seone"
 AFFILIATE_CAFE_DELAYS = {"씨씨앙": 4, "양평맘": 10}
 AFFILIATE_CAFE_BOARDS = {"씨씨앙": "자유 수다방", "양평맘": "이모저모 이야기"}
 AFFILIATE_CAFE_SEARCH_TERMS = {"씨씨앙": "씨씨앙", "양평맘": "양평"}
+SE_ONE_FIELD_INDEX = {"카페": 0, "계정": 1, "게시판": 2, "말머리": 3}
 
 
 class AutomationError(RuntimeError):
@@ -293,6 +294,32 @@ class V2RBrowser:
         input_element.send_keys(Keys.ARROW_DOWN)
         input_element.send_keys(Keys.ENTER)
 
+    def _visible_se_one_inputs(self):
+        assert self.driver
+        return [
+            item
+            for item in self.driver.find_elements(By.CSS_SELECTOR, "input")
+            if item.is_displayed()
+            and (item.get_attribute("type") or "text").lower()
+            not in {"hidden", "checkbox", "radio", "button", "submit"}
+        ]
+
+    def _se_one_field_input(self, label: str, selectors: list[str]):
+        assert self.driver
+        for selector in selectors:
+            inputs = [
+                item
+                for item in self.driver.find_elements(By.CSS_SELECTOR, selector)
+                if item.is_displayed()
+            ]
+            if inputs:
+                return inputs[0]
+        field_index = SE_ONE_FIELD_INDEX.get(label)
+        visible_inputs = self._visible_se_one_inputs()
+        if field_index is not None and len(visible_inputs) > field_index:
+            return visible_inputs[field_index]
+        return None
+
     def _click_text(self, texts: tuple[str, ...], exact_only: bool = False) -> None:
         assert self.driver
         for text in texts:
@@ -372,25 +399,16 @@ class V2RBrowser:
             ]
         else:
             selectors = []
-        for selector in selectors:
-            inputs = [
-                item
-                for item in self.driver.find_elements(By.CSS_SELECTOR, selector)
-                if item.is_displayed()
-            ]
-            if inputs:
-                input_element = inputs[0]
-                input_element.click()
-                input_element.send_keys(Keys.CONTROL, "a")
-                search_value = (
-                    AFFILIATE_CAFE_SEARCH_TERMS.get(value, value)
-                    if label == "카페"
-                    else value
-                )
-                input_element.send_keys(search_value)
-                break
-        else:
-            input_element = None
+        input_element = self._se_one_field_input(label, selectors)
+        if input_element is not None:
+            input_element.click()
+            input_element.send_keys(Keys.CONTROL, "a")
+            search_value = (
+                AFFILIATE_CAFE_SEARCH_TERMS.get(value, value)
+                if label == "카페"
+                else value
+            )
+            input_element.send_keys(search_value)
 
         if input_element is not None:
             self._select_first_dropdown_result(input_element, label, value)
@@ -448,13 +466,7 @@ class V2RBrowser:
         self.wait.until(lambda driver: driver.execute_script("return document.readyState") == "complete")
         try:
             self.wait.until(
-                lambda driver: any(
-                    item.is_displayed()
-                    for item in driver.find_elements(
-                        By.CSS_SELECTOR,
-                        "input[placeholder*='카페'], input[name*='cafe' i]",
-                    )
-                )
+                lambda driver: len(self._visible_se_one_inputs()) >= 4
             )
         except TimeoutException as exc:
             visible_inputs = self.driver.execute_script(
@@ -467,7 +479,7 @@ class V2RBrowser:
                 """
             )
             raise AutomationError(
-                "SE-ONE 글쓰기 화면은 열렸지만 카페 입력칸을 찾지 못했습니다. "
+                "SE-ONE 글쓰기 화면은 열렸지만 카페·계정·게시판 입력칸을 찾지 못했습니다. "
                 f"표시된 입력칸: {', '.join(visible_inputs) or '없음'}"
             ) from exc
 
