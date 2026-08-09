@@ -31,7 +31,7 @@ V2R_LIST_URL = "https://v2r.daboja.im/nc/board?view=list"
 V2R_SE_ONE_URL = "https://v2r.daboja.im/nc/seone"
 AFFILIATE_CAFE_DELAYS = {"씨씨앙": 4, "양평맘": 10}
 AFFILIATE_CAFE_BOARDS = {"씨씨앙": "자유 수다방", "양평맘": "이모저모 이야기"}
-AFFILIATE_CAFE_SEARCH_TERMS = {"씨씨앙": "씨씨앙", "양평맘": "양평 맘"}
+AFFILIATE_CAFE_SEARCH_TERMS = {"씨씨앙": "씨씨앙", "양평맘": "양평"}
 
 
 class AutomationError(RuntimeError):
@@ -284,36 +284,14 @@ class V2RBrowser:
         # values must remain exact apart from decorative board emoji.
         return label == "카페" and bool(wanted) and wanted in candidate
 
-    def _click_matching_option(self, label: str, value: str) -> None:
-        """Choose a visible drop-down item by exact or whitespace-insensitive text."""
+    def _select_first_dropdown_result(self, input_element, label: str, value: str) -> None:
+        """Choose the first filtered V2R custom-menu result through the keyboard."""
         assert self.driver
-        wanted = self._normalize_option_text(value)
-
-        def matching_option(driver):
-            matches = []
-            for item in driver.find_elements(
-                By.XPATH, "//*[@role='option' or self::li or self::div]"
-            ):
-                if not item.is_displayed() or not item.is_enabled():
-                    continue
-                text = self._normalize_option_text(item.text)
-                if text == wanted:
-                    return item
-                if self._option_text_matches(label, value, item.text):
-                    matches.append(item)
-            # The actual clickable option has less text than the enclosing list.
-            return min(matches, key=lambda item: len(item.text), default=False)
-
-        try:
-            option = self.wait.until(matching_option)
-            self.driver.execute_script(
-                "arguments[0].scrollIntoView({block: 'center'});", option
-            )
-            option.click()
-        except TimeoutException as exc:
-            raise AutomationError(
-                f"'{label}'에서 '{value}'와 일치하는 항목을 찾지 못했습니다"
-            ) from exc
+        # V2R renders a custom result list asynchronously. A brief pause lets
+        # the first filtered row become the keyboard-active item.
+        time.sleep(0.3)
+        input_element.send_keys(Keys.ARROW_DOWN)
+        input_element.send_keys(Keys.ENTER)
 
     def _click_text(self, texts: tuple[str, ...], exact_only: bool = False) -> None:
         assert self.driver
@@ -415,7 +393,7 @@ class V2RBrowser:
             input_element = None
 
         if input_element is not None:
-            self._click_matching_option(label, value)
+            self._select_first_dropdown_result(input_element, label, value)
             return
 
         label_literal = self._xpath_literal(label)
@@ -436,7 +414,9 @@ class V2RBrowser:
         else:
             raise AutomationError(f"선택란을 찾지 못했습니다: {label}")
 
-        self._click_matching_option(label, value)
+        selection_input = candidates[0]
+        selection_input.send_keys(value)
+        self._select_first_dropdown_result(selection_input, label, value)
 
     def _fill_editor(self, body: str) -> None:
         assert self.driver
