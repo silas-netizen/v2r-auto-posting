@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .content import ContentFormatError, ParsedArticle, parse_article
+from .content import ContentFormatError, parse_article
 from .models import AffiliateJob, JobStatus, PostJob
 
 
@@ -170,10 +170,10 @@ def load_jobs(
 
 def load_affiliate_jobs(
     path: str | Path,
-    selected_row_number: int,
+    selected_row_number: int | None = None,
 ) -> list[AffiliateJob]:
-    """Load one or more compact affiliate-cafe tasks from columns A–F."""
-    if selected_row_number < 2:
+    """Load all complete compact affiliate-cafe tasks from columns A–F."""
+    if selected_row_number is not None and selected_row_number < 2:
         raise ValueError("시트 행 번호는 2 이상이어야 합니다")
 
     csv_path = Path(path)
@@ -189,9 +189,13 @@ def load_affiliate_jobs(
                 "제휴용 시트 열을 찾지 못했습니다: " + ", ".join(missing)
             )
 
+        jobs: list[AffiliateJob] = []
+        selected_row_found = False
         for row_number, row in enumerate(reader, start=2):
-            if row_number != selected_row_number:
+            if selected_row_number is not None and row_number != selected_row_number:
                 continue
+            if selected_row_number is not None:
+                selected_row_found = True
 
             keyword = _clean_cell(row.get(AFFILIATE_COLUMNS["keyword"]))
             source = _clean_cell(row.get(AFFILIATE_COLUMNS["body"]))
@@ -210,26 +214,7 @@ def load_affiliate_jobs(
                 if not value
             ]
             if missing_required:
-                job = AffiliateJob(
-                    row_number=row_number,
-                    keyword=keyword,
-                    article=ParsedArticle(
-                        title="",
-                        body="",
-                        keyword=keyword,
-                        tag=re.sub(r"\s+", "", keyword),
-                        comments=[],
-                    ),
-                    cafe=cafe,
-                    account=account,
-                    article_type=article_type,
-                    completion_url=_clean_cell(
-                        row.get(AFFILIATE_COLUMNS["completion_url"])
-                    ),
-                    status=JobStatus.SKIPPED,
-                    message="A~E열 필수값 누락: " + ", ".join(missing_required),
-                )
-                return [job]
+                continue
             try:
                 article = parse_article(keyword, source)
             except ContentFormatError as exc:
@@ -249,6 +234,10 @@ def load_affiliate_jobs(
             if job.completion_url:
                 job.status = JobStatus.SKIPPED
                 job.message = "F열에 완료 링크가 있어 건너뜀"
-            return [job]
+            jobs.append(job)
 
-    raise SheetSchemaError(f"입력한 시트 행 {selected_row_number}을 찾지 못했습니다")
+    if selected_row_number is not None and not selected_row_found:
+        raise SheetSchemaError(f"입력한 시트 행 {selected_row_number}을 찾지 못했습니다")
+    if not jobs:
+        raise SheetSchemaError("A~E열이 모두 채워진 처리 대상 원고가 없습니다")
+    return jobs

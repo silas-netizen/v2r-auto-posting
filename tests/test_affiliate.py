@@ -42,13 +42,15 @@ def test_missing_values_in_columns_a_to_e_skip_affiliate_row(tmp_path: Path) -> 
     path.write_text(
         "키워드,본문,카페명,작성계정,원고유형,완료 링크\n"
         '"키워드","제목 : 제목\n본문 : 본문",양평맘,,질문형,\n',
+        '"정상 키워드","제목 : 정상 제목\n본문 : 정상 본문",씨씨앙,writer,후기형,\n',
         encoding="utf-8-sig",
     )
 
-    jobs = load_affiliate_jobs(path, selected_row_number=2)
+    jobs = load_affiliate_jobs(path)
 
-    assert jobs[0].status == JobStatus.SKIPPED
-    assert "작성계정" in jobs[0].message
+    assert len(jobs) == 1
+    assert jobs[0].row_number == 3
+    assert jobs[0].keyword == "정상 키워드"
 
 
 class FakeAffiliateBrowser:
