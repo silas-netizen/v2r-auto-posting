@@ -483,6 +483,55 @@ class V2RBrowser:
                 f"표시된 입력칸: {', '.join(visible_inputs) or '없음'}"
             ) from exc
 
+    def inspect_se_one_form(self) -> dict[str, object]:
+        """Capture visible SE-ONE controls without filling or publishing anything."""
+        self.start()
+        assert self.driver
+        self._navigate(V2R_SE_ONE_URL, self.v2r_handle)
+        self.v2r_handle = self.driver.current_window_handle
+        self.wait.until(lambda driver: driver.execute_script("return document.readyState") == "complete")
+        time.sleep(0.5)
+        controls = self.driver.execute_script(
+            """
+            return [...document.querySelectorAll(
+                'input, textarea, button, [contenteditable="true"], [role="combobox"]'
+            )]
+                .filter(item => item.offsetParent !== null)
+                .map((item, index) => {
+                    const rect = item.getBoundingClientRect();
+                    const label = item.labels && item.labels.length
+                        ? [...item.labels].map(label => label.innerText.trim()).join(' | ')
+                        : '';
+                    return {
+                        order: index,
+                        tag: item.tagName.toLowerCase(),
+                        type: item.getAttribute('type') || '',
+                        placeholder: item.getAttribute('placeholder') || '',
+                        name: item.getAttribute('name') || '',
+                        role: item.getAttribute('role') || '',
+                        ariaLabel: item.getAttribute('aria-label') || '',
+                        label,
+                        text: (item.innerText || item.textContent || '').trim().slice(0, 80),
+                        x: Math.round(rect.x),
+                        y: Math.round(rect.y),
+                        width: Math.round(rect.width),
+                        height: Math.round(rect.height)
+                    };
+                });
+            """
+        )
+        return {
+            "url": self.driver.current_url,
+            "title": self.driver.title,
+            "controls": controls,
+        }
+
+    def save_screenshot(self, path: Path) -> None:
+        self.start()
+        assert self.driver
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.driver.save_screenshot(str(path))
+
     def _fill_se_one_fields(self, job: PostJob) -> None:
         self._select_option("카페", job.cafe)
         # SE-ONE requires an account before it enables the board selector.
