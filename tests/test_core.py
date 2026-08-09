@@ -37,7 +37,7 @@ def test_cafe_option_matching_ignores_display_whitespace() -> None:
     assert V2RBrowser._normalize_option_text("양평맘") in V2RBrowser._normalize_option_text(
         "양평 맘's 전원 Story"
     )
-    assert AFFILIATE_CAFE_SEARCH_TERMS["양평맘"] == "양평 맘"
+    assert AFFILIATE_CAFE_SEARCH_TERMS["양평맘"] == "양평"
 
 
 def test_account_selection_never_uses_partial_id_matches() -> None:
