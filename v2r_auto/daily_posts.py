@@ -36,10 +36,9 @@ def load_daily_posts(path: str | Path) -> list[DailyPost]:
                 continue
             try:
                 article = parse_article("일상", source)
-            except ContentFormatError as exc:
-                raise DailyPostSheetError(
-                    f"일상 글 시트 {row_number}행 형식 오류: {exc}"
-                ) from exc
+            except ContentFormatError:
+                # Broken template rows are ignored; usable templates must not be blocked.
+                continue
             posts.append(
                 DailyPost(
                     row_number=row_number,

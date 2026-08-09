@@ -60,9 +60,12 @@ def test_missing_values_in_columns_a_to_e_skip_affiliate_row(tmp_path: Path) -> 
 def test_daily_posts_are_matched_to_cafe_without_reuse(tmp_path: Path) -> None:
     path = tmp_path / "daily.csv"
     path.write_text(
-        "번호,제목,내용,카페\n"
-        '1,분류,"제목 : 첫 일상\n본문 : 첫 본문",양평맘\n'
-        '2,분류,"제목 : 둘 일상\n본문 : 둘 본문",양평맘\n',
+        (
+            "번호,제목,내용,카페\n"
+            '1,분류,"제목 : 첫 일상\n본문 : 첫 본문",양평맘\n'
+            '2,분류,"제목 : 둘 일상\n본문 : 둘 본문",양평맘\n'
+            '3,분류,"제목 :\n본문 : 깨진 본문",양평맘\n'
+        ),
         encoding="utf-8-sig",
     )
     jobs = [
