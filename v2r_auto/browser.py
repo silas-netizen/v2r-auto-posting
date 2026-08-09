@@ -266,6 +266,16 @@ class V2RBrowser:
     def _normalize_option_text(value: str) -> str:
         return re.sub(r"\s+", "", value or "").casefold()
 
+    @classmethod
+    def _option_text_matches(cls, label: str, value: str, option_text: str) -> bool:
+        wanted = cls._normalize_option_text(value)
+        candidate = cls._normalize_option_text(option_text)
+        if candidate == wanted:
+            return True
+        # Cafe display names contain extra branding, but account IDs must never
+        # choose a similarly spelled account.
+        return label != "계정" and bool(wanted) and wanted in candidate
+
     def _click_matching_option(self, label: str, value: str) -> None:
         """Choose a visible drop-down item by exact or whitespace-insensitive text."""
         assert self.driver
@@ -281,7 +291,7 @@ class V2RBrowser:
                 text = self._normalize_option_text(item.text)
                 if text == wanted:
                     return item
-                if wanted and wanted in text:
+                if self._option_text_matches(label, value, item.text):
                     matches.append(item)
             # The actual clickable option has less text than the enclosing list.
             return min(matches, key=lambda item: len(item.text), default=False)
@@ -294,7 +304,7 @@ class V2RBrowser:
             option.click()
         except TimeoutException as exc:
             raise AutomationError(
-                f"'{label}'에서 '{value}'가 포함된 항목을 찾지 못했습니다"
+                f"'{label}'에서 '{value}'와 일치하는 항목을 찾지 못했습니다"
             ) from exc
 
     def _click_text(self, texts: tuple[str, ...], exact_only: bool = False) -> None:

@@ -39,6 +39,11 @@ def test_cafe_option_matching_ignores_display_whitespace() -> None:
     )
 
 
+def test_account_selection_never_uses_partial_id_matches() -> None:
+    assert not V2RBrowser._option_text_matches("계정", "prtchht", "prtchhtt")
+    assert V2RBrowser._option_text_matches("계정", "prtchht", "prtchht")
+
+
 def test_history_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "history.json"
     job = sample_job()
