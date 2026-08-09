@@ -443,21 +443,15 @@ class V2RBrowser:
         ]
         if not inputs:
             raise AutomationError(f"선택란을 찾지 못했습니다: {label}")
-        inputs[0].click()
-        options = self.wait.until(
-            lambda driver: [
-                item
-                for item in driver.find_elements(
-                    By.XPATH, "//*[@role='option' or self::li][normalize-space()]"
-                )
-                if item.is_displayed() and item.is_enabled()
-            ]
+        input_element = inputs[0]
+        input_element.click()
+        # V2R's board menu uses custom div items rather than native option/li
+        # elements. Each affiliate cafe exposes one board, so choose its first item.
+        self.wait.until(
+            lambda driver: input_element.get_attribute("aria-expanded") in {"true", None}
         )
-        if len(options) != 1:
-            raise AutomationError(
-                f"'{label}' 항목이 하나여야 자동 선택할 수 있습니다. 현재 {len(options)}개입니다"
-            )
-        options[0].click()
+        input_element.send_keys(Keys.ARROW_DOWN)
+        input_element.send_keys(Keys.ENTER)
 
     def _fill_editor(self, body: str) -> None:
         assert self.driver
