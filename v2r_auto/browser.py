@@ -262,6 +262,41 @@ class V2RBrowser:
         parts = value.split("'")
         return "concat(" + ", \"'\", ".join(f"'{part}'" for part in parts) + ")"
 
+    @staticmethod
+    def _normalize_option_text(value: str) -> str:
+        return re.sub(r"\s+", "", value or "").casefold()
+
+    def _click_matching_option(self, label: str, value: str) -> None:
+        """Choose a visible drop-down item by exact or whitespace-insensitive text."""
+        assert self.driver
+        wanted = self._normalize_option_text(value)
+
+        def matching_option(driver):
+            matches = []
+            for item in driver.find_elements(
+                By.XPATH, "//*[@role='option' or self::li or self::div]"
+            ):
+                if not item.is_displayed() or not item.is_enabled():
+                    continue
+                text = self._normalize_option_text(item.text)
+                if text == wanted:
+                    return item
+                if wanted and wanted in text:
+                    matches.append(item)
+            # The actual clickable option has less text than the enclosing list.
+            return min(matches, key=lambda item: len(item.text), default=False)
+
+        try:
+            option = self.wait.until(matching_option)
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'});", option
+            )
+            option.click()
+        except TimeoutException as exc:
+            raise AutomationError(
+                f"'{label}'에서 '{value}'가 포함된 항목을 찾지 못했습니다"
+            ) from exc
+
     def _click_text(self, texts: tuple[str, ...], exact_only: bool = False) -> None:
         assert self.driver
         for text in texts:
@@ -357,17 +392,8 @@ class V2RBrowser:
             input_element = None
 
         if input_element is not None:
-            value_literal = self._xpath_literal(value)
-            option_xpath = (
-                f"//*[@role='option' or self::li or self::div]"
-                f"[normalize-space()={value_literal}]"
-            )
-            try:
-                option = self.wait.until(EC.element_to_be_clickable((By.XPATH, option_xpath)))
-                option.click()
-                return
-            except TimeoutException as exc:
-                raise AutomationError(f"'{label}'에서 '{value}' 항목을 찾지 못했습니다") from exc
+            self._click_matching_option(label, value)
+            return
 
         label_literal = self._xpath_literal(label)
         label_elements = self.driver.find_elements(
@@ -387,16 +413,7 @@ class V2RBrowser:
         else:
             raise AutomationError(f"선택란을 찾지 못했습니다: {label}")
 
-        value_literal = self._xpath_literal(value)
-        option_xpath = (
-            f"//*[@role='option' or self::li or self::div]"
-            f"[normalize-space()={value_literal}]"
-        )
-        try:
-            option = self.wait.until(EC.element_to_be_clickable((By.XPATH, option_xpath)))
-            option.click()
-        except TimeoutException as exc:
-            raise AutomationError(f"'{label}'에서 '{value}' 항목을 찾지 못했습니다") from exc
+        self._click_matching_option(label, value)
 
     def _select_only_option(self, label: str) -> None:
         """Select the sole available option for an affiliate cafe's fixed board."""

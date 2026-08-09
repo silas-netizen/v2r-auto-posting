@@ -33,6 +33,12 @@ def test_se_one_uses_direct_v2r_url() -> None:
     assert V2R_SE_ONE_URL == "https://v2r.daboja.im/nc/seone"
 
 
+def test_cafe_option_matching_ignores_display_whitespace() -> None:
+    assert V2RBrowser._normalize_option_text("양평맘") in V2RBrowser._normalize_option_text(
+        "양평 맘's 전원 Story"
+    )
+
+
 def test_history_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "history.json"
     job = sample_job()
