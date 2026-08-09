@@ -319,14 +319,26 @@ class V2RBrowser:
             return
         assert self.driver
         se_one_placeholders = {
-            "카페": "카페 검색",
-            "게시판": "게시판 검색",
-            "말머리": "말머리 검색",
+            "카페": (
+                "input[placeholder*='카페']",
+                "input[name*='cafe' i]",
+            ),
+            "게시판": (
+                "input[placeholder*='게시판']",
+                "input[name*='board' i]",
+            ),
+            "말머리": (
+                "input[placeholder*='말머리']",
+            ),
         }
         if label in se_one_placeholders:
-            selectors = [f"input[placeholder='{se_one_placeholders[label]}']"]
+            selectors = list(se_one_placeholders[label])
         elif label == "계정":
-            selectors = ["input[placeholder='닉네임 or 계정 검색']"]
+            selectors = [
+                "input[placeholder*='닉네임']",
+                "input[placeholder*='계정']",
+                "input[name*='account' i]",
+            ]
         else:
             selectors = []
         for selector in selectors:
@@ -390,15 +402,15 @@ class V2RBrowser:
         """Select the sole available option for an affiliate cafe's fixed board."""
         assert self.driver
         placeholders = {
-            "게시판": "게시판 검색",
+            "게시판": "input[placeholder*='게시판'], input[name*='board' i]",
         }
-        placeholder = placeholders.get(label)
-        if not placeholder:
+        selector = placeholders.get(label)
+        if not selector:
             raise AutomationError(f"자동 선택을 지원하지 않는 항목입니다: {label}")
         inputs = [
             item
             for item in self.driver.find_elements(
-                By.CSS_SELECTOR, f"input[placeholder='{placeholder}']"
+                By.CSS_SELECTOR, selector
             )
             if item.is_displayed()
         ]
@@ -448,11 +460,30 @@ class V2RBrowser:
         self._navigate(V2R_SE_ONE_URL, self.v2r_handle)
         self.v2r_handle = self.driver.current_window_handle
         self.wait.until(lambda driver: driver.execute_script("return document.readyState") == "complete")
-        self.wait.until(
-            EC.visibility_of_element_located(
-                (By.CSS_SELECTOR, "input[placeholder='카페 검색']")
+        try:
+            self.wait.until(
+                lambda driver: any(
+                    item.is_displayed()
+                    for item in driver.find_elements(
+                        By.CSS_SELECTOR,
+                        "input[placeholder*='카페'], input[name*='cafe' i]",
+                    )
+                )
             )
-        )
+        except TimeoutException as exc:
+            visible_inputs = self.driver.execute_script(
+                """
+                return [...document.querySelectorAll('input, textarea')]
+                    .filter(item => item.offsetParent !== null)
+                    .map(item => item.placeholder || item.name || item.type)
+                    .filter(Boolean)
+                    .slice(0, 10);
+                """
+            )
+            raise AutomationError(
+                "SE-ONE 글쓰기 화면은 열렸지만 카페 입력칸을 찾지 못했습니다. "
+                f"표시된 입력칸: {', '.join(visible_inputs) or '없음'}"
+            ) from exc
 
     def _fill_se_one_fields(self, job: PostJob) -> None:
         self._select_option("카페", job.cafe)
