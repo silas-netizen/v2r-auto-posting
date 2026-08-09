@@ -494,7 +494,9 @@ class V2RBrowser:
         controls = self.driver.execute_script(
             """
             return [...document.querySelectorAll(
-                'input, textarea, button, [contenteditable="true"], [role="combobox"]'
+                'input, textarea, button, iframe, [contenteditable="true"], '
+                '[role="combobox"], [class*="editor"], [class*="Editor"], '
+                '[class*="ProseMirror"]'
             )]
                 .filter(item => item.offsetParent !== null)
                 .map((item, index) => {
