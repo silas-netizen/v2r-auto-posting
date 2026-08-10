@@ -56,6 +56,7 @@ class V2RBrowser:
         self.v2r_handle: str | None = None
         self.google_handle: str | None = None
         self._api_capture_active = False
+        self._affiliate_publisher = None
 
     def start(self) -> None:
         if self.driver:
@@ -92,6 +93,7 @@ class V2RBrowser:
             self.v2r_handle = None
             self.google_handle = None
             self._api_capture_active = False
+            self._affiliate_publisher = None
 
     @property
     def wait(self) -> WebDriverWait:
@@ -883,15 +885,20 @@ class V2RBrowser:
 
     def publish_affiliate_revision(self, job: AffiliateJob, dry_run: bool) -> str:
         """Run the live-verified affiliate flow through V2R's own API."""
+        return self._get_affiliate_publisher().publish(job, dry_run)
+
+    def _get_affiliate_publisher(self):
         from .affiliate_api import AffiliateApiPublisher
 
-        publisher = AffiliateApiPublisher(self, self.logger)
-        return publisher.publish(job, dry_run)
+        if self._affiliate_publisher is None:
+            self._affiliate_publisher = AffiliateApiPublisher(self, self.logger)
+        return self._affiliate_publisher
+
+    def start_affiliate_api_run(self) -> None:
+        publisher = self._get_affiliate_publisher()
+        publisher._capture_authorization()
 
     def assign_affiliate_accounts(
         self, jobs: list[AffiliateJob]
     ) -> list[AffiliateJob]:
-        from .affiliate_api import AffiliateApiPublisher
-
-        publisher = AffiliateApiPublisher(self, self.logger)
-        return publisher.assign_accounts(jobs)
+        return self._get_affiliate_publisher().assign_accounts(jobs)

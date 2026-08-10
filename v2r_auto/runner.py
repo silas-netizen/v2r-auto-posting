@@ -137,6 +137,7 @@ class AffiliateRunner:
     ) -> tuple[RunResult, Path]:
         started_at = datetime.now()
         self.browser.ensure_v2r_login(email, password)
+        self.browser.start_affiliate_api_run()
         assigned_jobs = (
             self.browser.assign_affiliate_accounts(jobs)
             if any(not job.account and job.status == JobStatus.PENDING for job in jobs)

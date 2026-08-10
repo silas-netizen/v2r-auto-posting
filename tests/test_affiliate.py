@@ -199,6 +199,9 @@ class FakeAffiliateBrowser:
     def ensure_v2r_login(self, email: str, password: str) -> None:
         return None
 
+    def start_affiliate_api_run(self) -> None:
+        return None
+
     def publish_affiliate_revision(self, job, dry_run: bool) -> str:
         assert dry_run
         self.published.append(job)

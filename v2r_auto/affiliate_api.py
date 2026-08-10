@@ -23,8 +23,21 @@ COMMENT_ACCOUNTS = (
     "chenallo",
     "colpith",
 )
-CAFE_BOARDS = {"씨씨앙": "자유 수다방", "양평맘": "이모저모 이야기"}
 CAFE_DELAYS = {"씨씨앙": 4, "양평맘": 10}
+CAFE_DESTINATIONS = {
+    "씨씨앙": {
+        "cafe_id": 25016228,
+        "cafe_name": "국내1위 다이어트 커뮤니티 씨씨앙(식단,운동,후기,헬스,체험단)",
+        "menu_id": 328,
+        "menu_name": "자유 수다방",
+    },
+    "양평맘": {
+        "cafe_id": 22788814,
+        "cafe_name": "양평 맘`s 전원 Story",
+        "menu_id": 14,
+        "menu_name": "이모저모 이야기💕",
+    },
+}
 
 
 class AffiliateApiError(RuntimeError):
@@ -91,6 +104,8 @@ class AffiliateApiPublisher:
         self.authorization = ""
 
     def _capture_authorization(self) -> None:
+        if self.authorization:
+            return
         driver = self.browser.driver
         if driver is None:
             raise AffiliateApiError("Chrome이 열려 있지 않습니다")
@@ -120,6 +135,8 @@ class AffiliateApiPublisher:
         path: str,
         payload: dict[str, Any] | None = None,
         query: dict[str, Any] | None = None,
+        *,
+        retry_auth: bool = True,
     ) -> Any:
         url = API_ROOT + path
         if query:
@@ -139,6 +156,21 @@ class AffiliateApiPublisher:
                 raw = response.read()
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
+            if (
+                retry_auth
+                and exc.code == 403
+                and "TOKEN_ERROR" in detail
+                and self.browser is not None
+            ):
+                self.authorization = ""
+                self._capture_authorization()
+                return self._request(
+                    method,
+                    path,
+                    payload,
+                    query,
+                    retry_auth=False,
+                )
             raise AffiliateApiError(
                 f"V2R 요청 실패 ({exc.code}): {path} - {detail[:300]}"
             ) from exc
@@ -152,42 +184,11 @@ class AffiliateApiPublisher:
         return None
 
     def _resolve_destination(self, job: AffiliateJob) -> dict[str, Any]:
-        cafes = self._request("GET", "/naver_cafes/naver_join_cafes")
-        cafe = next(
-            (
-                item
-                for item in _walk_dicts(cafes)
-                if self._field(item, "cafe_id", "cafeId")
-                and _normalized(job.cafe)
-                in _normalized(
-                    str(
-                        self._field(
-                            item,
-                            "cafe_name",
-                            "cafeName",
-                            "pc_cafe_name",
-                            "mobile_cafe_name",
-                            "name",
-                        )
-                        or ""
-                    )
-                )
-            ),
-            None,
-        )
-        if not cafe:
-            raise AffiliateApiError(f"V2R에서 카페를 찾지 못했습니다: {job.cafe}")
-        cafe_id = int(self._field(cafe, "cafe_id", "cafeId"))
-        cafe_name = str(
-            self._field(
-                cafe,
-                "cafe_name",
-                "cafeName",
-                "pc_cafe_name",
-                "mobile_cafe_name",
-                "name",
-            )
-        )
+        config = CAFE_DESTINATIONS.get(job.cafe)
+        if not config:
+            raise AffiliateApiError(f"지원하지 않는 제휴 카페입니다: {job.cafe}")
+        cafe_id = int(config["cafe_id"])
+        cafe_name = str(config["cafe_name"])
 
         accounts = self._request("GET", "/navers/accounts")
         if not any(
@@ -197,23 +198,8 @@ class AffiliateApiPublisher:
         ):
             raise AffiliateApiError(f"V2R에서 작성계정을 찾지 못했습니다: {job.account}")
 
-        menus = self._request(
-            "GET",
-            "/naver_cafes/menus",
-            query={"cafe_id": cafe_id, "naver_login_id": job.account},
-        )
-        board_name = CAFE_BOARDS[job.cafe]
-        menu = next(
-            (
-                item
-                for item in _walk_dicts(menus)
-                if _normalized(str(self._field(item, "menu_name", "menuName") or ""))
-                == _normalized(board_name)
-            ),
-            None,
-        )
-        if not menu:
-            raise AffiliateApiError(f"V2R에서 게시판을 찾지 못했습니다: {board_name}")
+        board_name = str(config["menu_name"])
+        menu_id = int(config["menu_id"])
 
         head_id = None
         head_name = None
@@ -224,7 +210,7 @@ class AffiliateApiPublisher:
                 query={
                     "cafe_id": cafe_id,
                     "naver_login_id": job.account,
-                    "menu_id": int(self._field(menu, "menu_id", "menuId")),
+                    "menu_id": menu_id,
                 },
             )
             head = next(
@@ -246,7 +232,7 @@ class AffiliateApiPublisher:
             "cafe_name": cafe_name,
             "head_id": head_id,
             "head_name": head_name,
-            "menu_id": int(self._field(menu, "menu_id", "menuId")),
+            "menu_id": menu_id,
             "menu_name": board_name,
             "naver_login_id": job.account,
             "target_view_count": 0,

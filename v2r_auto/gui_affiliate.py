@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 import tkinter as tk
-from datetime import datetime
 from tkinter import messagebox, ttk
 
 from .daily_posts import load_daily_posts
@@ -47,25 +45,16 @@ class AffiliateAutomationApp(AutomationApp):
         actions.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 10))
         ttk.Checkbutton(
             actions,
-            text="검증 모드(실제 등록하지 않음)",
+            text="검증 모드(글을 절대 등록하지 않음)",
             variable=self.dry_run,
         ).pack(side=tk.LEFT)
         ttk.Button(actions, text="1. 로그인 준비", command=self._open_login).pack(
             side=tk.LEFT, padx=(16, 0)
         )
-        ttk.Button(actions, text="2. 화면 확인", command=self._inspect_form).pack(
+        ttk.Button(actions, text="2. 대상 확인", command=self._check_data).pack(
             side=tk.LEFT, padx=6
         )
-        ttk.Button(actions, text="3. API 확인 시작", command=self._start_api_capture).pack(
-            side=tk.LEFT, padx=6
-        )
-        ttk.Button(actions, text="4. API 확인 저장", command=self._finish_api_capture).pack(
-            side=tk.LEFT, padx=6
-        )
-        ttk.Button(actions, text="5. 대상 확인", command=self._check_data).pack(
-            side=tk.LEFT, padx=6
-        )
-        self.start_button = ttk.Button(actions, text="6. 수정 발행 시작", command=self._start)
+        self.start_button = ttk.Button(actions, text="3. 수정 발행 시작", command=self._start)
         self.start_button.pack(side=tk.LEFT)
         self.stop_button = ttk.Button(actions, text="중지", command=self._stop, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=6)
@@ -102,74 +91,6 @@ class AffiliateAutomationApp(AutomationApp):
         source_csv = self._get_csv_path("", sheet_url)
         daily_csv = self.browser.download_sheet(DAILY_POST_SHEET_URL)
         return load_affiliate_jobs(source_csv), load_daily_posts(daily_csv)
-
-    def _inspect_form(self) -> None:
-        def work() -> None:
-            form_map = self.browser.inspect_se_one_form()
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            report_path = self.report_dir / f"SE-ONE_화면확인_{stamp}.json"
-            screenshot_path = self.report_dir / f"SE-ONE_화면확인_{stamp}.png"
-            report_path.write_text(
-                json.dumps(form_map, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            self.browser.save_screenshot(screenshot_path)
-            controls = form_map.get("controls", [])
-            self.logger.info(
-                "SE-ONE 화면 확인 완료: 입력·버튼 %s개 / 보고서: %s",
-                len(controls),
-                report_path,
-            )
-            self.ui_queue.put(
-                (
-                    "info",
-                    (
-                        "화면 확인 완료",
-                        "글은 등록하지 않았습니다.\n"
-                        f"보고서: {report_path}\n"
-                        f"화면: {screenshot_path}",
-                    ),
-                )
-            )
-
-        self._run_background(work)
-
-    def _start_api_capture(self) -> None:
-        def work() -> None:
-            self.browser.start_api_capture()
-            self.ui_queue.put(
-                (
-                    "info",
-                    (
-                        "API 확인 기록 중",
-                        "이제 크롬 V2R 화면에서 일상 글 작성부터 최종 등록까지 진행하세요.\n"
-                        "끝나면 프로그램에서 '4. API 확인 저장'을 누르세요.",
-                    ),
-                )
-            )
-
-        self._run_background(work)
-
-    def _finish_api_capture(self) -> None:
-        def work() -> None:
-            requests = self.browser.finish_api_capture()
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            report_path = self.report_dir / f"V2R_API_확인_{stamp}.json"
-            report_path.write_text(
-                json.dumps({"requests": requests}, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            self.ui_queue.put(
-                (
-                    "info",
-                    (
-                        "API 확인 저장 완료",
-                        f"글 내용·비밀번호는 저장하지 않았습니다.\n결과: {report_path}",
-                    ),
-                )
-            )
-
-        self._run_background(work)
 
     def _check_data(self) -> None:
         try:
@@ -210,7 +131,15 @@ class AffiliateAutomationApp(AutomationApp):
         except ValueError as exc:
             messagebox.showerror("입력 오류", str(exc))
             return
-        if not self.dry_run.get():
+        if self.dry_run.get():
+            confirmed = messagebox.askyesno(
+                "검증 모드 확인",
+                "검증 모드가 켜져 있어 실제 글은 하나도 등록되지 않습니다.\n"
+                "데이터 검증만 실행할까요?",
+            )
+            if not confirmed:
+                return
+        else:
             confirmed = messagebox.askyesno(
                 "실제 수정 발행 확인",
                 "검증 모드가 꺼져 있습니다.\n일상 글과 수정 글이 실제로 등록됩니다. 계속할까요?",
