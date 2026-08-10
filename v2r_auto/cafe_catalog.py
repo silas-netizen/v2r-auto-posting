@@ -169,6 +169,16 @@ class CafeCatalogService:
             if not cafe_id or not cafe_name or cafe_id in seen_cafes:
                 continue
             seen_cafes.add(cafe_id)
+            category = _category(cafe_id, cafe_name)
+            if category not in {"자사 카페", "노출 테스트 카페"}:
+                catalog.append(
+                    CafeCatalogEntry(
+                        cafe_id=cafe_id,
+                        name=html.unescape(cafe_name),
+                        category=category,
+                    )
+                )
+                continue
 
             status = self.request(
                 "GET",
@@ -232,7 +242,7 @@ class CafeCatalogService:
                 CafeCatalogEntry(
                     cafe_id=cafe_id,
                     name=html.unescape(cafe_name),
-                    category=_category(cafe_id, cafe_name),
+                    category=category,
                     accounts=accounts,
                     menus=sorted(menu_map.values(), key=lambda item: (item.name, item.menu_id)),
                 )
