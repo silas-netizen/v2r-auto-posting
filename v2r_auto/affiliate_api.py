@@ -159,14 +159,35 @@ class AffiliateApiPublisher:
                 for item in _walk_dicts(cafes)
                 if self._field(item, "cafe_id", "cafeId")
                 and _normalized(job.cafe)
-                in _normalized(str(self._field(item, "cafe_name", "cafeName", "name") or ""))
+                in _normalized(
+                    str(
+                        self._field(
+                            item,
+                            "cafe_name",
+                            "cafeName",
+                            "pc_cafe_name",
+                            "mobile_cafe_name",
+                            "name",
+                        )
+                        or ""
+                    )
+                )
             ),
             None,
         )
         if not cafe:
             raise AffiliateApiError(f"V2R에서 카페를 찾지 못했습니다: {job.cafe}")
         cafe_id = int(self._field(cafe, "cafe_id", "cafeId"))
-        cafe_name = str(self._field(cafe, "cafe_name", "cafeName", "name"))
+        cafe_name = str(
+            self._field(
+                cafe,
+                "cafe_name",
+                "cafeName",
+                "pc_cafe_name",
+                "mobile_cafe_name",
+                "name",
+            )
+        )
 
         accounts = self._request("GET", "/navers/accounts")
         if not any(
