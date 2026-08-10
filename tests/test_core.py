@@ -4,7 +4,12 @@ import threading
 
 import pytest
 
-from v2r_auto.browser import V2R_SE_ONE_URL, V2RBrowser
+from v2r_auto.browser import (
+    AFFILIATE_CAFE_SEARCH_TERMS,
+    SE_ONE_SELECTION_INDEX,
+    V2R_SE_ONE_URL,
+    V2RBrowser,
+)
 from v2r_auto.history import HistoryCorruptedError, HistoryStore
 from v2r_auto.models import JobStatus, PostJob, RunResult
 from v2r_auto.report import write_report
@@ -31,6 +36,34 @@ def test_google_sheet_export_url() -> None:
 
 def test_se_one_uses_direct_v2r_url() -> None:
     assert V2R_SE_ONE_URL == "https://v2r.daboja.im/nc/seone"
+
+
+def test_cafe_option_matching_ignores_display_whitespace() -> None:
+    assert V2RBrowser._normalize_option_text("양평맘") in V2RBrowser._normalize_option_text(
+        "양평 맘's 전원 Story"
+    )
+    assert AFFILIATE_CAFE_SEARCH_TERMS["양평맘"] == "양평"
+    assert SE_ONE_SELECTION_INDEX == {"카페": 0, "계정": 1, "게시판": 2, "말머리": 3}
+
+
+def test_account_selection_never_uses_partial_id_matches() -> None:
+    assert not V2RBrowser._option_text_matches("계정", "prtchht", "prtchhtt")
+    assert V2RBrowser._option_text_matches("계정", "prtchht", "prtchht")
+
+
+def test_board_selection_requires_exact_display_name() -> None:
+    assert V2RBrowser._option_text_matches("게시판", "자유 수다방", "자유 수다방")
+    assert not V2RBrowser._option_text_matches("게시판", "자유 수다방", "자유 게시판")
+    assert V2RBrowser._option_text_matches(
+        "게시판", "이모저모 이야기", "이모저모 이야기💘"
+    )
+
+
+def test_api_capture_summarizes_payload_keys_without_values() -> None:
+    assert V2RBrowser._request_payload_summary('{"title":"비밀 글","body":"본문"}') == {
+        "format": "json",
+        "keys": ["body", "title"],
+    }
 
 
 def test_history_round_trip(tmp_path: Path) -> None:
