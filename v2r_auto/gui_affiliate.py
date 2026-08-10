@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import queue
 import tkinter as tk
+import time
 from tkinter import messagebox, ttk
 
 from .daily_posts import load_daily_posts
 from .gui import AutomationApp
 from .runner import AffiliateRunner
 from .sheet import load_affiliate_jobs
+from .state import AnotherInstanceRunningError, InstanceLock
 
 
 DAILY_POST_SHEET_URL = (
@@ -20,6 +23,28 @@ class AffiliateAutomationApp(AutomationApp):
 
     app_name = "V2R 제휴 카페 수정 발행"
     data_folder_name = "V2RAffiliatePosting"
+
+    def __init__(self):
+        super().__init__()
+        self._cleanup_old_files()
+        self.instance_lock = InstanceLock(self.data_dir / "data" / "worker.lock")
+        try:
+            self.instance_lock.__enter__()
+        except AnotherInstanceRunningError as exc:
+            messagebox.showerror("중복 실행", str(exc))
+            self.destroy()
+            raise SystemExit(1) from exc
+
+    def _cleanup_old_files(self) -> None:
+        now = time.time()
+        for directory, days in ((self.log_dir, 30), (self.report_dir, 90)):
+            cutoff = now - days * 86400
+            for path in directory.iterdir():
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    try:
+                        path.unlink()
+                    except OSError:
+                        self.logger.warning("오래된 파일 삭제 실패: %s", path)
 
     def _create_variables(self) -> None:
         self.sheet_url = tk.StringVar()
@@ -64,7 +89,7 @@ class AffiliateAutomationApp(AutomationApp):
         progress_frame.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_frame, maximum=100)
         self.progress.grid(row=0, column=0, sticky="ew")
-        ttk.Label(progress_frame, textvariable=self.progress_text, width=18).grid(
+        ttk.Label(progress_frame, textvariable=self.progress_text, width=48).grid(
             row=0, column=1, padx=(10, 0)
         )
 
@@ -161,8 +186,9 @@ class AffiliateAutomationApp(AutomationApp):
                     browser=self.browser,
                     report_dir=self.report_dir,
                     logger=self.logger,
+                    state_path=self.data_dir / "data" / "jobs.db",
                 )
-                _, report_path = runner.run(
+                result, report_path = runner.run(
                     jobs=jobs,
                     email="",
                     password="",
@@ -171,11 +197,18 @@ class AffiliateAutomationApp(AutomationApp):
                     progress=self._set_progress,
                     daily_posts=daily_posts,
                     source_sheet_url=sheet_url,
+                    status=self._set_status,
                 )
                 self.ui_queue.put(
                     (
                         "info",
-                        ("작업 완료", f"작업이 완료되었습니다.\n결과: {report_path}"),
+                        (
+                            "작업 종료",
+                            f"성공 {result.succeeded}건\n"
+                            f"실패 {result.failed}건\n"
+                            f"건너뜀 {result.skipped}건\n"
+                            f"결과: {report_path}",
+                        ),
                     )
                 )
             except Exception as exc:
@@ -185,6 +218,30 @@ class AffiliateAutomationApp(AutomationApp):
                 self.ui_queue.put(("finished", None))
 
         self.worker = self.executor.submit(work)
+
+    def _set_status(self, values: dict[str, int]) -> None:
+        self.ui_queue.put(("affiliate_status", values))
+
+    def _drain_logs(self) -> None:
+        while True:
+            try:
+                kind, payload = self.ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "affiliate_status":
+                self.progress_text.set(
+                    "대기 {pending} | 성공 {success} | 재시도 {retrying} | "
+                    "실패 {failed} | 건너뜀 {skipped}".format(**payload)
+                )
+            else:
+                self.ui_queue.put((kind, payload))
+                break
+        super()._drain_logs()
+
+    def _on_close(self) -> None:
+        if hasattr(self, "instance_lock"):
+            self.instance_lock.__exit__(None, None, None)
+        super()._on_close()
 
 
 def main() -> None:

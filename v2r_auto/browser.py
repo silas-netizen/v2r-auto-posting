@@ -28,7 +28,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from .content import ParsedArticle
-from .models import AffiliateJob, PostJob
+from .models import AffiliateJob, JobStatus, PostJob
 
 
 V2R_LIST_URL = "https://v2r.daboja.im/nc/board?view=list"
@@ -917,9 +917,20 @@ class V2RBrowser:
         for comment in job.comments:
             publish_node(comment)
 
-    def publish_affiliate_revision(self, job: AffiliateJob, dry_run: bool) -> str:
+    def publish_affiliate_revision(
+        self,
+        job: AffiliateJob,
+        dry_run: bool,
+        resume=None,
+        checkpoint=None,
+    ) -> str:
         """Run the live-verified affiliate flow through V2R's own API."""
-        return self._get_affiliate_publisher().publish(job, dry_run)
+        return self._get_affiliate_publisher().publish(
+            job,
+            dry_run,
+            resume=resume,
+            checkpoint=checkpoint,
+        )
 
     def _get_affiliate_publisher(self):
         from .affiliate_api import AffiliateApiPublisher
@@ -928,9 +939,13 @@ class V2RBrowser:
             self._affiliate_publisher = AffiliateApiPublisher(self, self.logger)
         return self._affiliate_publisher
 
-    def start_affiliate_api_run(self) -> None:
+    def start_affiliate_api_run(self, jobs: list[AffiliateJob] | None = None) -> None:
         publisher = self._get_affiliate_publisher()
         publisher._capture_authorization()
+        if jobs:
+            publisher.cleanup_stale_sources(
+                {job.cafe for job in jobs if job.status == JobStatus.PENDING}
+            )
 
     def assign_affiliate_accounts(
         self, jobs: list[AffiliateJob]

@@ -2,7 +2,7 @@ import logging
 import random
 import threading
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from v2r_auto.affiliate_api import AffiliateApiPublisher, _content_json
@@ -192,6 +192,18 @@ def test_api_assignment_uses_actual_real_name_type(tmp_path: Path) -> None:
     assert [job.account for job in assigned] == ["real-id", "alias-id"]
 
 
+def test_comment_time_collision_moves_one_minute() -> None:
+    publisher = AffiliateApiPublisher(None, logging.getLogger("test"))
+    start = datetime(2026, 8, 10, 9, 0, 15, tzinfo=timezone.utc)
+
+    first = publisher._comment("account", "첫 댓글", start)
+    second = publisher._comment("account", "둘째 댓글", start)
+
+    first_at = datetime.fromisoformat(first["start_at"].replace("Z", "+00:00"))
+    second_at = datetime.fromisoformat(second["start_at"].replace("Z", "+00:00"))
+    assert second_at == first_at + timedelta(minutes=1)
+
+
 class FakeAffiliateBrowser:
     def __init__(self) -> None:
         self.published = []
@@ -199,13 +211,15 @@ class FakeAffiliateBrowser:
     def ensure_v2r_login(self, email: str, password: str) -> None:
         return None
 
-    def start_affiliate_api_run(self) -> None:
+    def start_affiliate_api_run(self, jobs=None) -> None:
         return None
 
     def assign_affiliate_accounts(self, jobs):
         return []
 
-    def publish_affiliate_revision(self, job, dry_run: bool) -> str:
+    def publish_affiliate_revision(
+        self, job, dry_run: bool, resume=None, checkpoint=None
+    ) -> str:
         assert dry_run
         self.published.append(job)
         return ""
@@ -248,7 +262,9 @@ def test_affiliate_runner_retries_with_replacement_account(tmp_path: Path) -> No
             self.calls = 0
             self.sheet_updates = []
 
-        def publish_affiliate_revision(self, job, dry_run: bool) -> str:
+        def publish_affiliate_revision(
+            self, job, dry_run: bool, resume=None, checkpoint=None
+        ) -> str:
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("NAVER_LOGIN_FAIL")

@@ -7,7 +7,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -106,6 +106,7 @@ class AffiliateApiPublisher:
         self.account_indexes: dict[tuple[str, str], int] = {}
         self.blocked_accounts: set[str] = set()
         self.used_accounts: set[str] = set()
+        self.comment_slots: dict[str, set[datetime]] = {}
 
     def _capture_authorization(self) -> None:
         if self.authorization:
@@ -155,29 +156,55 @@ class AffiliateApiPublisher:
                 "Content-Type": "application/json",
             },
         )
-        try:
-            with urlopen(request, timeout=30) as response:
-                raw = response.read()
-        except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            if (
-                retry_auth
-                and exc.code == 403
-                and "TOKEN_ERROR" in detail
-                and self.browser is not None
-            ):
-                self.authorization = ""
-                self._capture_authorization()
-                return self._request(
-                    method,
-                    path,
-                    payload,
-                    query,
-                    retry_auth=False,
-                )
-            raise AffiliateApiError(
-                f"V2R 요청 실패 ({exc.code}): {path} - {detail[:300]}"
-            ) from exc
+        delays = (10, 30, 120, 300)
+        for attempt in range(5):
+            try:
+                with urlopen(request, timeout=30) as response:
+                    raw = response.read()
+                break
+            except HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                if (
+                    retry_auth
+                    and exc.code == 403
+                    and "TOKEN_ERROR" in detail
+                    and self.browser is not None
+                ):
+                    self.authorization = ""
+                    self._capture_authorization()
+                    return self._request(
+                        method,
+                        path,
+                        payload,
+                        query,
+                        retry_auth=False,
+                    )
+                if (exc.code == 429 or exc.code >= 500) and attempt < 4:
+                    delay = delays[attempt]
+                    self.logger.warning(
+                        "V2R 일시 오류 %s: %s초 후 재시도 (%s/5)",
+                        exc.code,
+                        delay,
+                        attempt + 2,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise AffiliateApiError(
+                    f"V2R 요청 실패 ({exc.code}): {path} - {detail[:300]}"
+                ) from exc
+            except (URLError, TimeoutError) as exc:
+                if attempt < 4:
+                    delay = delays[attempt]
+                    self.logger.warning(
+                        "네트워크 오류: %s초 후 재시도 (%s/5)",
+                        delay,
+                        attempt + 2,
+                    )
+                    time.sleep(delay)
+                    continue
+                raise AffiliateApiError(f"V2R 네트워크 요청 실패: {path}") from exc
+        else:
+            raise AffiliateApiError(f"V2R 요청 재시도 실패: {path}")
         return json.loads(raw) if raw else None
 
     @staticmethod
@@ -439,6 +466,38 @@ class AffiliateApiPublisher:
             return "실패: 일상 글 발행 시간 초과", True
         return f"실패: {text[:150]}", False
 
+    def cleanup_stale_sources(self, cafe_names: set[str]) -> None:
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
+        for cafe_name in cafe_names:
+            config = CAFE_DESTINATIONS.get(cafe_name)
+            if not config:
+                continue
+            history = self._request(
+                "GET",
+                "/naver_cafe_articles/board_histories",
+                query={
+                    "cafe_id": config["cafe_id"],
+                    "days_ago": 1,
+                    "include_reserve": "true",
+                },
+            )
+            for item in history.get("histories", []):
+                status = item.get("status")
+                created_raw = item.get("created_at")
+                if not created_raw:
+                    continue
+                created_at = datetime.fromisoformat(
+                    str(created_raw).replace("Z", "+00:00")
+                )
+                stale_reserved = (
+                    status == "RESERVED"
+                    and item.get("parent_source_id") is None
+                    and item.get("write_executor") is None
+                    and created_at < cutoff
+                )
+                if status == "FAIL" or stale_reserved:
+                    self._delete_source(str(item["source_id"]))
+
     def _member(self, cafe_id: int, account: str) -> dict[str, str]:
         cafe = self._request(
             "GET",
@@ -591,8 +650,8 @@ class AffiliateApiPublisher:
             time.sleep(2)
         raise AffiliateApiError("일상 글 등록 완료 시간을 확인하지 못했습니다")
 
-    @staticmethod
     def _comment(
+        self,
         account: str,
         text: str,
         start_at: datetime,
@@ -600,6 +659,12 @@ class AffiliateApiPublisher:
         root_start_at: datetime | None = None,
         reply_member: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        minute = start_at.replace(second=0, microsecond=0)
+        occupied = self.comment_slots.setdefault(account, set())
+        while minute in occupied:
+            start_at += timedelta(minutes=1)
+            minute = start_at.replace(second=0, microsecond=0)
+        occupied.add(minute)
         item: dict[str, Any] = {
             "contents": text,
             "naver_login_id": account,
@@ -648,10 +713,11 @@ class AffiliateApiPublisher:
         deep_member = self._member(cafe_id, deep_account)
 
         def root(label: str, root_minute: int, reply_label: str, reply_minute: int):
-            root_at = start_at + timedelta(minutes=root_minute)
+            proposed_root_at = start_at + timedelta(minutes=root_minute)
             item = self._comment(
-                account[label], by_label[label].text, root_at
+                account[label], by_label[label].text, proposed_root_at
             )
+            root_at = datetime.fromisoformat(item["start_at"].replace("Z", "+00:00"))
             item["comments"] = [
                 self._comment(
                     job.account,
@@ -662,9 +728,12 @@ class AffiliateApiPublisher:
             ]
             return item
 
-        comment2_at = start_at + timedelta(minutes=6)
+        proposed_comment2_at = start_at + timedelta(minutes=6)
         comment2 = self._comment(
-            account["댓글2"], by_label["댓글2"].text, comment2_at
+            account["댓글2"], by_label["댓글2"].text, proposed_comment2_at
+        )
+        comment2_at = datetime.fromisoformat(
+            comment2["start_at"].replace("Z", "+00:00")
         )
         comment2["comments"] = [
             self._comment(
@@ -722,7 +791,13 @@ class AffiliateApiPublisher:
         if len(comments) != 12 or roots != 5 or replies != 7:
             raise AffiliateApiError("등록 후 댓글 구조 검증에 실패했습니다")
 
-    def publish(self, job: AffiliateJob, dry_run: bool) -> str:
+    def publish(
+        self,
+        job: AffiliateJob,
+        dry_run: bool,
+        resume: dict[str, Any] | None = None,
+        checkpoint=None,
+    ) -> str:
         if job.daily_post is None:
             raise AffiliateApiError("배정된 일상 글이 없습니다")
         self._capture_authorization()
@@ -736,23 +811,46 @@ class AffiliateApiPublisher:
             )
             return ""
 
-        daily_destination = dict(destination)
-        daily_destination["start_at"] = None
-        daily_source_id = self._create_source(
-            job.daily_post.title,
-            job.daily_post.body,
-            [],
-            daily_destination,
-            [],
-        )
+        resume = resume or {}
+        revision_source_id = str(resume.get("revision_source_id") or "")
+        if revision_source_id:
+            detail = self._request(
+                "GET",
+                "/naver_cafe_articles/article",
+                query={"source_id": revision_source_id},
+            )
+            revision_at = datetime.fromisoformat(
+                detail["naver_cafe_article_destination"]["start_at"].replace(
+                    "Z", "+00:00"
+                )
+            )
+            self._verify(revision_source_id, job, revision_at)
+            if checkpoint:
+                checkpoint("VERIFIED", revision_source_id=revision_source_id)
+            return f"https://v2r.daboja.im/nc/articleDetail/{revision_source_id}"
+
+        daily_source_id = str(resume.get("daily_source_id") or "")
+        if not daily_source_id:
+            daily_destination = dict(destination)
+            daily_destination["start_at"] = None
+            daily_source_id = self._create_source(
+                job.daily_post.title,
+                job.daily_post.body,
+                [],
+                daily_destination,
+                [],
+            )
+            if checkpoint:
+                checkpoint("DAILY_CREATED", daily_source_id=daily_source_id)
         job.daily_post_url = (
             f"https://v2r.daboja.im/nc/articleDetail/{daily_source_id}"
         )
-        revision_source_id = ""
         try:
             written_at = self._wait_for_written_at(
                 daily_source_id, destination["cafe_id"]
             )
+            if checkpoint:
+                checkpoint("DAILY_DONE", daily_source_id=daily_source_id)
             revision_at = written_at + timedelta(hours=CAFE_DELAYS[job.cafe])
 
             revision_destination = dict(destination)
@@ -771,7 +869,19 @@ class AffiliateApiPublisher:
                 comments,
                 parent_source_id=daily_source_id,
             )
+            if checkpoint:
+                checkpoint(
+                    "REVISION_CREATED",
+                    daily_source_id=daily_source_id,
+                    revision_source_id=revision_source_id,
+                )
             self._verify(revision_source_id, job, revision_at)
+            if checkpoint:
+                checkpoint(
+                    "VERIFIED",
+                    daily_source_id=daily_source_id,
+                    revision_source_id=revision_source_id,
+                )
         except Exception:
             if revision_source_id:
                 self._delete_source(revision_source_id)
