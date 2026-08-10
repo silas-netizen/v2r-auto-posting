@@ -843,7 +843,15 @@ class AffiliateApiPublisher:
                 )
             return _content_json(clean_body)
 
-        resolved = self.image_resolver.resolve(job)
+        try:
+            resolved = self.image_resolver.resolve(job)
+        except Exception as exc:
+            self.logger.warning(
+                "행 %s Google Drive 이미지 확인 실패로 이미지 없이 계속 발행: %s",
+                job.row_number,
+                exc,
+            )
+            return _content_json(clean_body)
         if not resolved:
             return _content_json(clean_body)
         try:

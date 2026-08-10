@@ -2,7 +2,7 @@ import logging
 import random
 from pathlib import Path
 
-from v2r_auto.affiliate_api import _content_json
+from v2r_auto.affiliate_api import AffiliateApiPublisher, _content_json
 from v2r_auto.images import (
     DriveItem,
     GoogleDriveImageResolver,
@@ -99,3 +99,20 @@ def test_content_json_inserts_image_at_placeholder_and_keeps_blank_line() -> Non
         "",
         "둘째 줄",
     ]
+
+
+def test_drive_failure_falls_back_to_clean_text() -> None:
+    job = make_job("첫 줄\n{키워드}\n둘째 줄")
+    publisher = AffiliateApiPublisher(None, logging.getLogger("test"))
+
+    class BrokenResolver:
+        def resolve(self, _job):
+            raise OSError("Drive unavailable")
+
+    publisher.image_resolver = BrokenResolver()
+    content = __import__("json").loads(
+        publisher._prepare_revision_content(job, {"menu_name": "게시판"})
+    )
+    paragraphs = content["document"]["components"][0]["value"]
+
+    assert [item["nodes"][0]["value"] for item in paragraphs] == ["첫 줄", "", "둘째 줄"]
