@@ -47,6 +47,7 @@ AFFILIATE_COLUMNS = {
     "completion_url": "완료 링크",
 }
 AFFILIATE_PREFIX_COLUMN = "말머리"
+AFFILIATE_ACCOUNT_TYPE_COLUMN = "계정유형"
 
 
 @dataclass(slots=True)
@@ -209,7 +210,6 @@ def load_affiliate_jobs(
                     ("키워드", keyword),
                     ("본문", source),
                     ("카페명", cafe),
-                    ("작성계정", account),
                     ("원고유형", article_type),
                 )
                 if not value
@@ -231,8 +231,12 @@ def load_affiliate_jobs(
                 account=account,
                 article_type=article_type,
                 prefix=_clean_cell(row.get(AFFILIATE_PREFIX_COLUMN)),
+                account_type=_clean_cell(row.get(AFFILIATE_ACCOUNT_TYPE_COLUMN)),
                 completion_url=_clean_cell(row.get(AFFILIATE_COLUMNS["completion_url"])),
             )
+            if not job.account and job.account_type not in {"실명", "비실명"}:
+                job.status = JobStatus.SKIPPED
+                job.message = "D열 작성계정과 H열 계정유형이 모두 비어 있음"
             if job.completion_url:
                 job.status = JobStatus.SKIPPED
                 job.message = "F열에 완료 링크가 있어 건너뜀"

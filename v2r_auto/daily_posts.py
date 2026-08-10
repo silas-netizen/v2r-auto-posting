@@ -5,7 +5,7 @@ import random
 from pathlib import Path
 
 from .content import ContentFormatError, parse_article
-from .models import AffiliateJob, DailyPost
+from .models import AffiliateJob, DailyPost, JobStatus
 
 
 class DailyPostSheetError(ValueError):
@@ -60,7 +60,13 @@ def assign_daily_posts(
     """Randomly assign unique same-cafe daily posts for this run."""
     randomizer = rng or random.SystemRandom()
     for cafe in ("씨씨앙", "양평맘"):
-        cafe_jobs = [job for job in jobs if job.cafe == cafe and not job.completion_url]
+        cafe_jobs = [
+            job
+            for job in jobs
+            if job.cafe == cafe
+            and not job.completion_url
+            and job.status == JobStatus.PENDING
+        ]
         candidates = [post for post in daily_posts if post.cafe == cafe]
         if len(candidates) < len(cafe_jobs):
             raise DailyPostSheetError(

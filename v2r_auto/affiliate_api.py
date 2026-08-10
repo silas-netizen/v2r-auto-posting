@@ -11,7 +11,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from .models import AffiliateJob
+from .models import AffiliateJob, JobStatus
 
 
 API_ROOT = "https://api-v2r.daboja.im"
@@ -253,6 +253,148 @@ class AffiliateApiPublisher:
             "use_comment_ai": True,
             "parent_id": None,
         }
+
+    def _last_used(self, cafe_id: int) -> dict[str, str]:
+        rows: list[dict[str, Any]] = []
+        token: str | None = None
+        for _ in range(50):
+            query: dict[str, Any] = {
+                "cafe_id": cafe_id,
+                "days_ago": 180,
+                "include_reserve": "true",
+            }
+            if token:
+                query["next_token"] = token
+            response = self._request(
+                "GET", "/naver_cafe_articles/board_histories", query=query
+            )
+            rows.extend(response.get("histories", []))
+            token = response.get("next_token")
+            if not token:
+                break
+        last: dict[str, str] = {}
+        for row in rows:
+            account = str(row.get("naver_account_login_id") or "")
+            used_at = str(row.get("created_at") or row.get("written_at") or "")
+            if account and used_at > last.get(account, ""):
+                last[account] = used_at
+        return last
+
+    def assign_accounts(self, jobs: list[AffiliateJob]) -> list[AffiliateJob]:
+        """Fill blank D-column accounts from V2R's cafe-account status data."""
+        self._capture_authorization()
+        pending = [
+            job
+            for job in jobs
+            if not job.account and job.status != JobStatus.SKIPPED
+        ]
+        if not pending:
+            return []
+
+        cafe_list = self._request("GET", "/naver_cafes/naver_join_cafes")
+        global_data = self._request("GET", "/navers/accounts")
+        global_accounts = {
+            str(item["naver_login_id"]): item
+            for item in _walk_dicts(global_data)
+            if item.get("naver_login_id")
+        }
+        fixed = set(COMMENT_ACCOUNTS)
+        pools: dict[tuple[str, str], list[str]] = {}
+
+        for cafe_name in {job.cafe for job in pending}:
+            cafe = next(
+                (
+                    item
+                    for item in _walk_dicts(cafe_list)
+                    if self._field(item, "cafe_id", "cafeId")
+                    and _normalized(cafe_name)
+                    in _normalized(
+                        str(
+                            self._field(
+                                item,
+                                "cafe_name",
+                                "cafeName",
+                                "pc_cafe_name",
+                                "mobile_cafe_name",
+                                "name",
+                            )
+                            or ""
+                        )
+                    )
+                ),
+                None,
+            )
+            if not cafe:
+                for job in pending:
+                    if job.cafe == cafe_name:
+                        job.status = JobStatus.SKIPPED
+                        job.message = f"V2R 카페 계정 현황에서 {cafe_name}을 찾지 못함"
+                continue
+
+            cafe_id = int(self._field(cafe, "cafe_id", "cafeId"))
+            status_data = self._request(
+                "GET", "/naver_cafes/naver_join_cafe", query={"cafe_id": cafe_id}
+            )
+            joined = {
+                str(item["login_id"]): item
+                for item in _walk_dicts(status_data)
+                if item.get("login_id")
+                and not item.get("force_drop")
+                and not item.get("stop_cafe_member")
+            }
+            last_used = self._last_used(cafe_id)
+
+            for account_type, real_name in (("실명", True), ("비실명", False)):
+                eligible: list[str] = []
+                for account in joined:
+                    global_account = global_accounts.get(account)
+                    info = (global_account or {}).get("my_info_v2") or {}
+                    if (
+                        not global_account
+                        or account in fixed
+                        or info.get("is_real_name") is not real_name
+                        or global_account.get("is_block")
+                        or global_account.get("is_login_fail")
+                    ):
+                        continue
+                    eligible.append(account)
+                pools[(cafe_name, account_type)] = sorted(
+                    eligible,
+                    key=lambda account: (
+                        account in last_used,
+                        last_used.get(account, ""),
+                        account,
+                    ),
+                )
+                self.logger.info(
+                    "%s %s 사용가능 작성계정: %s개",
+                    cafe_name,
+                    account_type,
+                    len(eligible),
+                )
+
+        indexes = {key: 0 for key in pools}
+        assigned: list[AffiliateJob] = []
+        for job in pending:
+            pool = pools.get((job.cafe, job.account_type), [])
+            if not pool:
+                job.status = JobStatus.SKIPPED
+                job.message = (
+                    f"{job.cafe}에 사용가능한 {job.account_type} 작성계정이 없음"
+                )
+                continue
+            index = indexes[(job.cafe, job.account_type)]
+            job.account = pool[index % len(pool)]
+            indexes[(job.cafe, job.account_type)] = index + 1
+            assigned.append(job)
+            self.logger.info(
+                "행 %s 작성계정 자동 배정: %s (%s / %s)",
+                job.row_number,
+                job.account,
+                job.cafe,
+                job.account_type,
+            )
+        return assigned
 
     def _member(self, cafe_id: int, account: str) -> dict[str, str]:
         cafe = self._request(

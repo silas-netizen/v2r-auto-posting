@@ -57,6 +57,9 @@ class AutomationRunner:
             if job.status == JobStatus.SKIPPED:
                 self.logger.info("행 %s 건너뜀: %s", job.row_number, job.message)
                 continue
+            if job.status == JobStatus.FAILED:
+                self.logger.error("행 %s 처리 중단: %s", job.row_number, job.message)
+                continue
 
             errors = job.validate()
             if errors:
@@ -133,8 +136,28 @@ class AffiliateRunner:
         source_sheet_url: str,
     ) -> tuple[RunResult, Path]:
         started_at = datetime.now()
-        assign_daily_posts(jobs, daily_posts)
         self.browser.ensure_v2r_login(email, password)
+        assigned_jobs = (
+            self.browser.assign_affiliate_accounts(jobs)
+            if any(not job.account and job.status == JobStatus.PENDING for job in jobs)
+            else []
+        )
+        for job in assigned_jobs:
+            try:
+                self.browser.update_sheet_cell(
+                    source_sheet_url,
+                    "D",
+                    job.row_number,
+                    job.account,
+                )
+            except Exception as exc:
+                job.status = JobStatus.FAILED
+                job.message = f"D열 작성계정 저장 실패: {exc}"
+                self.logger.exception(
+                    "행 %s 작성계정은 배정했지만 D열에 저장하지 못했습니다",
+                    job.row_number,
+                )
+        assign_daily_posts(jobs, daily_posts)
 
         total = len(jobs)
         for index, job in enumerate(jobs, start=1):
@@ -145,6 +168,9 @@ class AffiliateRunner:
                 continue
             if job.status == JobStatus.SKIPPED:
                 self.logger.info("행 %s 건너뜀: %s", job.row_number, job.message)
+                continue
+            if job.status == JobStatus.FAILED:
+                self.logger.error("행 %s 처리 중단: %s", job.row_number, job.message)
                 continue
 
             errors = job.validate()

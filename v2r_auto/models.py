@@ -55,6 +55,7 @@ class AffiliateJob:
     account: str
     article_type: str
     prefix: str = ""
+    account_type: str = ""
     completion_url: str = ""
     status: JobStatus = JobStatus.PENDING
     message: str = ""
@@ -92,8 +93,8 @@ class AffiliateJob:
             errors.append("카페명이 없습니다")
         elif self.cafe.strip() not in {"씨씨앙", "양평맘"}:
             errors.append("카페명은 씨씨앙 또는 양평맘만 사용할 수 있습니다")
-        if not self.account.strip():
-            errors.append("작성계정이 없습니다")
+        if not self.account.strip() and self.account_type.strip() not in {"실명", "비실명"}:
+            errors.append("작성계정 또는 계정유형이 없습니다")
         if not self.article_type.strip():
             errors.append("원고유형이 없습니다")
         return errors

@@ -18,7 +18,7 @@ from selenium.common.exceptions import (
     TimeoutException,
     UnexpectedAlertPresentException,
 )
-from selenium.webdriver import ActionChains, ChromeOptions
+from selenium.webdriver import ChromeOptions
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
@@ -186,38 +186,42 @@ class V2RBrowser:
         completion_url: str,
     ) -> None:
         """Write the published revision URL into column F of the source Sheet."""
-        self.start()
-        assert self.driver
         if not completion_url:
             raise AutomationError("F열에 입력할 완료 링크가 없습니다")
+        self.update_sheet_cell(sheet_url, "F", row_number, completion_url)
+
+    def update_sheet_cell(
+        self,
+        sheet_url: str,
+        column: str,
+        row_number: int,
+        value: str,
+    ) -> None:
+        """Write one value into an editable Google Sheet cell."""
+        self.start()
+        assert self.driver
+        column = column.upper()
+        if not re.fullmatch(r"[A-Z]+", column):
+            raise AutomationError(f"올바르지 않은 시트 열입니다: {column}")
         parsed = urlparse(sheet_url)
         gid = parse_qs(parsed.query).get("gid", ["0"])[0]
         if parsed.fragment.startswith("gid="):
             gid = parsed.fragment.split("=", 1)[1].split("&", 1)[0]
         sheet_url_with_range = (
             f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-            f"?{parsed.query}#gid={gid}&range=F{row_number}"
+            f"?{parsed.query}#gid={gid}&range={column}{row_number}"
         )
         self._navigate(sheet_url_with_range, self.google_handle)
         self.google_handle = self.driver.current_window_handle
-        cell_label = f"F{row_number}"
-        cell = self.wait.until(
-            lambda driver: next(
-                (
-                    item
-                    for item in driver.find_elements(
-                        By.CSS_SELECTOR, f"[aria-label='{cell_label}']"
-                    )
-                    if item.is_displayed()
-                ),
-                None,
-            )
+        cell_label = f"{column}{row_number}"
+        self.wait.until(
+            EC.presence_of_element_located((By.ID, "waffle-rich-text-editor"))
         )
-        ActionChains(self.driver).double_click(cell).perform()
-        cell.send_keys(Keys.CONTROL, "a")
-        cell.send_keys(completion_url)
-        cell.send_keys(Keys.ENTER)
-        self.logger.info("시트 F%s에 완료 링크를 입력했습니다", row_number)
+        editor = self.driver.find_element(By.ID, "waffle-rich-text-editor")
+        editor.send_keys(Keys.CONTROL, "a")
+        editor.send_keys(value)
+        editor.send_keys(Keys.ENTER)
+        self.logger.info("시트 %s에 값을 입력했습니다", cell_label)
         self._switch_to_handle(self.v2r_handle)
 
     def ensure_v2r_login(self, email: str, password: str) -> None:
@@ -883,3 +887,11 @@ class V2RBrowser:
 
         publisher = AffiliateApiPublisher(self, self.logger)
         return publisher.publish(job, dry_run)
+
+    def assign_affiliate_accounts(
+        self, jobs: list[AffiliateJob]
+    ) -> list[AffiliateJob]:
+        from .affiliate_api import AffiliateApiPublisher
+
+        publisher = AffiliateApiPublisher(self, self.logger)
+        return publisher.assign_accounts(jobs)

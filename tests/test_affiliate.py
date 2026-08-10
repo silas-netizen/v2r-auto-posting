@@ -43,7 +43,7 @@ def test_completion_link_skips_affiliate_row(tmp_path: Path) -> None:
     assert jobs[0].status == JobStatus.SKIPPED
 
 
-def test_missing_values_in_columns_a_to_e_skip_affiliate_row(tmp_path: Path) -> None:
+def test_missing_account_and_type_marks_affiliate_row_skipped(tmp_path: Path) -> None:
     path = tmp_path / "affiliate.csv"
     path.write_text(
         (
@@ -56,9 +56,25 @@ def test_missing_values_in_columns_a_to_e_skip_affiliate_row(tmp_path: Path) -> 
 
     jobs = load_affiliate_jobs(path)
 
-    assert len(jobs) == 1
-    assert jobs[0].row_number == 3
-    assert jobs[0].keyword == "정상 키워드"
+    assert len(jobs) == 2
+    assert jobs[0].status == JobStatus.SKIPPED
+    assert jobs[1].row_number == 3
+    assert jobs[1].keyword == "정상 키워드"
+
+
+def test_blank_account_uses_h_column_account_type(tmp_path: Path) -> None:
+    path = tmp_path / "affiliate.csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형\n"
+        '"키워드","제목 : 제목\n본문 : 본문",씨씨앙,,질문형,,,비실명\n',
+        encoding="utf-8-sig",
+    )
+
+    job = load_affiliate_jobs(path)[0]
+
+    assert job.account == ""
+    assert job.account_type == "비실명"
+    assert job.status == JobStatus.PENDING
 
 
 def test_daily_posts_are_matched_to_cafe_without_reuse(tmp_path: Path) -> None:
@@ -123,6 +139,57 @@ def test_api_comments_keep_five_roots_and_seven_replies(tmp_path: Path) -> None:
     comment2 = comments[1]
     assert comment2["comments"][1]["naver_login_id"] == comment2["naver_login_id"]
     assert comment2["comments"][2]["naver_login_id"] != job.account
+
+
+def test_api_assignment_uses_actual_real_name_type(tmp_path: Path) -> None:
+    jobs = [
+        load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0],
+        load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0],
+    ]
+    jobs[0].account = ""
+    jobs[0].account_type = "실명"
+    jobs[1].account = ""
+    jobs[1].account_type = "비실명"
+
+    class FakeAllocator(AffiliateApiPublisher):
+        def _capture_authorization(self) -> None:
+            return None
+
+        def _request(self, method, path, payload=None, query=None):
+            if path == "/naver_cafes/naver_join_cafes":
+                return {"cafes": [{"cafe_id": 1, "pc_cafe_name": "양평맘"}]}
+            if path == "/navers/accounts":
+                return {
+                    "accounts": [
+                        {
+                            "naver_login_id": "real-id",
+                            "is_block": False,
+                            "is_login_fail": False,
+                            "my_info_v2": {"is_real_name": True},
+                        },
+                        {
+                            "naver_login_id": "alias-id",
+                            "is_block": False,
+                            "is_login_fail": False,
+                            "my_info_v2": {"is_real_name": False},
+                        },
+                    ]
+                }
+            if path == "/naver_cafes/naver_join_cafe":
+                return {
+                    "naver_accounts": [
+                        {"login_id": "real-id", "force_drop": False},
+                        {"login_id": "alias-id", "force_drop": False},
+                    ]
+                }
+            if path == "/naver_cafe_articles/board_histories":
+                return {"histories": [], "next_token": None}
+            raise AssertionError(path)
+
+    allocator = FakeAllocator(None, logging.getLogger("test"))
+    assigned = allocator.assign_accounts(jobs)
+
+    assert [job.account for job in assigned] == ["real-id", "alias-id"]
 
 
 class FakeAffiliateBrowser:
