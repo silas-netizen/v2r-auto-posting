@@ -1117,6 +1117,10 @@ class V2RBrowser:
                 {job.cafe for job in jobs if job.status == JobStatus.PENDING}
             )
 
+    def load_v2r_cafe_catalog(self):
+        """Fetch the current cafe/menu catalog without creating any article."""
+        return self._get_affiliate_publisher().load_cafe_catalog()
+
     def assign_affiliate_accounts(
         self, jobs: list[AffiliateJob]
     ) -> list[AffiliateJob]:

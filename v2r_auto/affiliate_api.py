@@ -12,6 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from .cafe_catalog import CafeCatalogEntry, CafeCatalogService
 from .images import (
     GoogleDriveImageResolver,
     PLACEHOLDER_PATTERN,
@@ -163,6 +164,10 @@ class AffiliateApiPublisher:
             if self.browser is not None and getattr(self.browser, "config", None)
             else None
         )
+
+    def load_cafe_catalog(self) -> list[CafeCatalogEntry]:
+        self._capture_authorization()
+        return CafeCatalogService(self._request, self.logger).load()
 
     def _capture_authorization(self) -> None:
         if self.authorization:

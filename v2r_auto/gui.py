@@ -11,6 +11,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .browser import BrowserConfig, V2RBrowser
+from .cafe_catalog import write_catalog_report
 from .runner import AutomationRunner, RunOptions
 from .sheet import SheetDefaults, load_jobs
 
@@ -165,10 +166,15 @@ class AutomationApp(tk.Tk):
         actions = ttk.Frame(outer)
         actions.grid(row=8, column=0, columnspan=3, sticky="ew")
         ttk.Button(actions, text="1. 로그인 준비", command=self._open_login).pack(side=tk.LEFT)
-        ttk.Button(actions, text="2. 데이터 확인", command=self._check_data).pack(
+        ttk.Button(
+            actions,
+            text="2. 카페·게시판 API 확인",
+            command=self._check_cafe_catalog,
+        ).pack(side=tk.LEFT, padx=6)
+        ttk.Button(actions, text="3. 데이터 확인", command=self._check_data).pack(
             side=tk.LEFT, padx=6
         )
-        self.start_button = ttk.Button(actions, text="3. 자동화 시작", command=self._start)
+        self.start_button = ttk.Button(actions, text="4. 자동화 시작", command=self._start)
         self.start_button.pack(side=tk.LEFT)
         self.stop_button = ttk.Button(actions, text="중지", command=self._stop, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=6)
@@ -227,6 +233,42 @@ class AutomationApp(tk.Tk):
     def _open_login(self) -> None:
         sheet_url = self.sheet_url.get().strip()
         self._run_background(lambda: self.browser.open_login_window(sheet_url))
+
+    def _check_cafe_catalog(self) -> None:
+        def work() -> None:
+            catalog = self.browser.load_v2r_cafe_catalog()
+            report_path = write_catalog_report(catalog, self.report_dir)
+            relevant = [
+                cafe
+                for cafe in catalog
+                if cafe.category in {"자사 카페", "노출 테스트 카페"}
+            ]
+            for cafe in relevant:
+                writable = sum(bool(menu.writable_accounts) for menu in cafe.menus)
+                self.logger.info(
+                    "%s 확인: %s / 계정 %s개 / 게시판 %s개(작성 가능 %s개)",
+                    cafe.category,
+                    cafe.name,
+                    len(cafe.accounts),
+                    len(cafe.menus),
+                    writable,
+                )
+            summary = "\n".join(
+                f"- {cafe.name}: 계정 {len(cafe.accounts)}개, 게시판 {len(cafe.menus)}개"
+                for cafe in relevant
+            )
+            self.ui_queue.put(
+                (
+                    "info",
+                    (
+                        "카페·게시판 API 확인 완료",
+                        (summary or "자사·테스트 카페를 찾지 못했습니다")
+                        + f"\n\n상세 결과: {report_path}",
+                    ),
+                )
+            )
+
+        self._run_background(work)
 
     def _get_csv_path(self, local_csv: str, sheet_url: str) -> Path:
         if local_csv:
