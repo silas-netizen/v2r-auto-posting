@@ -77,6 +77,17 @@ def test_blank_account_uses_h_column_account_type(tmp_path: Path) -> None:
     assert job.status == JobStatus.PENDING
 
 
+def test_image_disabled_reads_y_from_i_column(tmp_path: Path) -> None:
+    path = tmp_path / "affiliate.csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음\n"
+        '"키워드","제목 : 제목\n본문 : {키워드}",씨씨앙,writer,질문형,,,,Y\n',
+        encoding="utf-8-sig",
+    )
+
+    assert load_affiliate_jobs(path)[0].image_disabled is True
+
+
 def test_daily_posts_are_matched_to_cafe_without_reuse(tmp_path: Path) -> None:
     path = tmp_path / "daily.csv"
     path.write_text(

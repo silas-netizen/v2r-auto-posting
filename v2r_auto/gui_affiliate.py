@@ -7,6 +7,7 @@ from tkinter import messagebox, ttk
 
 from .daily_posts import load_daily_posts
 from .gui import AutomationApp
+from .images import load_sheet_brand
 from .runner import AffiliateRunner
 from .sheet import load_affiliate_jobs
 from .state import AnotherInstanceRunningError, InstanceLock
@@ -115,7 +116,19 @@ class AffiliateAutomationApp(AutomationApp):
             raise ValueError("Google 시트 URL을 입력하세요")
         source_csv = self._get_csv_path("", sheet_url)
         daily_csv = self.browser.download_sheet(DAILY_POST_SHEET_URL)
-        return load_affiliate_jobs(source_csv), load_daily_posts(daily_csv)
+        jobs = load_affiliate_jobs(source_csv)
+        try:
+            brand = load_sheet_brand(sheet_url)
+        except Exception as exc:
+            brand = ""
+            self.logger.warning(
+                "Google 시트 제목에서 브랜드를 확인하지 못해 이미지 없이 진행합니다: %s",
+                exc,
+            )
+        for job in jobs:
+            job.brand = brand
+        self.logger.info("이미지 브랜드 확인: %s", brand or "미확인")
+        return jobs, load_daily_posts(daily_csv)
 
     def _check_data(self) -> None:
         try:

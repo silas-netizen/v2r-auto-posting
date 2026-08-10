@@ -5,12 +5,18 @@ import random
 import re
 import time
 import uuid
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from .images import (
+    GoogleDriveImageResolver,
+    PLACEHOLDER_PATTERN,
+    strip_placeholders,
+)
 from .models import AffiliateJob, JobStatus
 
 
@@ -72,7 +78,56 @@ def _paragraph(line: str) -> dict[str, Any]:
     }
 
 
-def _content_json(body: str) -> str:
+def _text_component(lines: list[str]) -> dict[str, Any]:
+    return {
+        "id": f"SE-{uuid.uuid4()}",
+        "layout": "default",
+        "value": [_paragraph(line) for line in lines],
+        "@ctype": "text",
+    }
+
+
+def _content_json(
+    body: str,
+    image_components: dict[int, dict[str, Any]] | None = None,
+) -> str:
+    image_components = image_components or {}
+    components: list[dict[str, Any]] = []
+    pending_lines: list[str] = []
+    occurrence = 0
+
+    def flush_text() -> None:
+        if pending_lines:
+            components.append(_text_component(list(pending_lines)))
+            pending_lines.clear()
+
+    for line in body.splitlines():
+        matches = list(PLACEHOLDER_PATTERN.finditer(line))
+        if not matches:
+            pending_lines.append(line)
+            continue
+        cleaned_line = PLACEHOLDER_PATTERN.sub("", line)
+        uploaded: list[dict[str, Any]] = []
+        for _match in matches:
+            component = image_components.get(occurrence)
+            occurrence += 1
+            if component:
+                uploaded.append(deepcopy(component))
+        if not uploaded:
+            pending_lines.append(cleaned_line)
+            continue
+        if cleaned_line:
+            pending_lines.append(cleaned_line)
+        flush_text()
+        components.extend(uploaded)
+        if not cleaned_line:
+            # Keep the original marker line as an empty paragraph so surrounding
+            # paragraph spacing remains unchanged after inserting the image.
+            pending_lines.append("")
+    flush_text()
+    if not components:
+        components.append(_text_component([""]))
+
     document = {
         "document": {
             "version": "2.9.0",
@@ -83,14 +138,7 @@ def _content_json(body: str) -> str:
                 "dif": False,
                 "dio": [{"dis": "N", "dia": {"t": 0, "p": 0, "st": 2827, "sk": 0}}],
             },
-            "components": [
-                {
-                    "id": f"SE-{uuid.uuid4()}",
-                    "layout": "default",
-                    "value": [_paragraph(line) for line in body.splitlines()],
-                    "@ctype": "text",
-                }
-            ],
+            "components": components,
             "documentId": "",
         }
     }
@@ -107,6 +155,14 @@ class AffiliateApiPublisher:
         self.blocked_accounts: set[str] = set()
         self.used_accounts: set[str] = set()
         self.comment_slots: dict[str, set[datetime]] = {}
+        self.image_resolver = (
+            GoogleDriveImageResolver(
+                self.browser.config.download_dir,
+                logger,
+            )
+            if self.browser is not None and getattr(self.browser, "config", None)
+            else None
+        )
 
     def _capture_authorization(self) -> None:
         if self.authorization:
@@ -545,11 +601,12 @@ class AffiliateApiPublisher:
         destination: dict[str, Any],
         comments: list[dict[str, Any]],
         parent_source_id: str | None = None,
+        content_json: str | None = None,
     ) -> str:
         payload: dict[str, Any] = {
             "tag_list": tags,
             "title": title,
-            "content_json": _content_json(body),
+            "content_json": content_json or _content_json(body),
             "cafe_write_options": self._write_options(),
             "comments": comments,
             "destination": destination,
@@ -765,6 +822,65 @@ class AffiliateApiPublisher:
             root("댓글5", 9, "대댓글5", 19),
         ]
 
+    def _prepare_revision_content(
+        self,
+        job: AffiliateJob,
+        destination: dict[str, Any],
+    ) -> str:
+        clean_body = strip_placeholders(job.body)
+        job.prepared_image_count = 0
+        if job.image_disabled:
+            self.logger.info(
+                "행 %s I열 이미지 없음=Y: 중괄호를 지우고 이미지 없이 진행",
+                job.row_number,
+            )
+            return _content_json(clean_body)
+        if not self.image_resolver or not job.brand:
+            if PLACEHOLDER_PATTERN.search(job.body):
+                self.logger.warning(
+                    "행 %s 브랜드를 확인하지 못해 중괄호를 지우고 이미지 없이 진행",
+                    job.row_number,
+                )
+            return _content_json(clean_body)
+
+        try:
+            resolved = self.image_resolver.resolve(job)
+        except Exception as exc:
+            self.logger.warning(
+                "행 %s Google Drive 이미지 확인 실패로 이미지 없이 계속 발행: %s",
+                job.row_number,
+                exc,
+            )
+            return _content_json(clean_body)
+        if not resolved:
+            return _content_json(clean_body)
+        try:
+            uploaded = self.browser.upload_affiliate_images(
+                job,
+                str(destination["menu_name"]),
+                [item.local_path for item in resolved],
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "행 %s 이미지 업로드 실패로 이미지 없이 계속 발행: %s",
+                job.row_number,
+                exc,
+            )
+            return _content_json(clean_body)
+
+        components = {
+            item.occurrence: component
+            for item, component in zip(resolved, uploaded)
+            if component
+        }
+        job.prepared_image_count = len(components)
+        self.logger.info(
+            "행 %s 수정 본문 이미지 준비 완료: %s개",
+            job.row_number,
+            job.prepared_image_count,
+        )
+        return _content_json(job.body, components)
+
     def _verify(self, source_id: str, job: AffiliateJob, start_at: datetime) -> None:
         detail = self._request(
             "GET", "/naver_cafe_articles/article", query={"source_id": source_id}
@@ -774,14 +890,23 @@ class AffiliateApiPublisher:
         comments = detail["naver_cafe_article_source_comments"]
         document = json.loads(detail["naver_cafe_article_source_detail"]["body"])
         body_lines = [
-            paragraph["nodes"][0]["value"]
+            "".join(str(node.get("value") or "") for node in paragraph.get("nodes", []))
             for component in document["document"]["components"]
-            for paragraph in component["value"]
+            if component.get("@ctype") == "text"
+            for paragraph in component.get("value", [])
         ]
         if source["title"] != job.title or source["tag_list"] != job.tags:
             raise AffiliateApiError("등록 후 제목 또는 태그 검증에 실패했습니다")
-        if body_lines != job.body.splitlines():
+        if body_lines != strip_placeholders(job.body).splitlines():
             raise AffiliateApiError("등록 후 본문 문단 검증에 실패했습니다")
+        if any(PLACEHOLDER_PATTERN.search(line) for line in body_lines):
+            raise AffiliateApiError("등록 후 본문에 중괄호 표시가 남아 있습니다")
+        media_count = sum(
+            component.get("@ctype") in {"image", "imageGroup", "imageStrip"}
+            for component in document["document"]["components"]
+        )
+        if job.prepared_image_count and media_count < job.prepared_image_count:
+            raise AffiliateApiError("등록 후 본문 이미지 개수 검증에 실패했습니다")
         if datetime.fromisoformat(destination["start_at"].replace("Z", "+00:00")) != start_at:
             raise AffiliateApiError("등록 후 수정 예약 시간 검증에 실패했습니다")
         if not 80 <= int(destination["target_view_count"]) <= 100:
@@ -861,13 +986,18 @@ class AffiliateApiPublisher:
                 80, 100
             )
             comments = self._comments(job, revision_at, destination["cafe_id"])
+            revision_content_json = self._prepare_revision_content(
+                job,
+                revision_destination,
+            )
             revision_source_id = self._create_source(
                 job.title,
-                job.body,
+                strip_placeholders(job.body),
                 job.tags,
                 revision_destination,
                 comments,
                 parent_source_id=daily_source_id,
+                content_json=revision_content_json,
             )
             if checkpoint:
                 checkpoint(

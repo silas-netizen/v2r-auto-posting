@@ -100,6 +100,8 @@ class JobStateStore:
                 job.body,
                 job.cafe,
                 job.article_type,
+                job.brand,
+                "image-disabled" if job.image_disabled else "image-enabled",
             )
         )
         content_hash = hashlib.sha256(content.encode()).hexdigest()
