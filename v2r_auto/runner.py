@@ -138,11 +138,7 @@ class AffiliateRunner:
         started_at = datetime.now()
         self.browser.ensure_v2r_login(email, password)
         self.browser.start_affiliate_api_run()
-        assigned_jobs = (
-            self.browser.assign_affiliate_accounts(jobs)
-            if any(not job.account and job.status == JobStatus.PENDING for job in jobs)
-            else []
-        )
+        assigned_jobs = self.browser.assign_affiliate_accounts(jobs)
         for job in assigned_jobs:
             try:
                 self.browser.update_sheet_cell(
@@ -181,7 +177,7 @@ class AffiliateRunner:
                 self.logger.error("행 %s 검증 실패: %s", job.row_number, job.message)
                 continue
 
-            try:
+            while True:
                 self.logger.info(
                     "[%s/%s] 행 %s 제휴 수정 발행 시작: %s",
                     index,
@@ -189,29 +185,81 @@ class AffiliateRunner:
                     job.row_number,
                     job.title,
                 )
-                job.revision_url = self.browser.publish_affiliate_revision(job, dry_run)
-                job.status = JobStatus.SUCCESS
-                job.message = "전체 흐름 검증 완료" if dry_run else "수정 발행 완료"
-                if not dry_run:
-                    try:
-                        self.browser.update_completion_link(
-                            source_sheet_url,
-                            job.row_number,
-                            job.revision_url,
-                        )
-                    except Exception as sheet_error:
-                        job.message = (
-                            "수정 발행 완료, F열 완료 링크 입력 실패 - "
-                            f"결과 URL: {job.revision_url} / {sheet_error}"
-                        )
-                        self.logger.exception(
-                            "행 %s 수정 발행은 완료됐지만 F열 링크 입력에 실패했습니다",
-                            job.row_number,
-                        )
-            except Exception as exc:
-                job.status = JobStatus.FAILED
-                job.message = str(exc)
-                self.logger.exception("행 %s 제휴 수정 발행 실패", job.row_number)
+                try:
+                    job.revision_url = self.browser.publish_affiliate_revision(
+                        job, dry_run
+                    )
+                    job.status = JobStatus.SUCCESS
+                    job.message = (
+                        "전체 흐름 검증 완료" if dry_run else "수정 발행 완료"
+                    )
+                    if not dry_run:
+                        try:
+                            self.browser.update_completion_link(
+                                source_sheet_url,
+                                job.row_number,
+                                job.revision_url,
+                            )
+                        except Exception as sheet_error:
+                            job.message = (
+                                "수정 발행 완료, F열 완료 링크 입력 실패 - "
+                                f"결과 URL: {job.revision_url} / {sheet_error}"
+                            )
+                            self.logger.exception(
+                                "행 %s 발행은 성공했지만 F열 링크 저장 실패",
+                                job.row_number,
+                            )
+                    break
+                except Exception as exc:
+                    reason, retryable = self.browser.classify_affiliate_failure(exc)
+                    failed_account = job.account
+                    self.logger.error(
+                        "행 %s 계정 %s 실패: %s",
+                        job.row_number,
+                        failed_account,
+                        reason,
+                    )
+                    replacement = (
+                        self.browser.replace_failed_affiliate_account(job)
+                        if retryable and job.account_type in {"실명", "비실명"}
+                        else ""
+                    )
+                    if replacement:
+                        try:
+                            self.browser.update_sheet_cell(
+                                source_sheet_url,
+                                "D",
+                                job.row_number,
+                                replacement,
+                            )
+                            self.logger.warning(
+                                "행 %s 작성계정 교체 후 재시도: %s → %s",
+                                job.row_number,
+                                failed_account,
+                                replacement,
+                            )
+                            continue
+                        except Exception as sheet_error:
+                            reason = f"실패: D열 계정 교체 저장 실패 - {sheet_error}"
+
+                    job.status = JobStatus.FAILED
+                    job.message = reason
+                    if not dry_run:
+                        try:
+                            self.browser.update_sheet_cell(
+                                source_sheet_url,
+                                "F",
+                                job.row_number,
+                                reason,
+                            )
+                        except Exception:
+                            self.logger.exception(
+                                "행 %s F열 실패 사유 저장 실패", job.row_number
+                            )
+                    self.logger.exception(
+                        "행 %s 제휴 수정 발행 최종 실패", job.row_number
+                    )
+                    break
             progress(index, total)
 
         result = RunResult(
@@ -221,6 +269,12 @@ class AffiliateRunner:
             jobs=jobs,
         )
         report_path = write_report(result, self.report_dir)
-        self.logger.info("제휴 수정 발행 완료. 결과 파일: %s", report_path)
+        self.logger.info(
+            "제휴 실행 종료: 성공 %s / 실패 %s / 건너뜀 %s / 결과 %s",
+            result.succeeded,
+            result.failed,
+            result.skipped,
+            report_path,
+        )
         progress(total, total)
         return result, report_path

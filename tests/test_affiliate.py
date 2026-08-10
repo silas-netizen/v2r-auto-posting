@@ -202,6 +202,9 @@ class FakeAffiliateBrowser:
     def start_affiliate_api_run(self) -> None:
         return None
 
+    def assign_affiliate_accounts(self, jobs):
+        return []
+
     def publish_affiliate_revision(self, job, dry_run: bool) -> str:
         assert dry_run
         self.published.append(job)
@@ -233,3 +236,54 @@ def test_affiliate_runner_uses_single_revision_flow(tmp_path: Path) -> None:
     assert result.succeeded == 1
     assert browser.published == [job]
     assert report.exists()
+
+
+def test_affiliate_runner_retries_with_replacement_account(tmp_path: Path) -> None:
+    job = load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0]
+    job.account_type = "실명"
+
+    class RetryBrowser(FakeAffiliateBrowser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+            self.sheet_updates = []
+
+        def publish_affiliate_revision(self, job, dry_run: bool) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("NAVER_LOGIN_FAIL")
+            return ""
+
+        def classify_affiliate_failure(self, error):
+            return ("실패: 네이버 로그인 실패", True)
+
+        def replace_failed_affiliate_account(self, job):
+            job.account = "replacement"
+            return job.account
+
+        def update_sheet_cell(self, url, column, row, value):
+            self.sheet_updates.append((column, row, value))
+
+    browser = RetryBrowser()
+    runner = AffiliateRunner(
+        browser=browser,  # type: ignore[arg-type]
+        report_dir=tmp_path,
+        logger=logging.getLogger("test"),
+    )
+
+    result, _ = runner.run(
+        jobs=[job],
+        email="",
+        password="",
+        dry_run=True,
+        stop_event=threading.Event(),
+        progress=lambda current, total: None,
+        daily_posts=[
+            DailyPost(row_number=2, cafe="양평맘", title="일상", body="내용"),
+        ],
+        source_sheet_url="https://docs.google.com/spreadsheets/d/example/edit?gid=0",
+    )
+
+    assert result.succeeded == 1
+    assert browser.calls == 2
+    assert browser.sheet_updates == [("D", 2, "replacement")]

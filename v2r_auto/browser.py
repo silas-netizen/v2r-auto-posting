@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 import json
 import logging
 import random
@@ -9,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from urllib.request import urlopen
 
 from selenium import webdriver
 from selenium.common.exceptions import (
@@ -223,8 +226,39 @@ class V2RBrowser:
         editor.send_keys(Keys.CONTROL, "a")
         editor.send_keys(value)
         editor.send_keys(Keys.ENTER)
+        self._verify_sheet_cell(sheet_url, column, row_number, value)
         self.logger.info("시트 %s에 값을 입력했습니다", cell_label)
         self._switch_to_handle(self.v2r_handle)
+
+    def _verify_sheet_cell(
+        self,
+        sheet_url: str,
+        column: str,
+        row_number: int,
+        expected: str,
+    ) -> None:
+        column_index = 0
+        for letter in column:
+            column_index = column_index * 26 + (ord(letter) - ord("A") + 1)
+        column_index -= 1
+        export_url = self._sheet_export_url(sheet_url)
+        for _ in range(10):
+            separator = "&" if "?" in export_url else "?"
+            with urlopen(
+                f"{export_url}{separator}cache={time.time_ns()}", timeout=20
+            ) as response:
+                rows = list(
+                    csv.reader(
+                        io.StringIO(response.read().decode("utf-8-sig"))
+                    )
+                )
+            if len(rows) >= row_number and len(rows[row_number - 1]) > column_index:
+                if rows[row_number - 1][column_index] == expected:
+                    return
+            time.sleep(0.5)
+        raise AutomationError(
+            f"시트 {column}{row_number} 저장값을 다시 확인하지 못했습니다"
+        )
 
     def ensure_v2r_login(self, email: str, password: str) -> None:
         self.start()
@@ -902,3 +936,9 @@ class V2RBrowser:
         self, jobs: list[AffiliateJob]
     ) -> list[AffiliateJob]:
         return self._get_affiliate_publisher().assign_accounts(jobs)
+
+    def classify_affiliate_failure(self, error: Exception) -> tuple[str, bool]:
+        return self._get_affiliate_publisher().classify_failure(error)
+
+    def replace_failed_affiliate_account(self, job: AffiliateJob) -> str:
+        return self._get_affiliate_publisher().replace_failed_account(job)
