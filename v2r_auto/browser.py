@@ -932,6 +932,176 @@ class V2RBrowser:
             checkpoint=checkpoint,
         )
 
+    def _get_seone_document(self) -> dict:
+        """Read the document through the editor state injected by the V2R page."""
+        assert self.driver
+        script = """
+            const done = arguments[arguments.length - 1];
+            const container = document.querySelector('.seone-container');
+            let instance = container && container.__vueParentComponent;
+            const candidates = [];
+            while (instance) {
+                candidates.push(
+                    instance.setupState,
+                    instance.ctx,
+                    instance.proxy,
+                    instance.provides
+                );
+                let provided = instance.provides;
+                while (provided) {
+                    try {
+                        for (const key of Reflect.ownKeys(provided)) {
+                            candidates.push(provided[key]);
+                        }
+                    } catch (_) {}
+                    provided = Object.getPrototypeOf(provided);
+                }
+                instance = instance.parent;
+            }
+            for (const candidate of candidates) {
+                if (!candidate) continue;
+                try {
+                    let getter = candidate.seoneGetDocument;
+                    if (getter && typeof getter === 'object' && 'value' in getter) {
+                        getter = getter.value;
+                    }
+                    if (typeof getter !== 'function') continue;
+                    Promise.resolve(getter.call(candidate))
+                        .then(value => done({ok: true, value}))
+                        .catch(error => done({ok: false, error: String(error)}));
+                    return;
+                } catch (_) {}
+            }
+            done({ok: false, error: 'SE-ONE document getter not found'});
+        """
+        result = self.driver.execute_async_script(script)
+        if not result or not result.get("ok") or not result.get("value"):
+            detail = result.get("error") if isinstance(result, dict) else "응답 없음"
+            raise AutomationError(f"SE-ONE 이미지 문서를 읽지 못했습니다: {detail}")
+        return result["value"]
+
+    @staticmethod
+    def _media_components(document: dict) -> list[dict]:
+        components = document.get("document", {}).get("components", [])
+        return [
+            component
+            for component in components
+            if component.get("@ctype") in {"image", "imageGroup", "imageStrip"}
+        ]
+
+    def _upload_one_seone_image(
+        self,
+        job: AffiliateJob,
+        menu_name: str,
+        image_path: Path,
+    ) -> dict:
+        assert self.driver
+        self.open_se_one_writer()
+        self._select_option("카페", job.cafe)
+        self._select_option("계정", job.account)
+        self._select_option("게시판", menu_name)
+        self.wait.until(
+            lambda driver: driver.find_elements(By.CSS_SELECTOR, ".seone-container")
+        )
+
+        def editor_document_ready(_driver):
+            try:
+                return self._get_seone_document()
+            except AutomationError:
+                return False
+
+        self.wait.until(editor_document_ready)
+
+        def image_inputs():
+            inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+            return [
+                item
+                for item in inputs
+                if any(
+                    token in (item.get_attribute("accept") or "").casefold()
+                    for token in ("image", ".jpg", ".jpeg", ".png", ".gif", ".webp")
+                )
+            ]
+
+        inputs = image_inputs()
+        if not inputs:
+            selectors = (
+                "button[aria-label*='사진']",
+                "button[aria-label*='이미지']",
+                "button[title*='사진']",
+                "button[title*='이미지']",
+                "button[data-name*='image' i]",
+                "[role='button'][data-name*='image' i]",
+            )
+            button = next(
+                (
+                    element
+                    for selector in selectors
+                    for element in self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    if element.is_displayed() and element.is_enabled()
+                ),
+                None,
+            )
+            if button is None:
+                xpath = (
+                    "//*[self::button or @role='button']"
+                    "[contains(normalize-space(), '사진') or "
+                    "contains(normalize-space(), '이미지')]"
+                )
+                button = next(
+                    (
+                        element
+                        for element in self.driver.find_elements(By.XPATH, xpath)
+                        if element.is_displayed() and element.is_enabled()
+                    ),
+                    None,
+                )
+            if button is None:
+                raise AutomationError("SE-ONE 이미지 첨부 버튼을 찾지 못했습니다")
+            self.driver.execute_script("arguments[0].click();", button)
+            inputs = self.wait.until(lambda _driver: image_inputs())
+
+        inputs[-1].send_keys(str(image_path.resolve()))
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            try:
+                media = self._media_components(self._get_seone_document())
+                if media:
+                    return media[0]
+            except AutomationError:
+                pass
+            time.sleep(0.5)
+        raise AutomationError(f"SE-ONE 이미지 업로드 완료를 확인하지 못했습니다: {image_path.name}")
+
+    def upload_affiliate_images(
+        self,
+        job: AffiliateJob,
+        menu_name: str,
+        image_paths: list[Path],
+    ) -> list[dict]:
+        """Upload through V2R's SmartEditor, while article submission stays API-based."""
+        uploaded: list[dict] = []
+        for index, image_path in enumerate(image_paths, start=1):
+            self.logger.info(
+                "행 %s 수정 본문 이미지 업로드 (%s/%s): %s",
+                job.row_number,
+                index,
+                len(image_paths),
+                image_path.name,
+            )
+            try:
+                uploaded.append(
+                    self._upload_one_seone_image(job, menu_name, image_path)
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "행 %s 이미지 1개 업로드 실패로 생략: %s",
+                    job.row_number,
+                    exc,
+                )
+                uploaded.append({})
+        return uploaded
+
     def _get_affiliate_publisher(self):
         from .affiliate_api import AffiliateApiPublisher
 

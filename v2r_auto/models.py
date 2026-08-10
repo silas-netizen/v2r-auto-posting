@@ -56,12 +56,15 @@ class AffiliateJob:
     article_type: str
     prefix: str = ""
     account_type: str = ""
+    image_disabled: bool = False
+    brand: str = ""
     completion_url: str = ""
     status: JobStatus = JobStatus.PENDING
     message: str = ""
     daily_post_url: str = ""
     revision_url: str = ""
     daily_post: "DailyPost | None" = None
+    prepared_image_count: int = 0
 
     @property
     def title(self) -> str:

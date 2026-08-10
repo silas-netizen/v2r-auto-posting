@@ -48,6 +48,7 @@ AFFILIATE_COLUMNS = {
 }
 AFFILIATE_PREFIX_COLUMN = "말머리"
 AFFILIATE_ACCOUNT_TYPE_COLUMN = "계정유형"
+AFFILIATE_IMAGE_DISABLED_COLUMN = "이미지 없음"
 
 
 @dataclass(slots=True)
@@ -232,6 +233,10 @@ def load_affiliate_jobs(
                 article_type=article_type,
                 prefix=_clean_cell(row.get(AFFILIATE_PREFIX_COLUMN)),
                 account_type=_clean_cell(row.get(AFFILIATE_ACCOUNT_TYPE_COLUMN)),
+                image_disabled=(
+                    _clean_cell(row.get(AFFILIATE_IMAGE_DISABLED_COLUMN)).casefold()
+                    == "y"
+                ),
                 completion_url=_clean_cell(row.get(AFFILIATE_COLUMNS["completion_url"])),
             )
             if not job.account and job.account_type not in {"실명", "비실명"}:
