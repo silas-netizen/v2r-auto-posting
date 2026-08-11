@@ -53,7 +53,7 @@ def test_catalog_loads_all_account_menu_permissions() -> None:
             return {
                 "naver_join_cafes": [
                     {"cafe_id": 101, "pc_cafe_name": "고요한 아침"},
-                    {"cafe_id": 102, "pc_cafe_name": "태국마케팅센터"},
+                    {"cafe_id": 102, "pc_cafe_name": "태극마케팅센터"},
                     {
                         "cafe_id": 25016228,
                         "pc_cafe_name": "국내1위 다이어트 커뮤니티 씨씨앙",
