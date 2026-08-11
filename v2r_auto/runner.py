@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from .browser import V2RBrowser
+from .cafe_catalog import TEST_CAFE_IDS
 from .daily_posts import assign_daily_posts
 from .history import HistoryStore
 from .models import (
@@ -43,6 +44,9 @@ def assign_immediate_schedules(
     last_by_cafe: dict[int, datetime] = {}
     for job in jobs:
         if job.status != JobStatus.PENDING:
+            continue
+        if job.cafe_id in TEST_CAFE_IDS:
+            job.scheduled_at = None
             continue
         anchor = max(now, last_by_cafe.get(job.cafe_id, now))
         job.scheduled_at = anchor + timedelta(minutes=rng.randint(5, 15))
@@ -519,22 +523,37 @@ class ImmediateRunner:
                     last_cafe_started[job.cafe_id] = time.monotonic()
                 try:
                     self.logger.info(
-                        "[%s/%s] %s 행 %s 예약 등록: %s / %s / %s / %s",
+                        "[%s/%s] %s 행 %s %s: %s / %s / %s / %s",
                         index,
                         total,
                         job.source_name,
                         job.row_number,
+                        (
+                            "한 줄 즉시 발행"
+                            if job.cafe_id in TEST_CAFE_IDS
+                            else "예약 등록"
+                        ),
                         job.canonical_cafe_name,
                         job.canonical_board_name,
                         job.account,
                         job.scheduled_at.astimezone().strftime("%Y-%m-%d %H:%M")
                         if job.scheduled_at
-                        else "시간 미정",
+                        else "즉시",
                     )
                     job.post_url = self.browser.publish_immediate(job, dry_run)
                     job.status = JobStatus.SUCCESS
                     job.message = (
-                        "예약 API 검증 완료" if dry_run else "예약 발행 등록 완료"
+                        (
+                            "즉시 발행 API 검증 완료"
+                            if job.cafe_id in TEST_CAFE_IDS
+                            else "예약 API 검증 완료"
+                        )
+                        if dry_run
+                        else (
+                            "한 줄 즉시 발행 완료"
+                            if job.cafe_id in TEST_CAFE_IDS
+                            else "예약 발행 등록 완료"
+                        )
                     )
                     if not dry_run:
                         self.history.record(job)

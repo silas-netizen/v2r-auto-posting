@@ -125,13 +125,14 @@ def test_schedules_accumulate_five_to_fifteen_minutes_per_cafe(
     workbook = Workbook()
     sheet = workbook.active
     sheet.append(["카페명", "게시판명", "각색제목", "각색본문"])
-    for index in range(3):
+    for index in range(4):
         sheet.append(["고요한아침", "가입인사", f"제목{index}", f"본문{index}"])
     workbook.save(path)
     jobs = load_daily_excel_jobs(path)
     jobs[0].cafe_id = 1
     jobs[1].cafe_id = 1
     jobs[2].cafe_id = 2
+    jobs[3].cafe_id = 31670256
 
     class FixedRandom:
         values = iter((5, 15, 7))
@@ -145,3 +146,4 @@ def test_schedules_accumulate_five_to_fifteen_minutes_per_cafe(
     assert jobs[0].scheduled_at == now + timedelta(minutes=5)
     assert jobs[1].scheduled_at == now + timedelta(minutes=20)
     assert jobs[2].scheduled_at == now + timedelta(minutes=7)
+    assert jobs[3].scheduled_at is None

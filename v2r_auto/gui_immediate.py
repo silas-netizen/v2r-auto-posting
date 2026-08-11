@@ -43,7 +43,7 @@ class ImmediateAutomationApp(AutomationApp):
         )
         ttk.Label(
             outer,
-            text="Google Sheet 브랜드 원고 또는 Excel 일상 글을 V2R API로 예약 발행",
+            text="자사 카페는 5~15분 간격 예약 · 테스트 카페 한 줄 글은 즉시 발행",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
         modes = ttk.Frame(outer)
