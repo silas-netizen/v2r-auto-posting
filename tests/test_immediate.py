@@ -4,7 +4,11 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
-from v2r_auto.immediate_api import ImmediateApiPublisher, SELF_COMMENT_ACCOUNTS
+from v2r_auto.immediate_api import (
+    MANAGER_ACCOUNTS,
+    ImmediateApiPublisher,
+    SELF_COMMENT_ACCOUNTS,
+)
 from v2r_auto.immediate_inputs import (
     load_brand_immediate_jobs,
     load_daily_excel_jobs,
@@ -65,12 +69,23 @@ class FakeImmediatePublisher(ImmediateApiPublisher):
             accounts = [
                 {
                     "naver_login_id": "writer-a",
-                    "my_info_v2": {"is_real_name": False},
+                    "my_info_v2": {"is_real_name": True},
                 },
                 {
                     "naver_login_id": "writer-b",
+                    "my_info_v2": {"is_real_name": True},
+                },
+                {
+                    "naver_login_id": "writer-alias",
                     "my_info_v2": {"is_real_name": False},
                 },
+                *[
+                    {
+                        "naver_login_id": account,
+                        "my_info_v2": {"is_real_name": True},
+                    }
+                    for account in MANAGER_ACCOUNTS
+                ],
                 *[
                     {
                         "naver_login_id": account,
@@ -85,6 +100,8 @@ class FakeImmediatePublisher(ImmediateApiPublisher):
                 "naver_join_cafe": [
                     {"login_id": "writer-a"},
                     {"login_id": "writer-b"},
+                    {"login_id": "writer-alias"},
+                    *[{"login_id": account} for account in MANAGER_ACCOUNTS],
                     *[{"login_id": account} for account in SELF_COMMENT_ACCOUNTS],
                 ]
             }
@@ -113,6 +130,8 @@ def test_prepare_jobs_matches_live_ids_and_rotates_all_writers(tmp_path: Path) -
     publisher.prepare_jobs(jobs)
 
     assert [job.account for job in jobs] == ["writer-a", "writer-b", "writer-a"]
+    assert not ({job.account for job in jobs} & MANAGER_ACCOUNTS)
+    assert "writer-alias" not in {job.account for job in jobs}
     assert all(job.cafe_id == 14567700 for job in jobs)
     assert all(job.menu_id == 34 for job in jobs)
     assert all(job.status == JobStatus.PENDING for job in jobs)
@@ -153,6 +172,21 @@ def test_prepare_jobs_unions_menus_from_all_healthy_accounts(tmp_path: Path) -> 
     assert jobs[0].menu_id == 29
     assert jobs[0].canonical_board_name == "🌸신혼 가전 후기"
     assert jobs[0].account == "writer-b"
+
+
+def test_brand_job_can_still_select_non_real_name_account(tmp_path: Path) -> None:
+    path = tmp_path / "brand.csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        '"키워드","제목 : 제목\n본문 : 본문",고요한아침,,,,,비실명,,가입인사\n',
+        encoding="utf-8-sig",
+    )
+    job = load_brand_immediate_jobs(path, brand="팥순이")[0]
+    publisher = FakeImmediatePublisher(None, logging.getLogger("test"))
+
+    publisher.prepare_jobs([job])
+
+    assert job.account == "writer-alias"
 
 
 def test_schedules_accumulate_five_to_fifteen_minutes_per_cafe(

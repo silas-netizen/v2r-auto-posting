@@ -31,6 +31,7 @@ SELF_COMMENT_ACCOUNTS = (
     "rowpalse",
 )
 ALL_COMMENT_ACCOUNTS = set(COMMENT_ACCOUNTS) | set(SELF_COMMENT_ACCOUNTS)
+MANAGER_ACCOUNTS = {"redsagua01", "clktrade"}
 
 
 class ImmediateApiPublisher(AffiliateApiPublisher):
@@ -116,6 +117,7 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
             account
             for account in joined
             if account not in ALL_COMMENT_ACCOUNTS
+            and account not in MANAGER_ACCOUNTS
             and account in self.global_accounts
             and not self.global_accounts[account].get("is_block")
             and not self.global_accounts[account].get("is_login_fail")
@@ -254,8 +256,9 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         job: ImmediateJob,
     ) -> tuple[tuple[int, int, str], list[str]]:
         pool = self.menu_pools.get((job.cafe_id, job.menu_id), [])
-        if job.account_type in {"실명", "비실명"}:
-            wanted = job.account_type == "실명"
+        required_type = "실명" if job.source_kind == "daily" else job.account_type
+        if required_type in {"실명", "비실명"}:
+            wanted = required_type == "실명"
             pool = [
                 account
                 for account in pool
@@ -266,7 +269,7 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                     is wanted
                 )
             ]
-            key = (job.cafe_id, job.menu_id, job.account_type)
+            key = (job.cafe_id, job.menu_id, required_type)
             return key, pool
         key = (job.cafe_id, job.menu_id, "전체")
         return key, pool
