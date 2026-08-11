@@ -354,7 +354,7 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
             )
             if job.scheduled_at is None or actual_at != job.scheduled_at:
                 raise AffiliateApiError("등록 후 예약 발행 시간 검증에 실패했습니다")
-        if destination.get("status") not in {None, "RESERVED", "DONE"}:
+        if destination.get("status") not in {None, "RESERVED", "DONE", "SUCCESS"}:
             raise AffiliateApiError(
                 f"등록 후 예약 상태가 올바르지 않습니다: {destination.get('status')}"
             )
