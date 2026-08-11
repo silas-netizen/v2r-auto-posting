@@ -43,6 +43,23 @@ class HistoryStore:
             "board": job.board,
             "url": job.post_url,
         }
+        self._save()
+
+    def remove_urls(self, urls: set[str]) -> int:
+        if not urls:
+            return 0
+        keys = [
+            key
+            for key, record in self._items.items()
+            if record.get("url") in urls
+        ]
+        for key in keys:
+            self._items.pop(key, None)
+        if keys:
+            self._save()
+        return len(keys)
+
+    def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(

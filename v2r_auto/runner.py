@@ -451,6 +451,14 @@ class ImmediateRunner:
         started_at = datetime.now()
         self.browser.ensure_v2r_login("", "")
         self.browser.prepare_immediate_jobs(jobs)
+        removed_failures = self.history.remove_urls(
+            self.browser.consume_failed_immediate_urls()
+        )
+        if removed_failures:
+            self.logger.warning(
+                "실제 발행 실패 이력 %s건을 중복 완료 목록에서 제거해 재시도합니다",
+                removed_failures,
+            )
         assign_immediate_schedules(jobs)
 
         if source_sheet_url:
@@ -479,6 +487,9 @@ class ImmediateRunner:
                         ),
                         "success": sum(
                             job.status == JobStatus.SUCCESS for job in jobs
+                        ),
+                        "reserved": sum(
+                            job.status == JobStatus.RESERVED for job in jobs
                         ),
                         "failed": sum(
                             job.status == JobStatus.FAILED for job in jobs
@@ -590,7 +601,11 @@ class ImmediateRunner:
                         else "즉시",
                     )
                     job.post_url = self.browser.publish_immediate(job, dry_run)
-                    job.status = JobStatus.SUCCESS
+                    job.status = (
+                        JobStatus.SUCCESS
+                        if job.cafe_id in TEST_CAFE_IDS
+                        else JobStatus.RESERVED
+                    )
                     job.message = (
                         (
                             "즉시 발행 API 검증 완료"

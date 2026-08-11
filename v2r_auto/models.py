@@ -10,6 +10,7 @@ from .content import CommentNode, ParsedArticle
 class JobStatus(str, Enum):
     PENDING = "대기"
     VALIDATED = "검증완료"
+    RESERVED = "예약대기"
     SKIPPED = "건너뜀"
     SUCCESS = "완료"
     FAILED = "실패"
@@ -185,6 +186,10 @@ class RunResult:
     @property
     def succeeded(self) -> int:
         return sum(job.status == JobStatus.SUCCESS for job in self.jobs)
+
+    @property
+    def reserved(self) -> int:
+        return sum(job.status == JobStatus.RESERVED for job in self.jobs)
 
     @property
     def failed(self) -> int:

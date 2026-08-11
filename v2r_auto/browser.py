@@ -1152,3 +1152,6 @@ class V2RBrowser:
 
     def classify_immediate_failure(self, error: Exception) -> tuple[str, bool]:
         return self._get_immediate_publisher().classify_failure(error)
+
+    def consume_failed_immediate_urls(self) -> set[str]:
+        return self._get_immediate_publisher().consume_failed_source_urls()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from .affiliate_api import (
@@ -14,12 +15,15 @@ from .affiliate_api import (
 from .cafe_catalog import (
     CafeCatalogEntry,
     CafeMenu,
+    CatalogMatchError,
     SELF_OWNED_CAFE_IDS,
     TEST_CAFE_IDS,
     match_catalog_name,
+    normalized_name,
 )
 from .images import PLACEHOLDER_PATTERN, strip_placeholders
 from .models import ImmediateJob, JobStatus
+from .restrictions import AccountRestrictionStore
 
 
 SELF_COMMENT_ACCOUNTS = (
@@ -32,6 +36,9 @@ SELF_COMMENT_ACCOUNTS = (
 )
 ALL_COMMENT_ACCOUNTS = set(COMMENT_ACCOUNTS) | set(SELF_COMMENT_ACCOUNTS)
 MANAGER_ACCOUNTS = {"redsagua01", "clktrade"}
+BOARD_ALIASES = {
+    (26680163, "웨딩홀탐방기"): "웨딩홀탑방기",
+}
 
 
 class ImmediateApiPublisher(AffiliateApiPublisher):
@@ -42,6 +49,16 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         self.menu_pools: dict[tuple[int, int], list[str]] = {}
         self.pool_indexes: dict[tuple[int, int, str], int] = {}
         self.global_accounts: dict[str, dict[str, Any]] = {}
+        data_dir = (
+            self.browser.config.download_dir.parent
+            if self.browser is not None and getattr(self.browser, "config", None)
+            else Path("/tmp") / f"v2r-immediate-{id(self)}"
+        )
+        self.restrictions = AccountRestrictionStore(
+            data_dir / "restricted-accounts.json",
+            logger,
+        )
+        self.failed_source_urls: set[str] = set()
 
     @staticmethod
     def _cafe_rows(payload: Any) -> list[CafeCatalogEntry]:
@@ -113,11 +130,13 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
             query={"cafe_id": cafe_id},
         )
         joined = self._joined_accounts(status)
+        restricted = self.restrictions.blocked_accounts()
         eligible = [
             account
             for account in joined
             if account not in ALL_COMMENT_ACCOUNTS
             and account not in MANAGER_ACCOUNTS
+            and account not in restricted
             and account in self.global_accounts
             and not self.global_accounts[account].get("is_block")
             and not self.global_accounts[account].get("is_login_fail")
@@ -131,6 +150,47 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
             )
         )
         return eligible, joined
+
+    def _scan_recent_failures(self, cafe_id: int) -> None:
+        token: str | None = None
+        for _ in range(50):
+            query: dict[str, Any] = {
+                "cafe_id": cafe_id,
+                "days_ago": 30,
+                "include_reserve": "true",
+            }
+            if token:
+                query["next_token"] = token
+            response = self._request(
+                "GET",
+                "/naver_cafe_articles/board_histories",
+                query=query,
+            )
+            for row in response.get("histories", []):
+                if row.get("status") != "FAIL":
+                    continue
+                source_id = str(row.get("source_id") or "")
+                if source_id:
+                    self.failed_source_urls.add(
+                        f"https://v2r.daboja.im/nc/articleDetail/{source_id}"
+                    )
+                reason = str(row.get("fail_reason") or "")
+                account = str(row.get("naver_account_login_id") or "")
+                self.logger.error(
+                    "이전 예약 글 실제 발행 실패: %s / %s / %s",
+                    row.get("title") or source_id,
+                    account,
+                    reason[:180],
+                )
+                if "27000" in reason or "게시글 작성 및 카페" in reason:
+                    self.restrictions.observe_code_27000(
+                        source_id=source_id,
+                        account=account,
+                        reason=reason[:500],
+                    )
+            token = response.get("next_token")
+            if not token:
+                break
 
     def _load_menus(
         self,
@@ -204,6 +264,7 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                         job.status = JobStatus.SKIPPED
                         job.message = "브랜드 원고는 자사 카페에만 발행할 수 있습니다"
 
+            self._scan_recent_failures(cafe.cafe_id)
             eligible, _joined = self._eligible_accounts(cafe.cafe_id)
             menus, healthy = self._load_menus(cafe.cafe_id, eligible)
             if not healthy:
@@ -220,8 +281,26 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
             for job in cafe_jobs:
                 if job.status != JobStatus.PENDING:
                     continue
-                menu = match_catalog_name(job.board, menus, label="게시판")
                 job.cafe_id = cafe.cafe_id
+                wanted_board = BOARD_ALIASES.get(
+                    (cafe.cafe_id, normalized_name(job.board)),
+                    job.board,
+                )
+                try:
+                    menu = match_catalog_name(
+                        wanted_board,
+                        menus,
+                        label="게시판",
+                    )
+                except CatalogMatchError as exc:
+                    job.status = JobStatus.FAILED
+                    job.message = str(exc)
+                    self.logger.error(
+                        "행 %s 게시판 매칭 실패: %s",
+                        job.row_number,
+                        exc,
+                    )
+                    continue
                 job.menu_id = menu.menu_id
                 job.canonical_cafe_name = cafe.name
                 job.canonical_board_name = menu.name
@@ -250,6 +329,11 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                     job.menu_id,
                     job.account,
                 )
+
+    def consume_failed_source_urls(self) -> set[str]:
+        failed = set(self.failed_source_urls)
+        self.failed_source_urls.clear()
+        return failed
 
     def _pool_for(
         self,

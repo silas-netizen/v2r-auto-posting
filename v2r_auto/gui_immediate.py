@@ -203,7 +203,8 @@ class ImmediateAutomationApp(AutomationApp):
                         "info",
                         (
                             "예약 발행 종료",
-                            f"성공 {result.succeeded}건\n"
+                            f"실제 발행 성공 {result.succeeded}건\n"
+                            f"예약 대기 {result.reserved}건\n"
                             f"실패 {result.failed}건\n"
                             f"건너뜀 {result.skipped}건\n"
                             f"결과: {report_path}",
@@ -229,7 +230,8 @@ class ImmediateAutomationApp(AutomationApp):
                 break
             if kind == "immediate_status":
                 self.progress_text.set(
-                    "대기 {pending} | 성공 {success} | 재시도 {retrying} | "
+                    "대기 {pending} | 예약 {reserved} | 실제성공 {success} | "
+                    "재시도 {retrying} | "
                     "실패 {failed} | 건너뜀 {skipped}".format(**payload)
                 )
             else:

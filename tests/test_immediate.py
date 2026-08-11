@@ -6,10 +6,12 @@ from pathlib import Path
 from openpyxl import Workbook
 
 from v2r_auto.immediate_api import (
+    BOARD_ALIASES,
     MANAGER_ACCOUNTS,
     ImmediateApiPublisher,
     SELF_COMMENT_ACCOUNTS,
 )
+from v2r_auto.cafe_catalog import CafeMenu, match_catalog_name, normalized_name
 from v2r_auto.immediate_inputs import (
     format_daily_body,
     load_brand_immediate_jobs,
@@ -201,6 +203,36 @@ def test_prepare_jobs_unions_menus_from_all_healthy_accounts(tmp_path: Path) -> 
     assert jobs[0].account == "writer-b"
 
 
+def test_verified_wedding_board_alias_resolves_v2r_typo() -> None:
+    wanted = BOARD_ALIASES[(26680163, normalized_name("웨딩홀 탐방기"))]
+    menu = match_catalog_name(
+        wanted,
+        [CafeMenu(menu_id=5, name="웨딩홀 탑방기")],
+        label="게시판",
+    )
+
+    assert menu.menu_id == 5
+
+
+def test_one_unknown_board_does_not_abort_other_rows(tmp_path: Path) -> None:
+    path = tmp_path / "daily.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["카페명", "게시판명", "각색제목", "각색본문"])
+    sheet.append(["고요한아침", "없는 게시판", "실패 제목", "실패 본문"])
+    sheet.append(["고요한아침", "가입인사", "정상 제목", "정상 본문"])
+    workbook.save(path)
+    jobs = load_daily_excel_jobs(path)
+    publisher = FakeImmediatePublisher(None, logging.getLogger("test"))
+
+    publisher.prepare_jobs(jobs)
+
+    assert jobs[0].status == JobStatus.FAILED
+    assert "게시판을 찾지 못했습니다" in jobs[0].message
+    assert jobs[1].status == JobStatus.PENDING
+    assert jobs[1].menu_id == 34
+
+
 def test_brand_job_can_still_select_non_real_name_account(tmp_path: Path) -> None:
     path = tmp_path / "brand.csv"
     path.write_text(
@@ -271,6 +303,9 @@ def test_duplicate_skip_reason_is_written_to_live_log(
             jobs[0].account = "writer"
             jobs[0].canonical_cafe_name = "고요한 아침"
             jobs[0].canonical_board_name = "가입인사"
+
+        def consume_failed_immediate_urls(self):
+            return set()
 
     runner = ImmediateRunner(
         browser=DuplicateBrowser(),
