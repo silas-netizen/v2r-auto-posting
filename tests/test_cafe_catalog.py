@@ -7,6 +7,7 @@ from v2r_auto.cafe_catalog import (
     CafeCatalogService,
     CafeMenu,
     CatalogMatchError,
+    _category,
     match_catalog_name,
     normalized_name,
 )
@@ -15,6 +16,14 @@ from v2r_auto.cafe_catalog import (
 def test_normalized_name_ignores_spacing_and_emoji() -> None:
     assert normalized_name("이모저모 이야기💕") == normalized_name("이모저모이야기")
     assert normalized_name("마이 웨딩 드림") == normalized_name("마이웨딩드림")
+
+
+def test_live_cafe_ids_use_verified_categories() -> None:
+    assert _category(14567700, "고요한 아침") == "자사 카페"
+    assert _category(26616683, "러브 인썸") == "자사 카페"
+    assert _category(26680163, "마이 웨딩 드림") == "자사 카페"
+    assert _category(31670254, "태극마케팅센터") == "노출 테스트 카페"
+    assert _category(31670256, "소나무마케팅센터") == "노출 테스트 카페"
 
 
 def test_match_uses_unique_korean_fallback() -> None:

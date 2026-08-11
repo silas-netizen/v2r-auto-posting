@@ -10,12 +10,14 @@ from typing import Any, Callable, Iterable
 
 
 AFFILIATE_CAFE_IDS = {25016228, 22788814}
+SELF_OWNED_CAFE_IDS = {14567700, 26616683, 26680163}
+TEST_CAFE_IDS = {31670254, 31670256}
 SELF_OWNED_CAFE_NAMES = {
     "고요한 아침",
     "러브 인썸 (Love in Some)",
     "마이 웨딩 드림",
 }
-TEST_CAFE_NAMES = {"태국마케팅센터", "소나무마케팅센터"}
+TEST_CAFE_NAMES = {"태극마케팅센터", "소나무마케팅센터"}
 
 
 class CatalogMatchError(ValueError):
@@ -118,6 +120,10 @@ def _field(item: dict[str, Any], *keys: str, default: Any = None) -> Any:
 def _category(cafe_id: int, name: str) -> str:
     if cafe_id in AFFILIATE_CAFE_IDS:
         return "제휴 카페"
+    if cafe_id in SELF_OWNED_CAFE_IDS:
+        return "자사 카페"
+    if cafe_id in TEST_CAFE_IDS:
+        return "노출 테스트 카페"
     normalized = normalized_name(name)
     if normalized in {normalized_name(item) for item in SELF_OWNED_CAFE_NAMES}:
         return "자사 카페"
@@ -185,7 +191,12 @@ class CafeCatalogService:
                 "/naver_cafes/naver_join_cafe",
                 query={"cafe_id": cafe_id},
             )
-            account_rows = _first_list(status, "naver_accounts", "accounts")
+            account_rows = _first_list(
+                status,
+                "naver_join_cafe",
+                "naver_accounts",
+                "accounts",
+            )
             if not account_rows:
                 account_rows = [
                     item
