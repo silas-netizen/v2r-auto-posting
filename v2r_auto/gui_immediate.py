@@ -96,6 +96,11 @@ class ImmediateAutomationApp(AutomationApp):
             state=tk.DISABLED,
         )
         self.stop_button.pack(side=tk.LEFT, padx=6)
+        ttk.Button(
+            actions,
+            text="저장 폴더",
+            command=lambda: self._open_folder(self.data_dir),
+        ).pack(side=tk.RIGHT)
 
         progress_frame = ttk.Frame(outer)
         progress_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 10))

@@ -498,17 +498,59 @@ class ImmediateRunner:
             if stop_event.is_set():
                 job.status = JobStatus.SKIPPED
                 job.message = "사용자가 중지함"
+                self.logger.warning(
+                    "[%s/%s] 행 %s 건너뜀: %s",
+                    index,
+                    total,
+                    job.row_number,
+                    job.message,
+                )
+                progress(index, total)
+                emit_status()
                 continue
             if job.status != JobStatus.PENDING:
+                log = (
+                    self.logger.error
+                    if job.status == JobStatus.FAILED
+                    else self.logger.info
+                )
+                log(
+                    "[%s/%s] 행 %s %s: %s",
+                    index,
+                    total,
+                    job.row_number,
+                    job.status.value,
+                    job.message or "사유 없음",
+                )
+                progress(index, total)
+                emit_status()
                 continue
             errors = job.validate()
             if errors:
                 job.status = JobStatus.FAILED
                 job.message = ", ".join(errors)
+                self.logger.error(
+                    "[%s/%s] 행 %s 형식 오류: %s",
+                    index,
+                    total,
+                    job.row_number,
+                    job.message,
+                )
+                progress(index, total)
+                emit_status()
                 continue
             if not dry_run and self.history.contains(job):
                 job.status = JobStatus.SKIPPED
                 job.message = "이전에 발행한 동일 글"
+                self.logger.info(
+                    "[%s/%s] 행 %s 건너뜀: %s",
+                    index,
+                    total,
+                    job.row_number,
+                    job.message,
+                )
+                progress(index, total)
+                emit_status()
                 continue
 
             while True:
@@ -519,6 +561,13 @@ class ImmediateRunner:
                     if remaining > 0 and stop_event.wait(remaining):
                         job.status = JobStatus.SKIPPED
                         job.message = "사용자가 중지함"
+                        self.logger.warning(
+                            "[%s/%s] 행 %s 건너뜀: %s",
+                            index,
+                            total,
+                            job.row_number,
+                            job.message,
+                        )
                         break
                     last_cafe_started[job.cafe_id] = time.monotonic()
                 try:
