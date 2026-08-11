@@ -215,6 +215,59 @@ def test_comment_time_collision_moves_one_minute() -> None:
     assert second_at == first_at + timedelta(minutes=1)
 
 
+def test_comment_bundle_collision_shifts_all_roots_in_source_order(
+    tmp_path: Path,
+) -> None:
+    job = load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0]
+    job.article = parse_article(
+        "키워드",
+        "제목 : 제목\n본문 : 본문\n"
+        + "\n".join(
+            [
+                "댓글1: c1", "대댓글1: r1",
+                "댓글2: c2", "대댓글2: r2", "대대댓글2: rr2", "대대대댓글2: rrr2",
+                "댓글3: c3", "대댓글3: r3",
+                "댓글4: c4", "대댓글4: r4",
+                "댓글5: c5", "대댓글5: r5",
+            ]
+        ),
+    )
+    publisher = AffiliateApiPublisher(None, logging.getLogger("test"))
+    publisher._member = lambda cafe_id, account: {  # type: ignore[method-assign]
+        "member_key": f"key-{account}",
+        "naver_login_id": account,
+        "nick": account,
+    }
+    start = datetime(2026, 8, 11, 4, 0, tzinfo=timezone.utc)
+    occupied = (start + timedelta(minutes=5)).replace(second=0, microsecond=0)
+    for account in (
+        "quilliant",
+        "hunnede",
+        "prtchht",
+        "chocobbn",
+        "chenallo",
+        "colpith",
+    ):
+        publisher.comment_slots[account] = {occupied}
+
+    comments = publisher._comments(job, start, 1)
+    root_times = [
+        datetime.fromisoformat(comment["start_at"].replace("Z", "+00:00"))
+        for comment in comments
+    ]
+
+    assert [comment["contents"] for comment in comments] == [
+        "c1", "c2", "c3", "c4", "c5"
+    ]
+    assert root_times == [
+        start + timedelta(minutes=6),
+        start + timedelta(minutes=7),
+        start + timedelta(minutes=8),
+        start + timedelta(minutes=9),
+        start + timedelta(minutes=10),
+    ]
+
+
 class FakeAffiliateBrowser:
     def __init__(self) -> None:
         self.published = []

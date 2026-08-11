@@ -721,13 +721,15 @@ class AffiliateApiPublisher:
         *,
         root_start_at: datetime | None = None,
         reply_member: dict[str, str] | None = None,
+        manage_slot: bool = True,
     ) -> dict[str, Any]:
-        minute = start_at.replace(second=0, microsecond=0)
-        occupied = self.comment_slots.setdefault(account, set())
-        while minute in occupied:
-            start_at += timedelta(minutes=1)
+        if manage_slot:
             minute = start_at.replace(second=0, microsecond=0)
-        occupied.add(minute)
+            occupied = self.comment_slots.setdefault(account, set())
+            while minute in occupied:
+                start_at += timedelta(minutes=1)
+                minute = start_at.replace(second=0, microsecond=0)
+            occupied.add(minute)
         item: dict[str, Any] = {
             "contents": text,
             "naver_login_id": account,
@@ -781,25 +783,83 @@ class AffiliateApiPublisher:
         )
         deep_member = self._member(cafe_id, deep_account)
 
+        bundle_slots = [
+            (account["댓글1"], 5),
+            (job.account, 15),
+            (account["댓글2"], 6),
+            (job.account, 16),
+            (deep_account, 26),
+            (
+                job.account
+                if job.article_type == "후기형"
+                else account["대대대댓글2"],
+                36,
+            ),
+            (account["댓글3"], 7),
+            (job.account, 17),
+            (account["댓글4"], 8),
+            (job.account, 18),
+            (account["댓글5"], 9),
+            (job.account, 19),
+        ]
+        bundle_shift = 0
+        for candidate_shift in range(24 * 60):
+            proposed: set[tuple[str, datetime]] = set()
+            conflict = False
+            for slot_account, minute_offset in bundle_slots:
+                minute = (
+                    start_at + timedelta(minutes=minute_offset + candidate_shift)
+                ).replace(second=0, microsecond=0)
+                key = (slot_account, minute)
+                if (
+                    minute in self.comment_slots.setdefault(slot_account, set())
+                    or key in proposed
+                ):
+                    conflict = True
+                    break
+                proposed.add(key)
+            if not conflict:
+                bundle_shift = candidate_shift
+                for slot_account, minute in proposed:
+                    self.comment_slots[slot_account].add(minute)
+                break
+        else:
+            raise AffiliateApiError("댓글 예약 충돌을 피할 시간을 찾지 못했습니다")
+
+        shifted_start_at = start_at + timedelta(minutes=bundle_shift)
+        if bundle_shift:
+            self.logger.info(
+                "행 %s 댓글 전체를 %s분 이동해 원고 순서를 유지합니다",
+                job.row_number,
+                bundle_shift,
+            )
+
         def root(label: str, root_minute: int, reply_label: str, reply_minute: int):
-            proposed_root_at = start_at + timedelta(minutes=root_minute)
+            proposed_root_at = shifted_start_at + timedelta(minutes=root_minute)
             item = self._comment(
-                account[label], by_label[label].text, proposed_root_at
+                account[label],
+                by_label[label].text,
+                proposed_root_at,
+                manage_slot=False,
             )
             root_at = datetime.fromisoformat(item["start_at"].replace("Z", "+00:00"))
             item["comments"] = [
                 self._comment(
                     job.account,
                     by_label[reply_label].text,
-                    start_at + timedelta(minutes=reply_minute),
+                    shifted_start_at + timedelta(minutes=reply_minute),
                     root_start_at=root_at,
+                    manage_slot=False,
                 )
             ]
             return item
 
-        proposed_comment2_at = start_at + timedelta(minutes=6)
+        proposed_comment2_at = shifted_start_at + timedelta(minutes=6)
         comment2 = self._comment(
-            account["댓글2"], by_label["댓글2"].text, proposed_comment2_at
+            account["댓글2"],
+            by_label["댓글2"].text,
+            proposed_comment2_at,
+            manage_slot=False,
         )
         comment2_at = datetime.fromisoformat(
             comment2["start_at"].replace("Z", "+00:00")
@@ -808,22 +868,25 @@ class AffiliateApiPublisher:
             self._comment(
                 job.account,
                 by_label["대댓글2"].text,
-                start_at + timedelta(minutes=16),
+                shifted_start_at + timedelta(minutes=16),
                 root_start_at=comment2_at,
+                manage_slot=False,
             ),
             self._comment(
                 deep_account,
                 by_label["대대댓글2"].text,
-                start_at + timedelta(minutes=26),
+                shifted_start_at + timedelta(minutes=26),
                 root_start_at=comment2_at,
                 reply_member=author_member,
+                manage_slot=False,
             ),
             self._comment(
                 job.account if job.article_type == "후기형" else account["대대대댓글2"],
                 by_label["대대대댓글2"].text,
-                start_at + timedelta(minutes=36),
+                shifted_start_at + timedelta(minutes=36),
                 root_start_at=comment2_at,
                 reply_member=deep_member,
+                manage_slot=False,
             ),
         ]
         return [
@@ -927,6 +990,60 @@ class AffiliateApiPublisher:
         replies = len(comments) - roots
         if len(comments) != 12 or roots != 5 or replies != 7:
             raise AffiliateApiError("등록 후 댓글 구조 검증에 실패했습니다")
+
+        by_label: dict[str, Any] = {}
+
+        def collect(nodes):
+            for node in nodes:
+                by_label[node.label] = node
+                collect(node.children)
+
+        collect(job.comments)
+        root_comments = sorted(
+            (
+                comment
+                for comment in comments
+                if comment.get("parent_comment_id") is None
+            ),
+            key=lambda comment: datetime.fromisoformat(
+                str(comment["start_at"]).replace("Z", "+00:00")
+            ),
+        )
+        expected_root_labels = ["댓글1", "댓글2", "댓글3", "댓글4", "댓글5"]
+        if [comment.get("contents") for comment in root_comments] != [
+            by_label[label].text for label in expected_root_labels
+        ]:
+            raise AffiliateApiError("등록 후 댓글1~5 원고 순서 검증에 실패했습니다")
+
+        expected_reply_labels = {
+            "댓글1": ["대댓글1"],
+            "댓글2": ["대댓글2", "대대댓글2", "대대대댓글2"],
+            "댓글3": ["대댓글3"],
+            "댓글4": ["대댓글4"],
+            "댓글5": ["대댓글5"],
+        }
+        for root_label, root_comment in zip(
+            expected_root_labels,
+            root_comments,
+        ):
+            children = sorted(
+                (
+                    comment
+                    for comment in comments
+                    if comment.get("parent_comment_id")
+                    == root_comment.get("comment_id")
+                ),
+                key=lambda comment: datetime.fromisoformat(
+                    str(comment["start_at"]).replace("Z", "+00:00")
+                ),
+            )
+            if [comment.get("contents") for comment in children] != [
+                by_label[label].text
+                for label in expected_reply_labels[root_label]
+            ]:
+                raise AffiliateApiError(
+                    f"등록 후 {root_label} 답글 순서 검증에 실패했습니다"
+                )
 
     def publish(
         self,
