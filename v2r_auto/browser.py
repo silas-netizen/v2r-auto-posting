@@ -60,6 +60,7 @@ class V2RBrowser:
         self.google_handle: str | None = None
         self._api_capture_active = False
         self._affiliate_publisher = None
+        self._immediate_publisher = None
 
     def start(self) -> None:
         if self.driver:
@@ -97,6 +98,7 @@ class V2RBrowser:
             self.google_handle = None
             self._api_capture_active = False
             self._affiliate_publisher = None
+            self._immediate_publisher = None
 
     @property
     def wait(self) -> WebDriverWait:
@@ -1131,3 +1133,22 @@ class V2RBrowser:
 
     def replace_failed_affiliate_account(self, job: AffiliateJob) -> str:
         return self._get_affiliate_publisher().replace_failed_account(job)
+
+    def _get_immediate_publisher(self):
+        from .immediate_api import ImmediateApiPublisher
+
+        if self._immediate_publisher is None:
+            self._immediate_publisher = ImmediateApiPublisher(self, self.logger)
+        return self._immediate_publisher
+
+    def prepare_immediate_jobs(self, jobs) -> None:
+        self._get_immediate_publisher().prepare_jobs(jobs)
+
+    def publish_immediate(self, job, dry_run: bool) -> str:
+        return self._get_immediate_publisher().publish(job, dry_run)
+
+    def replace_failed_immediate_account(self, job) -> str:
+        return self._get_immediate_publisher().replace_failed_account(job)
+
+    def classify_immediate_failure(self, error: Exception) -> tuple[str, bool]:
+        return self._get_immediate_publisher().classify_failure(error)

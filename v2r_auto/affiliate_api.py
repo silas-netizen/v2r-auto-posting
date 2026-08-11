@@ -745,10 +745,16 @@ class AffiliateApiPublisher:
         job: AffiliateJob,
         start_at: datetime,
         cafe_id: int,
+        comment_accounts: tuple[str, ...] = COMMENT_ACCOUNTS,
     ) -> list[dict[str, Any]]:
         special_label = "대대댓글2" if job.article_type == "후기형" else "대대대댓글2"
         labels = ("댓글1", "댓글2", special_label, "댓글3", "댓글4", "댓글5")
-        accounts = random.SystemRandom().sample(COMMENT_ACCOUNTS, len(COMMENT_ACCOUNTS))
+        if len(comment_accounts) != len(labels):
+            raise AffiliateApiError("댓글 작성계정은 정확히 6개여야 합니다")
+        accounts = random.SystemRandom().sample(
+            comment_accounts,
+            len(comment_accounts),
+        )
         account = dict(zip(labels, accounts))
         by_label: dict[str, Any] = {}
 

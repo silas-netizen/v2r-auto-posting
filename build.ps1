@@ -6,7 +6,9 @@ py -m pip install ".[build,test]"
 py -m pytest
 py -m PyInstaller --noconfirm --clean "v2r-auto-posting.spec"
 py -m PyInstaller --noconfirm --clean "v2r-auto-affiliate.spec"
+py -m PyInstaller --noconfirm --clean "v2r-immediate-posting.spec"
 
 Write-Host ""
 Write-Host "빌드 완료: dist\V2R-Auto-Posting.exe"
 Write-Host "빌드 완료: dist\V2R-Affiliate-Revision.exe"
+Write-Host "빌드 완료: dist\V2R-Immediate-Posting.exe"

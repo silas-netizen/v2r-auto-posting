@@ -11,7 +11,14 @@ from typing import Callable
 from .browser import V2RBrowser
 from .daily_posts import assign_daily_posts
 from .history import HistoryStore
-from .models import AffiliateJob, DailyPost, JobStatus, PostJob, RunResult
+from .models import (
+    AffiliateJob,
+    DailyPost,
+    ImmediateJob,
+    JobStatus,
+    PostJob,
+    RunResult,
+)
 from .report import write_report
 from .state import JobStateStore
 
@@ -390,4 +397,179 @@ class AffiliateRunner:
         progress(total, total)
         if self.state:
             self.state.close()
+        return result, report_path
+
+
+class ImmediateRunner:
+    """Run immediate API posts from either a brand Sheet or daily Excel."""
+
+    def __init__(
+        self,
+        browser: V2RBrowser,
+        history_path: Path,
+        report_dir: Path,
+        logger: logging.Logger,
+    ):
+        self.browser = browser
+        self.history = HistoryStore(history_path)
+        self.report_dir = report_dir
+        self.logger = logger
+
+    def run(
+        self,
+        jobs: list[ImmediateJob],
+        *,
+        dry_run: bool,
+        stop_event: threading.Event,
+        progress: Callable[[int, int], None],
+        source_sheet_url: str = "",
+        status: Callable[[dict[str, int]], None] | None = None,
+    ) -> tuple[RunResult, Path]:
+        started_at = datetime.now()
+        self.browser.ensure_v2r_login("", "")
+        self.browser.prepare_immediate_jobs(jobs)
+
+        if source_sheet_url:
+            for job in jobs:
+                if job.source_kind != "brand" or job.status != JobStatus.PENDING:
+                    continue
+                try:
+                    self.browser.update_sheet_cell(
+                        source_sheet_url,
+                        "D",
+                        job.row_number,
+                        job.account,
+                    )
+                except Exception as exc:
+                    job.status = JobStatus.FAILED
+                    job.message = f"D열 작성계정 저장 실패: {exc}"
+
+        retrying = 0
+
+        def emit_status() -> None:
+            if status:
+                status(
+                    {
+                        "pending": sum(
+                            job.status == JobStatus.PENDING for job in jobs
+                        ),
+                        "success": sum(
+                            job.status == JobStatus.SUCCESS for job in jobs
+                        ),
+                        "failed": sum(
+                            job.status == JobStatus.FAILED for job in jobs
+                        ),
+                        "skipped": sum(
+                            job.status == JobStatus.SKIPPED for job in jobs
+                        ),
+                        "retrying": retrying,
+                    }
+                )
+
+        emit_status()
+        total = len(jobs)
+        last_cafe_started: dict[int, float] = {}
+        for index, job in enumerate(jobs, start=1):
+            progress(index - 1, total)
+            if stop_event.is_set():
+                job.status = JobStatus.SKIPPED
+                job.message = "사용자가 중지함"
+                continue
+            if job.status != JobStatus.PENDING:
+                continue
+            errors = job.validate()
+            if errors:
+                job.status = JobStatus.FAILED
+                job.message = ", ".join(errors)
+                continue
+            if not dry_run and self.history.contains(job):
+                job.status = JobStatus.SKIPPED
+                job.message = "이전에 발행한 동일 글"
+                continue
+
+            while True:
+                if not dry_run:
+                    remaining = 20 - (
+                        time.monotonic() - last_cafe_started.get(job.cafe_id, 0)
+                    )
+                    if remaining > 0 and stop_event.wait(remaining):
+                        job.status = JobStatus.SKIPPED
+                        job.message = "사용자가 중지함"
+                        break
+                    last_cafe_started[job.cafe_id] = time.monotonic()
+                try:
+                    self.logger.info(
+                        "[%s/%s] %s 행 %s 즉시 발행: %s / %s / %s",
+                        index,
+                        total,
+                        job.source_name,
+                        job.row_number,
+                        job.canonical_cafe_name,
+                        job.canonical_board_name,
+                        job.account,
+                    )
+                    job.post_url = self.browser.publish_immediate(job, dry_run)
+                    job.status = JobStatus.SUCCESS
+                    job.message = "API 검증 완료" if dry_run else "즉시 발행 완료"
+                    if not dry_run:
+                        self.history.record(job)
+                        if source_sheet_url and job.source_kind == "brand":
+                            self.browser.update_sheet_cell(
+                                source_sheet_url,
+                                "F",
+                                job.row_number,
+                                job.post_url,
+                            )
+                    break
+                except Exception as exc:
+                    reason, can_replace = self.browser.classify_immediate_failure(exc)
+                    replacement = (
+                        self.browser.replace_failed_immediate_account(job)
+                        if can_replace
+                        else ""
+                    )
+                    if replacement:
+                        retrying += 1
+                        emit_status()
+                        if source_sheet_url and job.source_kind == "brand":
+                            self.browser.update_sheet_cell(
+                                source_sheet_url,
+                                "D",
+                                job.row_number,
+                                replacement,
+                            )
+                        self.logger.warning(
+                            "행 %s 작성계정 교체 후 재시도: %s",
+                            job.row_number,
+                            replacement,
+                        )
+                        continue
+                    job.status = JobStatus.FAILED
+                    job.message = reason
+                    if source_sheet_url and job.source_kind == "brand" and not dry_run:
+                        try:
+                            self.browser.update_sheet_cell(
+                                source_sheet_url,
+                                "F",
+                                job.row_number,
+                                reason,
+                            )
+                        except Exception:
+                            self.logger.exception(
+                                "행 %s 실패 사유 시트 저장 실패",
+                                job.row_number,
+                            )
+                    self.logger.exception("행 %s 즉시 발행 실패", job.row_number)
+                    break
+            progress(index, total)
+            emit_status()
+
+        result = RunResult(
+            started_at=started_at,
+            finished_at=datetime.now(),
+            dry_run=dry_run,
+            jobs=jobs,
+        )
+        report_path = write_report(result, self.report_dir)
+        progress(total, total)
         return result, report_path
