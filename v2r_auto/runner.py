@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+import random
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -28,6 +29,24 @@ class RunOptions:
     dry_run: bool = True
     delay_seconds: int = 30
     skip_duplicates: bool = True
+
+
+def assign_immediate_schedules(
+    jobs: list[ImmediateJob],
+    *,
+    now: datetime | None = None,
+    rng: random.Random | None = None,
+) -> None:
+    """Keep each cafe's reserved posts 5–15 minutes apart."""
+    now = now or datetime.now(timezone.utc)
+    rng = rng or random.SystemRandom()
+    last_by_cafe: dict[int, datetime] = {}
+    for job in jobs:
+        if job.status != JobStatus.PENDING:
+            continue
+        anchor = max(now, last_by_cafe.get(job.cafe_id, now))
+        job.scheduled_at = anchor + timedelta(minutes=rng.randint(5, 15))
+        last_by_cafe[job.cafe_id] = job.scheduled_at
 
 
 class AutomationRunner:
@@ -428,6 +447,7 @@ class ImmediateRunner:
         started_at = datetime.now()
         self.browser.ensure_v2r_login("", "")
         self.browser.prepare_immediate_jobs(jobs)
+        assign_immediate_schedules(jobs)
 
         if source_sheet_url:
             for job in jobs:
@@ -499,7 +519,7 @@ class ImmediateRunner:
                     last_cafe_started[job.cafe_id] = time.monotonic()
                 try:
                     self.logger.info(
-                        "[%s/%s] %s 행 %s 즉시 발행: %s / %s / %s",
+                        "[%s/%s] %s 행 %s 예약 등록: %s / %s / %s / %s",
                         index,
                         total,
                         job.source_name,
@@ -507,10 +527,15 @@ class ImmediateRunner:
                         job.canonical_cafe_name,
                         job.canonical_board_name,
                         job.account,
+                        job.scheduled_at.astimezone().strftime("%Y-%m-%d %H:%M")
+                        if job.scheduled_at
+                        else "시간 미정",
                     )
                     job.post_url = self.browser.publish_immediate(job, dry_run)
                     job.status = JobStatus.SUCCESS
-                    job.message = "API 검증 완료" if dry_run else "즉시 발행 완료"
+                    job.message = (
+                        "예약 API 검증 완료" if dry_run else "예약 발행 등록 완료"
+                    )
                     if not dry_run:
                         self.history.record(job)
                         if source_sheet_url and job.source_kind == "brand":

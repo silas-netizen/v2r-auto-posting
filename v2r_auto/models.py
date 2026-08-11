@@ -126,6 +126,7 @@ class ImmediateJob:
     canonical_board_name: str = ""
     head_id: int | None = None
     canonical_head_name: str | None = None
+    scheduled_at: datetime | None = None
     status: JobStatus = JobStatus.PENDING
     message: str = ""
     post_url: str = ""

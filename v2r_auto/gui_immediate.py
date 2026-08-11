@@ -12,7 +12,7 @@ from .state import AnotherInstanceRunningError, InstanceLock
 
 
 class ImmediateAutomationApp(AutomationApp):
-    app_name = "V2R 자사 카페 즉시 발행"
+    app_name = "V2R 자사 카페 예약 발행"
     data_folder_name = "V2RImmediatePosting"
 
     def __init__(self):
@@ -43,7 +43,7 @@ class ImmediateAutomationApp(AutomationApp):
         )
         ttk.Label(
             outer,
-            text="Google Sheet 브랜드 원고 또는 Excel 일상 글을 V2R API로 즉시 발행",
+            text="Google Sheet 브랜드 원고 또는 Excel 일상 글을 V2R API로 예약 발행",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
         modes = ttk.Frame(outer)
@@ -85,7 +85,7 @@ class ImmediateAutomationApp(AutomationApp):
         )
         self.start_button = ttk.Button(
             actions,
-            text="3. 즉시 발행 시작",
+            text="3. 예약 발행 시작",
             command=self._start,
         )
         self.start_button.pack(side=tk.LEFT)
@@ -166,8 +166,8 @@ class ImmediateAutomationApp(AutomationApp):
             return
         dry_run = self.dry_run.get()
         if not dry_run and not messagebox.askyesno(
-            "실제 즉시 발행",
-            "검증 모드가 꺼져 있습니다.\n글을 실제로 즉시 발행할까요?",
+            "실제 예약 발행",
+            "검증 모드가 꺼져 있습니다.\n글을 실제로 예약 등록할까요?",
         ):
             return
         self.stop_event.clear()
@@ -197,7 +197,7 @@ class ImmediateAutomationApp(AutomationApp):
                     (
                         "info",
                         (
-                            "즉시 발행 종료",
+                            "예약 발행 종료",
                             f"성공 {result.succeeded}건\n"
                             f"실패 {result.failed}건\n"
                             f"건너뜀 {result.skipped}건\n"
@@ -206,7 +206,7 @@ class ImmediateAutomationApp(AutomationApp):
                     )
                 )
             except Exception as exc:
-                self.logger.exception("즉시 발행 실행 실패")
+                self.logger.exception("예약 발행 실행 실패")
                 self.ui_queue.put(("error", ("실행 실패", str(exc))))
             finally:
                 self.ui_queue.put(("finished", None))

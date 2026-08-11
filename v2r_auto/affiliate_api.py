@@ -607,6 +607,7 @@ class AffiliateApiPublisher:
         comments: list[dict[str, Any]],
         parent_source_id: str | None = None,
         content_json: str | None = None,
+        recovery_statuses: tuple[str, ...] = ("DONE",),
     ) -> str:
         payload: dict[str, Any] = {
             "tag_list": tags,
@@ -632,7 +633,7 @@ class AffiliateApiPublisher:
                 requested_at,
                 parent_source_id,
             )
-            if recent and recent.get("status") == "DONE":
+            if recent and recent.get("status") in recovery_statuses:
                 return str(recent["source_id"])
             if recent:
                 self._delete_source(str(recent["source_id"]))

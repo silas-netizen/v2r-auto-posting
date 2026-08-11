@@ -26,6 +26,7 @@ def write_report(result: RunResult, output_dir: Path) -> Path:
     ]
     for job in result.jobs:
         daily_post_url = getattr(job, "daily_post_url", "")
+        scheduled_at = getattr(job, "scheduled_at", None)
         lines.extend(
             [
                 f"[행 {job.row_number}] {job.status.value}",
@@ -34,6 +35,12 @@ def write_report(result: RunResult, output_dir: Path) -> Path:
                 f"카페/게시판: {job.cafe} / {job.board}",
                 f"결과: {job.message or '-'}",
                 f"URL: {job.post_url or '-'}",
+                (
+                    "예약시간: "
+                    + scheduled_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+                    if scheduled_at
+                    else "예약시간: -"
+                ),
                 f"일상 글 URL: {daily_post_url or '-'}",
                 f"댓글: {len(job.comments)}개",
                 "",

@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -9,6 +10,7 @@ from v2r_auto.immediate_inputs import (
     load_daily_excel_jobs,
 )
 from v2r_auto.models import JobStatus
+from v2r_auto.runner import assign_immediate_schedules
 
 
 def test_load_brand_sheet_with_board_and_optional_comments(tmp_path: Path) -> None:
@@ -114,3 +116,32 @@ def test_prepare_jobs_matches_live_ids_and_rotates_all_writers(tmp_path: Path) -
     assert all(job.cafe_id == 14567700 for job in jobs)
     assert all(job.menu_id == 34 for job in jobs)
     assert all(job.status == JobStatus.PENDING for job in jobs)
+
+
+def test_schedules_accumulate_five_to_fifteen_minutes_per_cafe(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "daily.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["카페명", "게시판명", "각색제목", "각색본문"])
+    for index in range(3):
+        sheet.append(["고요한아침", "가입인사", f"제목{index}", f"본문{index}"])
+    workbook.save(path)
+    jobs = load_daily_excel_jobs(path)
+    jobs[0].cafe_id = 1
+    jobs[1].cafe_id = 1
+    jobs[2].cafe_id = 2
+
+    class FixedRandom:
+        values = iter((5, 15, 7))
+
+        def randint(self, _minimum, _maximum):
+            return next(self.values)
+
+    now = datetime(2026, 8, 11, 1, 0, tzinfo=timezone.utc)
+    assign_immediate_schedules(jobs, now=now, rng=FixedRandom())
+
+    assert jobs[0].scheduled_at == now + timedelta(minutes=5)
+    assert jobs[1].scheduled_at == now + timedelta(minutes=20)
+    assert jobs[2].scheduled_at == now + timedelta(minutes=7)

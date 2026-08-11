@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from .affiliate_api import (
@@ -298,7 +298,12 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
             head.get("head_name") or head.get("headName") or ""
         )
 
-    def _destination(self, job: ImmediateJob) -> dict[str, Any]:
+    def _destination(
+        self,
+        job: ImmediateJob,
+    ) -> dict[str, Any]:
+        if job.scheduled_at is None:
+            raise AffiliateApiError("예약 발행 시간이 준비되지 않았습니다")
         return {
             "cafe_id": job.cafe_id,
             "cafe_name": job.canonical_cafe_name,
@@ -307,19 +312,24 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
             "menu_id": job.menu_id,
             "menu_name": job.canonical_board_name,
             "naver_login_id": job.account,
-            "start_at": None,
+            "start_at": job.scheduled_at.isoformat().replace("+00:00", "Z"),
             "target_view_count": 0,
             "use_comment_ai": True,
             "parent_id": None,
         }
 
-    def _verify_immediate(self, source_id: str, job: ImmediateJob) -> None:
+    def _verify_immediate(
+        self,
+        source_id: str,
+        job: ImmediateJob,
+    ) -> None:
         detail = self._request(
             "GET",
             "/naver_cafe_articles/article",
             query={"source_id": source_id},
         )
         source = detail["naver_cafe_article_source"]
+        destination = detail["naver_cafe_article_destination"]
         comments = detail.get("naver_cafe_article_source_comments") or []
         document = json.loads(detail["naver_cafe_article_source_detail"]["body"])
         lines = [
@@ -330,6 +340,15 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         ]
         if source["title"] != job.title or source.get("tag_list", []) != job.tags:
             raise AffiliateApiError("등록 후 제목 또는 태그 검증에 실패했습니다")
+        actual_at = datetime.fromisoformat(
+            str(destination["start_at"]).replace("Z", "+00:00")
+        )
+        if job.scheduled_at is None or actual_at != job.scheduled_at:
+            raise AffiliateApiError("등록 후 예약 발행 시간 검증에 실패했습니다")
+        if destination.get("status") not in {None, "RESERVED", "DONE"}:
+            raise AffiliateApiError(
+                f"등록 후 예약 상태가 올바르지 않습니다: {destination.get('status')}"
+            )
         if lines != strip_placeholders(job.body).splitlines():
             raise AffiliateApiError("등록 후 본문 문단 검증에 실패했습니다")
         if any(PLACEHOLDER_PATTERN.search(line) for line in lines):
@@ -337,12 +356,25 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         expected_comments = 12 if job.comments else 0
         if len(comments) != expected_comments:
             raise AffiliateApiError("등록 후 댓글 개수 검증에 실패했습니다")
+        if comments and any(
+            datetime.fromisoformat(str(comment["start_at"]).replace("Z", "+00:00"))
+            < job.scheduled_at
+            for comment in comments
+        ):
+            raise AffiliateApiError("댓글 예약 시간이 글 발행 시간보다 빠릅니다")
 
     def publish(self, job: ImmediateJob, dry_run: bool) -> str:
         if not job.cafe_id or not job.menu_id or not job.account:
             raise AffiliateApiError("API 목적지 또는 작성계정이 준비되지 않았습니다")
+        if job.scheduled_at is None:
+            raise AffiliateApiError("예약 발행 시간이 준비되지 않았습니다")
         destination = self._destination(job)
         if dry_run:
+            self.logger.info(
+                "행 %s 예약 발행 검증: %s",
+                job.row_number,
+                job.scheduled_at.isoformat(),
+            )
             return ""
 
         content_json = (
@@ -353,7 +385,7 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         comments = (
             self._comments(
                 job,
-                datetime.now(timezone.utc),
+                job.scheduled_at,
                 job.cafe_id,
                 comment_accounts=SELF_COMMENT_ACCOUNTS,
             )
@@ -369,11 +401,16 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                 destination,
                 comments,
                 content_json=content_json,
+                recovery_statuses=("RESERVED", "DONE"),
             )
-            self._wait_for_written_at(source_id, job.cafe_id)
             self._verify_immediate(source_id, job)
         except Exception:
             if source_id:
                 self._delete_source(source_id)
             raise
+        self.logger.info(
+            "행 %s 예약 발행 등록 완료: %s",
+            job.row_number,
+            job.scheduled_at.isoformat(),
+        )
         return f"https://v2r.daboja.im/nc/articleDetail/{source_id}"
