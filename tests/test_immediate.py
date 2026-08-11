@@ -16,7 +16,7 @@ def test_load_brand_sheet_with_board_and_optional_comments(tmp_path: Path) -> No
     path.write_text(
         "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
         '"키 워드","제목 : 제목\n본문 : 본문\n댓글1: 질문",고요한아침,,질문형,,,비실명,,극복후기\n'
-        '"일상","제목 : 일상 제목\n본문 : 일상 본문",고요한아침,writer,,,비실명,Y,오늘의 한 끼\n',
+        '"일상","제목 : 일상 제목\n본문 : 일상 본문",고요한아침,writer,,,,비실명,Y,오늘의 한 끼\n',
         encoding="utf-8-sig",
     )
 
