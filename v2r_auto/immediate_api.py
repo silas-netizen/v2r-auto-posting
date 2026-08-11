@@ -38,9 +38,8 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
 
     def __init__(self, browser, logger):
         super().__init__(browser, logger)
-        self.cafe_pools: dict[int, list[str]] = {}
-        self.real_name_pools: dict[tuple[int, str], list[str]] = {}
-        self.pool_indexes: dict[tuple[int, str], int] = {}
+        self.menu_pools: dict[tuple[int, int], list[str]] = {}
+        self.pool_indexes: dict[tuple[int, int, str], int] = {}
         self.global_accounts: dict[str, dict[str, Any]] = {}
 
     @staticmethod
@@ -87,10 +86,20 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         for item in _walk_dicts(payload):
             menu_id = item.get("menuId") or item.get("menu_id")
             name = item.get("menuName") or item.get("menu_name")
-            if not menu_id or not name or int(menu_id) in seen:
+            if (
+                not menu_id
+                or not name
+                or item.get("writable") is False
+                or int(menu_id) in seen
+            ):
                 continue
             seen.add(int(menu_id))
-            menus.append(CafeMenu(menu_id=int(menu_id), name=str(name)))
+            menus.append(
+                CafeMenu(
+                    menu_id=int(menu_id),
+                    name=str(name),
+                )
+            )
         return menus
 
     def _eligible_accounts(
@@ -127,7 +136,7 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         accounts: list[str],
     ) -> tuple[list[CafeMenu], list[str]]:
         healthy: list[str] = []
-        menus: list[CafeMenu] = []
+        menu_map: dict[int, CafeMenu] = {}
         for account in accounts:
             try:
                 response = self._request(
@@ -153,9 +162,14 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                     continue
                 raise
             healthy.append(account)
-            if not menus:
-                menus = self._menu_rows(response)
-        return menus, healthy
+            for menu in self._menu_rows(response):
+                item = menu_map.setdefault(
+                    menu.menu_id,
+                    CafeMenu(menu_id=menu.menu_id, name=menu.name),
+                )
+                if account not in item.writable_accounts:
+                    item.writable_accounts.append(account)
+        return list(menu_map.values()), healthy
 
     def prepare_jobs(self, jobs: list[ImmediateJob]) -> None:
         self._capture_authorization()
@@ -196,18 +210,10 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                 )
             if not menus:
                 raise AffiliateApiError(f"{cafe.name} 게시판 목록이 비어 있습니다")
-            self.cafe_pools[cafe.cafe_id] = healthy
-            for account_type, real_name in (("실명", True), ("비실명", False)):
-                self.real_name_pools[(cafe.cafe_id, account_type)] = [
-                    account
-                    for account in healthy
-                    if (
-                        (self.global_accounts[account].get("my_info_v2") or {}).get(
-                            "is_real_name"
-                        )
-                        is real_name
-                    )
-                ]
+            for menu in menus:
+                self.menu_pools[(cafe.cafe_id, menu.menu_id)] = list(
+                    menu.writable_accounts
+                )
 
             for job in cafe_jobs:
                 if job.status != JobStatus.PENDING:
@@ -217,11 +223,13 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                 job.menu_id = menu.menu_id
                 job.canonical_cafe_name = cafe.name
                 job.canonical_board_name = menu.name
+                menu_pool = self.menu_pools.get((job.cafe_id, job.menu_id), [])
                 if job.account:
-                    if job.account not in healthy:
+                    if job.account not in menu_pool:
                         job.status = JobStatus.FAILED
                         job.message = (
-                            f"지정 작성계정을 사용할 수 없습니다: {job.account}"
+                            f"지정 작성계정으로 해당 게시판을 사용할 수 없습니다: "
+                            f"{job.account}"
                         )
                         continue
                 else:
@@ -241,12 +249,27 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                     job.account,
                 )
 
-    def _pool_for(self, job: ImmediateJob) -> tuple[tuple[int, str], list[str]]:
+    def _pool_for(
+        self,
+        job: ImmediateJob,
+    ) -> tuple[tuple[int, int, str], list[str]]:
+        pool = self.menu_pools.get((job.cafe_id, job.menu_id), [])
         if job.account_type in {"실명", "비실명"}:
-            key = (job.cafe_id, job.account_type)
-            return key, self.real_name_pools.get(key, [])
-        key = (job.cafe_id, "전체")
-        return key, self.cafe_pools.get(job.cafe_id, [])
+            wanted = job.account_type == "실명"
+            pool = [
+                account
+                for account in pool
+                if (
+                    (self.global_accounts[account].get("my_info_v2") or {}).get(
+                        "is_real_name"
+                    )
+                    is wanted
+                )
+            ]
+            key = (job.cafe_id, job.menu_id, job.account_type)
+            return key, pool
+        key = (job.cafe_id, job.menu_id, "전체")
+        return key, pool
 
     def pick_account(self, job: ImmediateJob) -> str:
         key, pool = self._pool_for(job)

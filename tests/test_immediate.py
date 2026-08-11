@@ -118,6 +118,43 @@ def test_prepare_jobs_matches_live_ids_and_rotates_all_writers(tmp_path: Path) -
     assert all(job.status == JobStatus.PENDING for job in jobs)
 
 
+def test_prepare_jobs_unions_menus_from_all_healthy_accounts(tmp_path: Path) -> None:
+    path = tmp_path / "daily.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["카페명", "게시판명", "각색제목", "각색본문"])
+    sheet.append(["고요한아침", "신혼 가전 후기", "제목", "본문"])
+    workbook.save(path)
+    jobs = load_daily_excel_jobs(path)
+
+    class PartialMenuPublisher(FakeImmediatePublisher):
+        def _request(self, method, request_path, payload=None, query=None):
+            if request_path == "/naver_cafes/menus":
+                if query["naver_login_id"] == "writer-a":
+                    return {
+                        "cafe_menus": [
+                            {"menuId": 1, "menuName": "🪻가입인사", "writable": True}
+                        ]
+                    }
+                return {
+                    "cafe_menus": [
+                        {
+                            "menuId": 29,
+                            "menuName": "🌸신혼 가전 후기",
+                            "writable": True,
+                        }
+                    ]
+                }
+            return super()._request(method, request_path, payload, query)
+
+    publisher = PartialMenuPublisher(None, logging.getLogger("test"))
+    publisher.prepare_jobs(jobs)
+
+    assert jobs[0].menu_id == 29
+    assert jobs[0].canonical_board_name == "🌸신혼 가전 후기"
+    assert jobs[0].account == "writer-b"
+
+
 def test_schedules_accumulate_five_to_fifteen_minutes_per_cafe(
     tmp_path: Path,
 ) -> None:

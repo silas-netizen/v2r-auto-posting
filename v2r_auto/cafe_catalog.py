@@ -54,6 +54,16 @@ def korean_name(value: str) -> str:
     return "".join(re.findall(r"[가-힣]+", html.unescape(value or "")))
 
 
+def readable_name(value: str) -> str:
+    """Remove emoji from messages so Windows Tk does not render replacement boxes."""
+    return re.sub(
+        r"[^0-9a-z가-힣\s&·/()'`.,!?_+-]+",
+        "",
+        html.unescape(value or ""),
+        flags=re.IGNORECASE,
+    ).strip()
+
+
 def match_catalog_name(
     wanted: str,
     candidates: Iterable[Any],
@@ -67,7 +77,7 @@ def match_catalog_name(
     if len(exact) == 1:
         return exact[0]
     if len(exact) > 1:
-        options = ", ".join(name(item) for item in exact)
+        options = ", ".join(readable_name(name(item)) for item in exact)
         raise CatalogMatchError(f"{label} 이름이 중복됩니다: {wanted} → {options}")
 
     korean_key = korean_name(wanted)
@@ -79,12 +89,12 @@ def match_catalog_name(
     if len(korean) == 1:
         return korean[0]
     if len(korean) > 1:
-        options = ", ".join(name(item) for item in korean)
+        options = ", ".join(readable_name(name(item)) for item in korean)
         raise CatalogMatchError(
             f"{label} 한글 이름 후보가 여러 개라 자동 선택하지 않습니다: "
             f"{wanted} → {options}"
         )
-    options = ", ".join(name(item) for item in rows[:20])
+    options = ", ".join(readable_name(name(item)) for item in rows[:20])
     raise CatalogMatchError(
         f"V2R에서 {label}을 찾지 못했습니다: {wanted}"
         + (f" / 사용 가능: {options}" if options else "")
