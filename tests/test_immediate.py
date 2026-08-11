@@ -377,8 +377,10 @@ def test_pause_waits_then_resumes_before_next_publish(tmp_path: Path) -> None:
     time.sleep(0.1)
 
     assert browser.published == 0
+    scheduled_before_resume = job.scheduled_at
     pause_event.clear()
     thread.join(timeout=2)
 
     assert not thread.is_alive()
     assert browser.published == 1
+    assert job.scheduled_at == scheduled_before_resume

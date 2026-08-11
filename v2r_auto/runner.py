@@ -516,17 +516,8 @@ class ImmediateRunner:
                 if stop_event.wait(0.2):
                     return -1.0
             paused_seconds = time.monotonic() - paused_at
-            shift = timedelta(seconds=paused_seconds)
-            for pending_job in jobs:
-                if (
-                    pending_job.status == JobStatus.PENDING
-                    and pending_job.scheduled_at is not None
-                ):
-                    pending_job.scheduled_at += shift
-            for cafe_id in list(last_cafe_started):
-                last_cafe_started[cafe_id] += paused_seconds
             self.logger.info(
-                "다시 시작: 남은 예약시간을 %.0f초 뒤로 이동했습니다",
+                "다시 시작: 다음 미처리 행부터 계속합니다 (정지 %.0f초)",
                 paused_seconds,
             )
             return paused_seconds
@@ -607,7 +598,6 @@ class ImmediateRunner:
                                 job.status = JobStatus.SKIPPED
                                 job.message = "사용자가 중지함"
                                 break
-                            deadline += paused_seconds
                             wait_for = min(0.25, deadline - time.monotonic())
                             if wait_for > 0 and stop_event.wait(wait_for):
                                 job.status = JobStatus.SKIPPED
@@ -623,6 +613,27 @@ class ImmediateRunner:
                             )
                             break
                     last_cafe_started[job.cafe_id] = time.monotonic()
+                if job.scheduled_at is not None:
+                    minimum_start = datetime.now(timezone.utc) + timedelta(minutes=2)
+                    if job.scheduled_at < minimum_start:
+                        original = job.scheduled_at
+                        adjusted = datetime.now(timezone.utc) + timedelta(
+                            minutes=random.SystemRandom().randint(5, 15)
+                        )
+                        shift = adjusted - original
+                        for pending_job in jobs[index - 1 :]:
+                            if (
+                                pending_job.status == JobStatus.PENDING
+                                and pending_job.cafe_id == job.cafe_id
+                                and pending_job.scheduled_at is not None
+                            ):
+                                pending_job.scheduled_at += shift
+                        self.logger.info(
+                            "%s 일시정지 중 지난 예약만 최소 조정: %s → %s",
+                            job.canonical_cafe_name,
+                            original.astimezone().strftime("%Y-%m-%d %H:%M"),
+                            job.scheduled_at.astimezone().strftime("%Y-%m-%d %H:%M"),
+                        )
                 try:
                     self.logger.info(
                         "[%s/%s] %s 행 %s %s: %s / %s / %s / %s",
