@@ -11,6 +11,7 @@ from v2r_auto.immediate_api import (
     SELF_COMMENT_ACCOUNTS,
 )
 from v2r_auto.immediate_inputs import (
+    format_daily_body,
     load_brand_immediate_jobs,
     load_daily_excel_jobs,
 )
@@ -54,6 +55,30 @@ def test_load_daily_excel_a_to_d(tmp_path: Path) -> None:
     assert jobs[0].title == "안녕하세요"
     assert jobs[0].body == "반갑습니다"
     assert jobs[0].comments == []
+
+
+def test_formats_punctuation_free_daily_body_into_two_sentence_paragraphs() -> None:
+    body = (
+        "어제 남편과 드라이브를 다녀왔어요 "
+        "오랜만에 날씨가 좋아서 기분이 좋았어요 "
+        "근처 카페 분위기가 정말 좋더라고요 "
+        "다음에는 친구들과 함께 가보고 싶어요"
+    )
+
+    assert format_daily_body(body) == (
+        "어제 남편과 드라이브를 다녀왔어요\n"
+        "오랜만에 날씨가 좋아서 기분이 좋았어요\n\n"
+        "근처 카페 분위기가 정말 좋더라고요\n"
+        "다음에는 친구들과 함께 가보고 싶어요"
+    )
+
+
+def test_daily_body_keeps_one_two_sentences_and_existing_lines() -> None:
+    short = "오늘 산책을 다녀왔어요 날씨가 정말 좋았어요"
+    formatted = "오늘 산책을 다녀왔어요\n\n날씨가 정말 좋았어요"
+
+    assert format_daily_body(short) == short
+    assert format_daily_body(formatted) == formatted
 
 
 class FakeImmediatePublisher(ImmediateApiPublisher):

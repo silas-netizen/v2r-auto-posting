@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -25,6 +26,55 @@ BRAND_OPTIONAL_COLUMNS = {
 }
 BOARD_HEADERS = {"게시판명", "게시판", "메뉴", "메뉴명"}
 DAILY_HEADERS = ("카페명", "게시판명", "각색제목", "각색본문")
+KOREAN_SENTENCE_ENDINGS = tuple(
+    sorted(
+        {
+            "더라고요",
+            "거든요",
+            "했습니다",
+            "였습니다",
+            "없습니다",
+            "있습니다",
+            "같습니다",
+            "됩니다",
+            "랍니다",
+            "합니다",
+            "했어요",
+            "됐어요",
+            "였어요",
+            "있어요",
+            "없어요",
+            "같아요",
+            "좋아요",
+            "보였어요",
+            "싶어요",
+            "이에요",
+            "해요",
+            "돼요",
+            "예요",
+            "아요",
+            "어요",
+            "네요",
+            "군요",
+            "까요",
+            "했답니다",
+            "했다",
+            "됐다",
+            "한다",
+            "된다",
+            "있다",
+            "없다",
+            "같다",
+            "좋다",
+            "싶다",
+            "이다",
+            "입니다",
+            "죠",
+        },
+        key=len,
+        reverse=True,
+    )
+)
 
 
 def _cell(value) -> str:
@@ -33,6 +83,28 @@ def _cell(value) -> str:
 
 def _find_header(headers: list[str], candidates: set[str]) -> str:
     return next((header for header in headers if header.strip() in candidates), "")
+
+
+def format_daily_body(body: str) -> str:
+    """Add readable paragraphs to punctuation-free Korean daily text."""
+    if "\n" in body:
+        return body
+    sentences: list[str] = []
+    current: list[str] = []
+    for token in re.findall(r"\S+", body):
+        current.append(token)
+        if token.endswith(KOREAN_SENTENCE_ENDINGS):
+            sentences.append(" ".join(current))
+            current = []
+    if current:
+        sentences.append(" ".join(current))
+    if len(sentences) <= 2:
+        return body
+    paragraphs = [
+        "\n".join(sentences[index : index + 2])
+        for index in range(0, len(sentences), 2)
+    ]
+    return "\n\n".join(paragraphs)
 
 
 def load_brand_immediate_jobs(
@@ -135,7 +207,7 @@ def load_daily_excel_jobs(path: str | Path) -> list[ImmediateJob]:
                         row_number=row_number,
                         article=ParsedArticle(
                             title=title,
-                            body=body,
+                            body=format_daily_body(body),
                             keyword="",
                             tag="",
                             comments=[],
