@@ -447,8 +447,10 @@ class ImmediateRunner:
         progress: Callable[[int, int], None],
         source_sheet_url: str = "",
         status: Callable[[dict[str, int]], None] | None = None,
+        pause_event: threading.Event | None = None,
     ) -> tuple[RunResult, Path]:
         started_at = datetime.now()
+        pause_event = pause_event or threading.Event()
         self.browser.ensure_v2r_login("", "")
         self.browser.prepare_immediate_jobs(jobs)
         removed_failures = self.history.remove_urls(
@@ -504,8 +506,36 @@ class ImmediateRunner:
         emit_status()
         total = len(jobs)
         last_cafe_started: dict[int, float] = {}
+
+        def wait_if_paused() -> float:
+            if not pause_event.is_set():
+                return 0.0
+            paused_at = time.monotonic()
+            self.logger.info("일시정지됨: 다시 시작을 기다립니다")
+            while pause_event.is_set():
+                if stop_event.wait(0.2):
+                    return -1.0
+            paused_seconds = time.monotonic() - paused_at
+            shift = timedelta(seconds=paused_seconds)
+            for pending_job in jobs:
+                if (
+                    pending_job.status == JobStatus.PENDING
+                    and pending_job.scheduled_at is not None
+                ):
+                    pending_job.scheduled_at += shift
+            for cafe_id in list(last_cafe_started):
+                last_cafe_started[cafe_id] += paused_seconds
+            self.logger.info(
+                "다시 시작: 남은 예약시간을 %.0f초 뒤로 이동했습니다",
+                paused_seconds,
+            )
+            return paused_seconds
+
         for index, job in enumerate(jobs, start=1):
             progress(index - 1, total)
+            if wait_if_paused() < 0:
+                job.status = JobStatus.SKIPPED
+                job.message = "사용자가 중지함"
             if stop_event.is_set():
                 job.status = JobStatus.SKIPPED
                 job.message = "사용자가 중지함"
@@ -569,17 +599,29 @@ class ImmediateRunner:
                     remaining = 20 - (
                         time.monotonic() - last_cafe_started.get(job.cafe_id, 0)
                     )
-                    if remaining > 0 and stop_event.wait(remaining):
-                        job.status = JobStatus.SKIPPED
-                        job.message = "사용자가 중지함"
-                        self.logger.warning(
-                            "[%s/%s] 행 %s 건너뜀: %s",
-                            index,
-                            total,
-                            job.row_number,
-                            job.message,
-                        )
-                        break
+                    if remaining > 0:
+                        deadline = time.monotonic() + remaining
+                        while time.monotonic() < deadline:
+                            paused_seconds = wait_if_paused()
+                            if paused_seconds < 0:
+                                job.status = JobStatus.SKIPPED
+                                job.message = "사용자가 중지함"
+                                break
+                            deadline += paused_seconds
+                            wait_for = min(0.25, deadline - time.monotonic())
+                            if wait_for > 0 and stop_event.wait(wait_for):
+                                job.status = JobStatus.SKIPPED
+                                job.message = "사용자가 중지함"
+                                break
+                        if job.status == JobStatus.SKIPPED:
+                            self.logger.warning(
+                                "[%s/%s] 행 %s 건너뜀: %s",
+                                index,
+                                total,
+                                job.row_number,
+                                job.message,
+                            )
+                            break
                     last_cafe_started[job.cafe_id] = time.monotonic()
                 try:
                     self.logger.info(

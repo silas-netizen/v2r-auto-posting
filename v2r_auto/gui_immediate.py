@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -16,6 +17,7 @@ class ImmediateAutomationApp(AutomationApp):
     data_folder_name = "V2RImmediatePosting"
 
     def __init__(self):
+        self.pause_event = threading.Event()
         super().__init__()
         self.instance_lock = InstanceLock(self.data_dir / "worker.lock")
         try:
@@ -96,6 +98,13 @@ class ImmediateAutomationApp(AutomationApp):
             state=tk.DISABLED,
         )
         self.stop_button.pack(side=tk.LEFT, padx=6)
+        self.pause_button = ttk.Button(
+            actions,
+            text="일시정지",
+            command=self._toggle_pause,
+            state=tk.DISABLED,
+        )
+        self.pause_button.pack(side=tk.LEFT)
         ttk.Button(
             actions,
             text="저장 폴더",
@@ -176,8 +185,10 @@ class ImmediateAutomationApp(AutomationApp):
         ):
             return
         self.stop_event.clear()
+        self.pause_event.clear()
         self.start_button.configure(state=tk.DISABLED)
         self.stop_button.configure(state=tk.NORMAL)
+        self.pause_button.configure(state=tk.NORMAL, text="일시정지")
         self.progress.configure(value=0)
         self.progress_text.set("입력 데이터 준비 중")
 
@@ -197,6 +208,7 @@ class ImmediateAutomationApp(AutomationApp):
                     progress=self._set_progress,
                     source_sheet_url=sheet_url,
                     status=self._set_status,
+                    pause_event=self.pause_event,
                 )
                 self.ui_queue.put(
                     (
@@ -218,6 +230,24 @@ class ImmediateAutomationApp(AutomationApp):
                 self.ui_queue.put(("finished", None))
 
         self.worker = self.executor.submit(work)
+
+    def _toggle_pause(self) -> None:
+        if not self.worker or self.worker.done():
+            return
+        if self.pause_event.is_set():
+            self.pause_event.clear()
+            self.pause_button.configure(text="일시정지")
+            self.logger.info("다시 시작을 요청했습니다")
+        else:
+            self.pause_event.set()
+            self.pause_button.configure(text="다시 시작")
+            self.progress_text.set("현재 작업 후 일시정지")
+            self.logger.info("일시정지를 요청했습니다")
+
+    def _worker_finished(self) -> None:
+        self.pause_event.clear()
+        self.pause_button.configure(state=tk.DISABLED, text="일시정지")
+        super()._worker_finished()
 
     def _set_status(self, values: dict[str, int]) -> None:
         self.ui_queue.put(("immediate_status", values))

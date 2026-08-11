@@ -320,7 +320,7 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                         job.message = "조건에 맞는 작성계정이 없습니다"
                         continue
                 self._resolve_head(job)
-                self.logger.info(
+                self.logger.debug(
                     "행 %s API 목적지: %s(%s) / %s(%s) / %s",
                     job.row_number,
                     job.canonical_cafe_name,
@@ -329,6 +329,18 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                     job.menu_id,
                     job.account,
                 )
+            prepared = [
+                job
+                for job in cafe_jobs
+                if job.status == JobStatus.PENDING and job.cafe_id == cafe.cafe_id
+            ]
+            self.logger.info(
+                "%s 목적지 준비 완료: 원고 %s건 / 게시판 %s개 / 작성계정 %s개",
+                cafe.name,
+                len(prepared),
+                len({job.menu_id for job in prepared}),
+                len({job.account for job in prepared}),
+            )
 
     def consume_failed_source_urls(self) -> set[str]:
         failed = set(self.failed_source_urls)

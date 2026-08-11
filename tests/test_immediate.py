@@ -1,5 +1,6 @@
 import logging
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -323,3 +324,61 @@ def test_duplicate_skip_reason_is_written_to_live_log(
 
     assert result.jobs[0].status == JobStatus.SKIPPED
     assert "행 2 건너뜀: 이전에 발행한 동일 글" in caplog.text
+
+
+def test_pause_waits_then_resumes_before_next_publish(tmp_path: Path) -> None:
+    path = tmp_path / "daily.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["카페명", "게시판명", "각색제목", "각색본문"])
+    sheet.append(["고요한아침", "가입인사", "제목", "본문"])
+    workbook.save(path)
+    job = load_daily_excel_jobs(path)[0]
+
+    class PauseBrowser:
+        published = 0
+
+        def ensure_v2r_login(self, _email, _password):
+            return None
+
+        def prepare_immediate_jobs(self, jobs):
+            jobs[0].cafe_id = 14567700
+            jobs[0].menu_id = 34
+            jobs[0].account = "writer"
+            jobs[0].canonical_cafe_name = "고요한 아침"
+            jobs[0].canonical_board_name = "가입인사"
+
+        def consume_failed_immediate_urls(self):
+            return set()
+
+        def publish_immediate(self, _job, _dry_run):
+            self.published += 1
+            return ""
+
+    browser = PauseBrowser()
+    pause_event = threading.Event()
+    pause_event.set()
+    runner = ImmediateRunner(
+        browser=browser,
+        history_path=tmp_path / "history.json",
+        report_dir=tmp_path,
+        logger=logging.getLogger("pause-test"),
+    )
+    thread = threading.Thread(
+        target=lambda: runner.run(
+            [job],
+            dry_run=True,
+            stop_event=threading.Event(),
+            pause_event=pause_event,
+            progress=lambda _current, _total: None,
+        )
+    )
+    thread.start()
+    time.sleep(0.1)
+
+    assert browser.published == 0
+    pause_event.clear()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert browser.published == 1
