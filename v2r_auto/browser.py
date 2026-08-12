@@ -204,6 +204,9 @@ class V2RBrowser:
         column: str,
         row_number: int,
         value: str,
+        *,
+        max_attempts: int = 3,
+        verify_checks: int = 10,
     ) -> None:
         """Write one value into an editable Google Sheet cell."""
         self.start()
@@ -222,7 +225,7 @@ class V2RBrowser:
         cell_label = f"{column}{row_number}"
         last_error: Exception | None = None
         try:
-            for attempt in range(1, 4):
+            for attempt in range(1, max_attempts + 1):
                 try:
                     self._navigate(sheet_url_with_range, self.google_handle)
                     self.google_handle = self.driver.current_window_handle
@@ -264,20 +267,23 @@ class V2RBrowser:
                         column,
                         row_number,
                         value,
+                        checks=verify_checks,
                     )
                     self.logger.info("시트 %s에 값을 입력했습니다", cell_label)
                     return
                 except Exception as exc:
                     last_error = exc
                     self.logger.warning(
-                        "시트 %s 저장 재시도 (%s/3): %s",
+                        "시트 %s 저장 재시도 (%s/%s): %s",
                         cell_label,
                         attempt,
+                        max_attempts,
                         exc,
                     )
                     time.sleep(attempt)
             raise AutomationError(
-                f"시트 {cell_label} 저장에 3회 실패했습니다: {last_error}"
+                f"시트 {cell_label} 저장에 {max_attempts}회 실패했습니다: "
+                f"{last_error}"
             )
         finally:
             self._switch_to_handle(self.v2r_handle)
@@ -288,13 +294,15 @@ class V2RBrowser:
         column: str,
         row_number: int,
         expected: str,
+        *,
+        checks: int = 10,
     ) -> None:
         column_index = 0
         for letter in column:
             column_index = column_index * 26 + (ord(letter) - ord("A") + 1)
         column_index -= 1
         export_url = self._sheet_export_url(sheet_url)
-        for _ in range(10):
+        for _ in range(checks):
             separator = "&" if "?" in export_url else "?"
             with urlopen(
                 f"{export_url}{separator}cache={time.time_ns()}", timeout=20

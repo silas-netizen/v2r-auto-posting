@@ -507,6 +507,22 @@ class ImmediateRunner:
                     }
                 )
 
+        pending_test_results: dict[int, ImmediateJob] = {}
+
+        def queue_account_test_result(job: ImmediateJob) -> None:
+            if job.source_kind == "account_test" and not dry_run:
+                pending_test_results[job.row_number] = job
+
+        def flush_account_test_results() -> None:
+            if not source_sheet_url or not pending_test_results:
+                return
+            self.logger.info(
+                "한줄테스트 %s건 완료: 이제 결과를 시트에 기록합니다",
+                len(pending_test_results),
+            )
+            for job in pending_test_results.values():
+                write_account_test_result(job)
+
         def write_account_test_result(job: ImmediateJob) -> None:
             if (
                 dry_run
@@ -535,6 +551,8 @@ class ImmediateRunner:
                         column,
                         job.row_number,
                         value,
+                        max_attempts=1,
+                        verify_checks=3,
                     )
                 except Exception as exc:
                     errors.append(f"{column}열: {exc}")
@@ -598,7 +616,7 @@ class ImmediateRunner:
                 )
                 progress(index, total)
                 emit_status()
-                write_account_test_result(job)
+                queue_account_test_result(job)
                 continue
             errors = job.validate()
             if errors:
@@ -717,7 +735,7 @@ class ImmediateRunner:
                     )
                     if not dry_run:
                         self.history.record(job)
-                        write_account_test_result(job)
+                        queue_account_test_result(job)
                         if source_sheet_url and job.source_kind == "brand":
                             sheet_errors: list[str] = []
                             try:
@@ -796,12 +814,13 @@ class ImmediateRunner:
                                 "행 %s 실패 사유 시트 저장 실패",
                                 job.row_number,
                             )
-                    write_account_test_result(job)
+                    queue_account_test_result(job)
                     self.logger.exception("행 %s 즉시 발행 실패", job.row_number)
                     break
             progress(index, total)
             emit_status()
 
+        flush_account_test_results()
         result = RunResult(
             started_at=started_at,
             finished_at=datetime.now(),
