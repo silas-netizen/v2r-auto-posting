@@ -10,6 +10,7 @@ from .content import CommentNode, ParsedArticle
 class JobStatus(str, Enum):
     PENDING = "대기"
     VALIDATED = "검증완료"
+    RESERVED = "예약대기"
     SKIPPED = "건너뜀"
     SUCCESS = "완료"
     FAILED = "실패"
@@ -103,6 +104,71 @@ class AffiliateJob:
         return errors
 
 
+@dataclass(slots=True)
+class ImmediateJob:
+    """One self-owned-cafe article published without a revision chain."""
+
+    row_number: int
+    article: ParsedArticle
+    cafe: str
+    board: str
+    account: str = ""
+    article_type: str = ""
+    prefix: str = ""
+    account_type: str = ""
+    image_disabled: bool = False
+    brand: str = ""
+    completion_url: str = ""
+    source_kind: str = "brand"
+    source_name: str = ""
+    use_comment_ai: bool = True
+    cafe_id: int = 0
+    menu_id: int = 0
+    canonical_cafe_name: str = ""
+    canonical_board_name: str = ""
+    head_id: int | None = None
+    canonical_head_name: str | None = None
+    scheduled_at: datetime | None = None
+    status: JobStatus = JobStatus.PENDING
+    message: str = ""
+    post_url: str = ""
+    prepared_image_count: int = 0
+
+    @property
+    def keyword(self) -> str:
+        return self.article.keyword
+
+    @property
+    def title(self) -> str:
+        return self.article.title
+
+    @property
+    def body(self) -> str:
+        return self.article.body
+
+    @property
+    def tags(self) -> list[str]:
+        return [self.article.tag] if self.article.tag else []
+
+    @property
+    def comments(self) -> list[CommentNode]:
+        return self.article.comments
+
+    def validate(self) -> list[str]:
+        errors: list[str] = []
+        if self.source_kind != "account_test" and not self.cafe.strip():
+            errors.append("카페명이 없습니다")
+        if not self.board.strip():
+            errors.append("게시판명이 없습니다")
+        if not self.title.strip():
+            errors.append("제목이 없습니다")
+        if not self.body.strip():
+            errors.append("본문이 없습니다")
+        if self.comments and self.article_type not in {"질문형", "후기형"}:
+            errors.append("댓글이 있는 원고는 원고유형이 질문형 또는 후기형이어야 합니다")
+        return errors
+
+
 @dataclass(frozen=True, slots=True)
 class DailyPost:
     row_number: int
@@ -116,11 +182,15 @@ class RunResult:
     started_at: datetime
     finished_at: datetime
     dry_run: bool
-    jobs: list[PostJob | AffiliateJob]
+    jobs: list[PostJob | AffiliateJob | ImmediateJob]
 
     @property
     def succeeded(self) -> int:
         return sum(job.status == JobStatus.SUCCESS for job in self.jobs)
+
+    @property
+    def reserved(self) -> int:
+        return sum(job.status == JobStatus.RESERVED for job in self.jobs)
 
     @property
     def failed(self) -> int:

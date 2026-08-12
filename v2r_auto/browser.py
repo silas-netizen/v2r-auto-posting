@@ -22,6 +22,7 @@ from selenium.common.exceptions import (
     UnexpectedAlertPresentException,
 )
 from selenium.webdriver import ChromeOptions
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
@@ -60,6 +61,7 @@ class V2RBrowser:
         self.google_handle: str | None = None
         self._api_capture_active = False
         self._affiliate_publisher = None
+        self._immediate_publisher = None
 
     def start(self) -> None:
         if self.driver:
@@ -97,6 +99,7 @@ class V2RBrowser:
             self.google_handle = None
             self._api_capture_active = False
             self._affiliate_publisher = None
+            self._immediate_publisher = None
 
     @property
     def wait(self) -> WebDriverWait:
@@ -201,6 +204,9 @@ class V2RBrowser:
         column: str,
         row_number: int,
         value: str,
+        *,
+        max_attempts: int = 3,
+        verify_checks: int = 10,
     ) -> None:
         """Write one value into an editable Google Sheet cell."""
         self.start()
@@ -216,19 +222,71 @@ class V2RBrowser:
             f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
             f"?{parsed.query}#gid={gid}&range={column}{row_number}"
         )
-        self._navigate(sheet_url_with_range, self.google_handle)
-        self.google_handle = self.driver.current_window_handle
         cell_label = f"{column}{row_number}"
-        self.wait.until(
-            EC.presence_of_element_located((By.ID, "waffle-rich-text-editor"))
-        )
-        editor = self.driver.find_element(By.ID, "waffle-rich-text-editor")
-        editor.send_keys(Keys.CONTROL, "a")
-        editor.send_keys(value)
-        editor.send_keys(Keys.ENTER)
-        self._verify_sheet_cell(sheet_url, column, row_number, value)
-        self.logger.info("시트 %s에 값을 입력했습니다", cell_label)
-        self._switch_to_handle(self.v2r_handle)
+        last_error: Exception | None = None
+        try:
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    self._navigate(sheet_url_with_range, self.google_handle)
+                    self.google_handle = self.driver.current_window_handle
+                    self.wait.until(
+                        lambda driver: driver.execute_script(
+                            "return document.readyState"
+                        )
+                        == "complete"
+                    )
+                    self.wait.until(
+                        EC.presence_of_element_located(
+                            (By.ID, "waffle-rich-text-editor")
+                        )
+                    )
+                    self.driver.execute_script("window.focus();")
+                    editors = [
+                        element
+                        for element in self.driver.find_elements(
+                            By.ID,
+                            "waffle-rich-text-editor",
+                        )
+                        if element.is_displayed() and element.is_enabled()
+                    ]
+                    if editors:
+                        editor = editors[0]
+                        editor.click()
+                        editor.send_keys(Keys.CONTROL, "a")
+                        editor.send_keys(value)
+                        editor.send_keys(Keys.ENTER)
+                    else:
+                        # Sheets keeps a hidden rich-text editor while a grid
+                        # cell is selected. Send typing to its global active-cell
+                        # keyboard handler instead of that hidden element.
+                        ActionChains(self.driver).send_keys(value).send_keys(
+                            Keys.ENTER
+                        ).perform()
+                    self._verify_sheet_cell(
+                        sheet_url,
+                        column,
+                        row_number,
+                        value,
+                        checks=verify_checks,
+                    )
+                    self.logger.info("시트 %s에 값을 입력했습니다", cell_label)
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    self.logger.warning(
+                        "시트 %s 저장 재시도 (%s/%s): %s",
+                        cell_label,
+                        attempt,
+                        max_attempts,
+                        exc,
+                    )
+                    time.sleep(attempt)
+            raise AutomationError(
+                f"시트 {cell_label} 저장에 {max_attempts}회 실패했습니다: "
+                f"{last_error}"
+            )
+        finally:
+            self._switch_to_handle(self.v2r_handle)
 
     def _verify_sheet_cell(
         self,
@@ -236,13 +294,15 @@ class V2RBrowser:
         column: str,
         row_number: int,
         expected: str,
+        *,
+        checks: int = 10,
     ) -> None:
         column_index = 0
         for letter in column:
             column_index = column_index * 26 + (ord(letter) - ord("A") + 1)
         column_index -= 1
         export_url = self._sheet_export_url(sheet_url)
-        for _ in range(10):
+        for _ in range(checks):
             separator = "&" if "?" in export_url else "?"
             with urlopen(
                 f"{export_url}{separator}cache={time.time_ns()}", timeout=20
@@ -1117,6 +1177,10 @@ class V2RBrowser:
                 {job.cafe for job in jobs if job.status == JobStatus.PENDING}
             )
 
+    def load_v2r_cafe_catalog(self):
+        """Fetch the current cafe/menu catalog without creating any article."""
+        return self._get_affiliate_publisher().load_cafe_catalog()
+
     def assign_affiliate_accounts(
         self, jobs: list[AffiliateJob]
     ) -> list[AffiliateJob]:
@@ -1127,3 +1191,25 @@ class V2RBrowser:
 
     def replace_failed_affiliate_account(self, job: AffiliateJob) -> str:
         return self._get_affiliate_publisher().replace_failed_account(job)
+
+    def _get_immediate_publisher(self):
+        from .immediate_api import ImmediateApiPublisher
+
+        if self._immediate_publisher is None:
+            self._immediate_publisher = ImmediateApiPublisher(self, self.logger)
+        return self._immediate_publisher
+
+    def prepare_immediate_jobs(self, jobs) -> None:
+        self._get_immediate_publisher().prepare_jobs(jobs)
+
+    def publish_immediate(self, job, dry_run: bool) -> str:
+        return self._get_immediate_publisher().publish(job, dry_run)
+
+    def replace_failed_immediate_account(self, job) -> str:
+        return self._get_immediate_publisher().replace_failed_account(job)
+
+    def classify_immediate_failure(self, error: Exception) -> tuple[str, bool]:
+        return self._get_immediate_publisher().classify_failure(error)
+
+    def consume_failed_immediate_urls(self) -> set[str]:
+        return self._get_immediate_publisher().consume_failed_source_urls()

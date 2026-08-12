@@ -30,6 +30,7 @@ jobs:
         run: |
           python -m PyInstaller --noconfirm --clean v2r-auto-posting.spec
           python -m PyInstaller --noconfirm --clean v2r-auto-affiliate.spec
+          python -m PyInstaller --noconfirm --clean v2r-immediate-posting.spec
 
       - name: Upload Windows programs
         uses: actions/upload-artifact@v4
@@ -38,4 +39,5 @@ jobs:
           path: |
             dist/V2R-Auto-Posting.exe
             dist/V2R-Affiliate-Revision.exe
+            dist/V2R-Immediate-Posting.exe
           if-no-files-found: error

@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Google Sheets to V2R posting automation for Windows"
 requires-python = ">=3.11"
 dependencies = [
+  "openpyxl>=3.1.5",
   "selenium>=4.34",
 ]
 

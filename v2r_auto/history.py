@@ -30,11 +30,18 @@ class HistoryStore:
 
     @staticmethod
     def key(job: PostJob) -> str:
-        payload = "\n".join((job.cafe, job.board, job.title, job.body))
+        parts = [job.cafe, job.board, job.title, job.body]
+        if getattr(job, "source_kind", "") == "account_test":
+            parts.append(job.account)
+        payload = "\n".join(parts)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def contains(self, job: PostJob) -> bool:
         return self.key(job) in self._items
+
+    def get(self, job: PostJob) -> dict[str, str] | None:
+        record = self._items.get(self.key(job))
+        return dict(record) if record else None
 
     def record(self, job: PostJob) -> None:
         self._items[self.key(job)] = {
@@ -43,6 +50,23 @@ class HistoryStore:
             "board": job.board,
             "url": job.post_url,
         }
+        self._save()
+
+    def remove_urls(self, urls: set[str]) -> int:
+        if not urls:
+            return 0
+        keys = [
+            key
+            for key, record in self._items.items()
+            if record.get("url") in urls
+        ]
+        for key in keys:
+            self._items.pop(key, None)
+        if keys:
+            self._save()
+        return len(keys)
+
+    def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(
