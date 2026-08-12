@@ -93,7 +93,7 @@ class AffiliateJob:
 
     def validate(self) -> list[str]:
         errors: list[str] = []
-        if self.source_kind != "account_test" and not self.cafe.strip():
+        if not self.cafe.strip():
             errors.append("카페명이 없습니다")
         elif self.cafe.strip() not in {"씨씨앙", "양평맘"}:
             errors.append("카페명은 씨씨앙 또는 양평맘만 사용할 수 있습니다")
@@ -156,7 +156,7 @@ class ImmediateJob:
 
     def validate(self) -> list[str]:
         errors: list[str] = []
-        if not self.cafe.strip():
+        if self.source_kind != "account_test" and not self.cafe.strip():
             errors.append("카페명이 없습니다")
         if not self.board.strip():
             errors.append("게시판명이 없습니다")
