@@ -30,7 +30,10 @@ class HistoryStore:
 
     @staticmethod
     def key(job: PostJob) -> str:
-        payload = "\n".join((job.cafe, job.board, job.title, job.body))
+        parts = [job.cafe, job.board, job.title, job.body]
+        if getattr(job, "source_kind", "") == "account_test":
+            parts.append(job.account)
+        payload = "\n".join(parts)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def contains(self, job: PostJob) -> bool:

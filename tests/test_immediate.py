@@ -16,6 +16,7 @@ from v2r_auto.cafe_catalog import CafeMenu, match_catalog_name, normalized_name
 from v2r_auto.immediate_inputs import (
     format_daily_body,
     is_informational_sheet,
+    load_account_test_jobs,
     load_brand_immediate_jobs,
     load_daily_excel_jobs,
 )
@@ -116,6 +117,25 @@ def test_load_daily_excel_a_to_d(tmp_path: Path) -> None:
     assert jobs[0].body == "반갑습니다"
     assert jobs[0].comments == []
     assert jobs[0].use_comment_ai is True
+
+
+def test_loads_only_checked_one_line_account_tests(tmp_path: Path) -> None:
+    path = tmp_path / "account-tests.csv"
+    path.write_text(
+        "번호,ID,작업 구분,연동,가아사 조건,실/비실,테스트 선택,테스트 결과,테스트 링크,테스트 일시\n"
+        "12,checked-id,,,,,TRUE,,,\n"
+        "13,unchecked-id,,,,,FALSE,,,\n",
+        encoding="utf-8-sig",
+    )
+
+    jobs = load_account_test_jobs(path)
+
+    assert len(jobs) == 1
+    assert jobs[0].account == "checked-id"
+    assert jobs[0].title == "김천kb보험 그라래12"
+    assert jobs[0].body == "김천kb보험 그라래12\n김천kb보험 그라래12"
+    assert jobs[0].source_kind == "account_test"
+    assert jobs[0].use_comment_ai is False
 
 
 def test_formats_punctuation_free_daily_body_into_two_sentence_paragraphs() -> None:
@@ -242,6 +262,75 @@ class FakeImmediatePublisher(ImmediateApiPublisher):
                 ]
             }
         raise AssertionError((method, path, query))
+
+
+def test_account_tests_resolve_registration_membership_and_alternate_cafes(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "account-tests.csv"
+    path.write_text(
+        "번호,ID,작업 구분,연동,가아사 조건,실/비실,테스트 선택,테스트 결과,테스트 링크,테스트 일시\n"
+        "1,both-id,,,,,TRUE,,,\n"
+        "2,both-id,,,,,TRUE,,,\n"
+        "3,nojoin-id,,,,,TRUE,,,\n"
+        "4,missing-id,,,,,TRUE,,,\n"
+        "5,login-fail-id,,,,,TRUE,,,\n",
+        encoding="utf-8-sig",
+    )
+    jobs = load_account_test_jobs(path)
+
+    class AccountTestPublisher(ImmediateApiPublisher):
+        def _capture_authorization(self):
+            return None
+
+        def _request(self, method, request_path, payload=None, query=None):
+            if request_path == "/naver_cafes/naver_join_cafes":
+                return {
+                    "naver_join_cafes": [
+                        {
+                            "cafe_id": 31670254,
+                            "pc_cafe_name": "태극마케팅센터",
+                        },
+                        {
+                            "cafe_id": 31670256,
+                            "pc_cafe_name": "소나무마케팅센터",
+                        },
+                    ]
+                }
+            if request_path == "/navers/accounts":
+                return {
+                    "accounts": [
+                        {"naver_login_id": "both-id"},
+                        {"naver_login_id": "nojoin-id"},
+                        {
+                            "naver_login_id": "login-fail-id",
+                            "is_login_fail": True,
+                        },
+                    ]
+                }
+            if request_path == "/naver_cafes/naver_join_cafe":
+                return {"naver_join_cafe": [{"login_id": "both-id"}]}
+            if request_path == "/naver_cafes/menus":
+                return {
+                    "cafe_menus": [
+                        {
+                            "menuId": 1,
+                            "menuName": "자유게시판",
+                            "writable": True,
+                        }
+                    ]
+                }
+            raise AssertionError((method, request_path, query))
+
+    publisher = AccountTestPublisher(None, logging.getLogger("test"))
+    publisher.prepare_jobs(jobs)
+
+    assert jobs[0].status == JobStatus.PENDING
+    assert jobs[1].status == JobStatus.PENDING
+    assert {jobs[0].cafe_id, jobs[1].cafe_id} == {31670254, 31670256}
+    assert jobs[2].message == "테스트 카페 미가입"
+    assert jobs[3].message == "V2R 미등록 계정"
+    assert jobs[4].message == "네이버 로그인 실패"
 
 
 def test_prepare_jobs_matches_live_ids_and_rotates_all_writers(tmp_path: Path) -> None:

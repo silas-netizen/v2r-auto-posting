@@ -28,6 +28,16 @@ BOARD_HEADERS = {"게시판명", "게시판", "메뉴", "메뉴명"}
 DAILY_HEADERS = ("카페명", "게시판명", "각색제목", "각색본문")
 INFORMATIONAL_SHEET_ID = "1vSON0Rej9anDQXcAOXyBrCr50B4MMqZ79FahF4cDPJw"
 INFORMATIONAL_SHEET_GID = "1193993260"
+ACCOUNT_TEST_SHEET_ID = "1UgcAvHFCpC5N9joC9T5WCATK834F3XAtRrepFv6XbEs"
+ACCOUNT_TEST_SHEET_GID = "218285244"
+ACCOUNT_TEST_HEADERS = {
+    "number": "번호",
+    "account": "ID",
+    "selected": "테스트 선택",
+    "result": "테스트 결과",
+    "link": "테스트 링크",
+    "tested_at": "테스트 일시",
+}
 KOREAN_SENTENCE_ENDINGS = tuple(
     sorted(
         {
@@ -92,6 +102,13 @@ def is_informational_sheet(sheet_url: str) -> bool:
     return (
         f"/d/{INFORMATIONAL_SHEET_ID}/" in sheet_url
         and f"gid={INFORMATIONAL_SHEET_GID}" in sheet_url
+    )
+
+
+def is_account_test_sheet(sheet_url: str) -> bool:
+    return (
+        f"/d/{ACCOUNT_TEST_SHEET_ID}/" in sheet_url
+        and f"gid={ACCOUNT_TEST_SHEET_GID}" in sheet_url
     )
 
 
@@ -262,4 +279,52 @@ def load_daily_excel_jobs(path: str | Path) -> list[ImmediateJob]:
         workbook.close()
     if not jobs:
         raise SheetSchemaError("Excel에 즉시 발행할 일상 글이 없습니다")
+    return jobs
+
+
+def load_account_test_jobs(path: str | Path) -> list[ImmediateJob]:
+    csv_path = Path(path)
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        headers = [header for header in (reader.fieldnames or []) if header]
+        missing = [
+            header
+            for header in ACCOUNT_TEST_HEADERS.values()
+            if header not in headers
+        ]
+        if missing:
+            raise SheetSchemaError(
+                "한줄테스트 시트 열을 찾지 못했습니다: " + ", ".join(missing)
+            )
+        jobs: list[ImmediateJob] = []
+        for row_number, row in enumerate(reader, start=2):
+            selected = _cell(row.get(ACCOUNT_TEST_HEADERS["selected"])).casefold()
+            if selected not in {"true", "y", "1", "yes"}:
+                continue
+            number = _cell(row.get(ACCOUNT_TEST_HEADERS["number"]))
+            account = _cell(row.get(ACCOUNT_TEST_HEADERS["account"]))
+            if not number or not account:
+                continue
+            text = f"김천kb보험 그라래{number}"
+            jobs.append(
+                ImmediateJob(
+                    row_number=row_number,
+                    article=ParsedArticle(
+                        title=text,
+                        body=f"{text}\n{text}",
+                        keyword="",
+                        tag="",
+                        comments=[],
+                    ),
+                    cafe="",
+                    board="자유게시판",
+                    account=account,
+                    image_disabled=True,
+                    source_kind="account_test",
+                    source_name=csv_path.name,
+                    use_comment_ai=False,
+                )
+            )
+    if not jobs:
+        raise SheetSchemaError("체크된 한줄테스트 계정이 없습니다")
     return jobs

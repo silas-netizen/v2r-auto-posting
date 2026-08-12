@@ -507,6 +507,44 @@ class ImmediateRunner:
                     }
                 )
 
+        def write_account_test_result(job: ImmediateJob) -> None:
+            if (
+                dry_run
+                or not source_sheet_url
+                or job.source_kind != "account_test"
+            ):
+                return
+            result_text = (
+                f"성공 ({job.canonical_cafe_name})"
+                if job.status == JobStatus.SUCCESS
+                else job.message
+            )
+            values = {
+                "G": "FALSE",
+                "H": result_text,
+                "I": job.post_url,
+                "J": datetime.now().astimezone().strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                ),
+            }
+            errors: list[str] = []
+            for column, value in values.items():
+                try:
+                    self.browser.update_sheet_cell(
+                        source_sheet_url,
+                        column,
+                        job.row_number,
+                        value,
+                    )
+                except Exception as exc:
+                    errors.append(f"{column}열: {exc}")
+            if errors:
+                self.logger.error(
+                    "행 %s 한줄테스트 결과 시트 저장 실패: %s",
+                    job.row_number,
+                    " / ".join(errors),
+                )
+
         emit_status()
         total = len(jobs)
         last_cafe_started: dict[int, float] = {}
@@ -560,6 +598,7 @@ class ImmediateRunner:
                 )
                 progress(index, total)
                 emit_status()
+                write_account_test_result(job)
                 continue
             errors = job.validate()
             if errors:
@@ -678,6 +717,7 @@ class ImmediateRunner:
                     )
                     if not dry_run:
                         self.history.record(job)
+                        write_account_test_result(job)
                         if source_sheet_url and job.source_kind == "brand":
                             sheet_errors: list[str] = []
                             try:
@@ -756,6 +796,7 @@ class ImmediateRunner:
                                 "행 %s 실패 사유 시트 저장 실패",
                                 job.row_number,
                             )
+                    write_account_test_result(job)
                     self.logger.exception("행 %s 즉시 발행 실패", job.row_number)
                     break
             progress(index, total)
