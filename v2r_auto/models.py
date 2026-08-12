@@ -121,6 +121,7 @@ class ImmediateJob:
     completion_url: str = ""
     source_kind: str = "brand"
     source_name: str = ""
+    use_comment_ai: bool = True
     cafe_id: int = 0
     menu_id: int = 0
     canonical_cafe_name: str = ""

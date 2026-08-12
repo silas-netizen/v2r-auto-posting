@@ -136,6 +136,7 @@ def load_brand_immediate_jobs(
     *,
     brand: str,
     format_body: bool = False,
+    use_comment_ai: bool = False,
 ) -> list[ImmediateJob]:
     csv_path = Path(path)
     with csv_path.open("r", encoding="utf-8-sig", newline="") as stream:
@@ -199,6 +200,7 @@ def load_brand_immediate_jobs(
                 ),
                 source_kind="brand",
                 source_name=csv_path.name,
+                use_comment_ai=use_comment_ai,
             )
             if format_error:
                 job.status = JobStatus.FAILED

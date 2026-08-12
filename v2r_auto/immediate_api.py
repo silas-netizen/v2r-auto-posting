@@ -444,7 +444,7 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                 else job.scheduled_at.isoformat().replace("+00:00", "Z")
             ),
             "target_view_count": 0,
-            "use_comment_ai": True,
+            "use_comment_ai": job.use_comment_ai,
             "parent_id": None,
         }
 
