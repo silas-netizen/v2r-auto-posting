@@ -535,14 +535,16 @@ class ImmediateRunner:
                 if job.status == JobStatus.SUCCESS
                 else job.message
             )
-            values = {
-                "G": "FALSE",
-                "H": result_text,
-                "I": job.post_url,
-                "J": datetime.now().astimezone().strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                ),
-            }
+            values = {"H": result_text}
+            if job.status == JobStatus.SUCCESS:
+                values.update(
+                    {
+                        "I": job.post_url,
+                        "J": datetime.now().astimezone().strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        ),
+                    }
+                )
             errors: list[str] = []
             for column, value in values.items():
                 try:
@@ -633,15 +635,29 @@ class ImmediateRunner:
                 emit_status()
                 continue
             if not dry_run and self.history.contains(job):
-                job.status = JobStatus.SKIPPED
-                job.message = "이전에 발행한 동일 글"
-                self.logger.info(
-                    "[%s/%s] 행 %s 건너뜀: %s",
-                    index,
-                    total,
-                    job.row_number,
-                    job.message,
-                )
+                if job.source_kind == "account_test":
+                    record = self.history.get(job) or {}
+                    job.status = JobStatus.SUCCESS
+                    job.message = "이전 테스트 성공 결과 복구"
+                    job.post_url = record.get("url", "")
+                    self.logger.info(
+                        "[%s/%s] 행 %s 재발행 없이 이전 성공 결과 복구: %s",
+                        index,
+                        total,
+                        job.row_number,
+                        job.account,
+                    )
+                    queue_account_test_result(job)
+                else:
+                    job.status = JobStatus.SKIPPED
+                    job.message = "이전에 발행한 동일 글"
+                    self.logger.info(
+                        "[%s/%s] 행 %s 건너뜀: %s",
+                        index,
+                        total,
+                        job.row_number,
+                        job.message,
+                    )
                 progress(index, total)
                 emit_status()
                 continue

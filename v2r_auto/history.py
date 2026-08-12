@@ -39,6 +39,10 @@ class HistoryStore:
     def contains(self, job: PostJob) -> bool:
         return self.key(job) in self._items
 
+    def get(self, job: PostJob) -> dict[str, str] | None:
+        record = self._items.get(self.key(job))
+        return dict(record) if record else None
+
     def record(self, job: PostJob) -> None:
         self._items[self.key(job)] = {
             "title": job.title,
