@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,19 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
             logger,
         )
         self.failed_source_urls: set[str] = set()
+        self.last_restricted_account = ""
+
+    def _restriction_result(self, account: str) -> str:
+        record = self.restrictions.account_record(account)
+        if not record:
+            return "코드 27000 활동 제한"
+        detected = datetime.fromisoformat(record["detected_at"])
+        blocked_until = datetime.fromisoformat(record["blocked_until"])
+        return (
+            "코드 27000 활동 제한 "
+            f"(발견 {detected.astimezone().strftime('%Y-%m-%d')} / "
+            f"제외 종료 {blocked_until.astimezone().strftime('%Y-%m-%d')})"
+        )
 
     @staticmethod
     def _cafe_rows(payload: Any) -> list[CafeCatalogEntry]:
@@ -270,6 +284,10 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                 or job.source_kind != "account_test"
             ):
                 continue
+            if self.restrictions.account_record(job.account):
+                job.status = JobStatus.FAILED
+                job.message = self._restriction_result(job.account)
+                continue
             global_account = self.global_accounts.get(job.account)
             if not global_account:
                 job.status = JobStatus.FAILED
@@ -461,11 +479,16 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         self.failed_source_urls.clear()
         return failed
 
-    @staticmethod
-    def classify_failure(error: Exception) -> tuple[str, bool]:
+    def classify_failure(self, error: Exception) -> tuple[str, bool]:
         text = str(error)
         if "27000" in text or "게시글 작성 및 카페" in text:
-            return "코드 27000 활동 제한", False
+            account_match = re.search(
+                r"(?:naver_login_id[=:'\" ]+|)([0-9a-zA-Z_-]+) 회원님",
+                text,
+            )
+            account = account_match.group(1) if account_match else ""
+            account = account or self.last_restricted_account
+            return self._restriction_result(account), False
         if "20004" in text or "연속으로 등록" in text:
             return "연속 글 등록 제한", False
         return AffiliateApiPublisher.classify_failure(error)
@@ -669,7 +692,16 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
             if is_test_cafe:
                 self._wait_for_written_at(source_id, job.cafe_id)
             self._verify_immediate(source_id, job)
-        except Exception:
+        except Exception as exc:
+            error_text = str(exc)
+            if "27000" in error_text or "게시글 작성 및 카페" in error_text:
+                self.last_restricted_account = job.account
+                self.restrictions.observe_code_27000(
+                    source_id=source_id
+                    or f"account-test-{job.account}-{datetime.now().date()}",
+                    account=job.account,
+                    reason=error_text[:500],
+                )
             if source_id:
                 self._delete_source(source_id)
             raise

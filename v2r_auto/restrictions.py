@@ -91,6 +91,15 @@ class AccountRestrictionStore:
     def blocked_accounts(self, now: datetime | None = None) -> set[str]:
         return self.refresh(now)
 
+    def account_record(
+        self,
+        account: str,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        self.refresh(now)
+        record = self.data["accounts"].get(account)
+        return dict(record) if record else None
+
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")

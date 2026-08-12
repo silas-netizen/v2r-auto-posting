@@ -334,6 +334,22 @@ def test_account_tests_resolve_registration_membership_and_alternate_cafes(
     assert jobs[4].message == "네이버 로그인 실패"
 
 
+def test_code_27000_result_includes_detection_and_release_dates() -> None:
+    publisher = ImmediateApiPublisher(None, logging.getLogger("test"))
+    detected_at = datetime(2026, 8, 12, 3, 0, tzinfo=timezone.utc)
+    publisher.restrictions.observe_code_27000(
+        source_id="source-27000",
+        account="restricted-id",
+        reason="error_code 27000",
+        now=detected_at,
+    )
+
+    result = publisher._restriction_result("restricted-id")
+
+    assert "발견 2026-08-12" in result
+    assert "제외 종료 2026-09-11" in result
+
+
 def test_prepare_jobs_matches_live_ids_and_rotates_all_writers(tmp_path: Path) -> None:
     path = tmp_path / "daily.xlsx"
     workbook = Workbook()
