@@ -535,14 +535,16 @@ class ImmediateRunner:
                 if job.status == JobStatus.SUCCESS
                 else job.message
             )
-            values = {
-                "G": "FALSE",
-                "H": result_text,
-                "I": job.post_url,
-                "J": datetime.now().astimezone().strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                ),
-            }
+            values = {"H": result_text}
+            if job.status == JobStatus.SUCCESS:
+                values.update(
+                    {
+                        "I": job.post_url,
+                        "J": datetime.now().astimezone().strftime(
+                            "%Y-%m-%d %H:%M:%S"
+                        ),
+                    }
+                )
             errors: list[str] = []
             for column, value in values.items():
                 try:

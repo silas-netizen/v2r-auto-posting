@@ -709,3 +709,58 @@ def test_previous_account_test_success_restores_sheet_without_republish(
     assert result.jobs[0].status == JobStatus.SUCCESS
     assert result.jobs[0].post_url == old_job.post_url
     assert ("I", 2, old_job.post_url) in browser.sheet_updates
+    assert {column for column, _row, _value in browser.sheet_updates} == {
+        "H",
+        "I",
+        "J",
+    }
+
+
+def test_failed_account_test_writes_only_result_column(tmp_path: Path) -> None:
+    path = tmp_path / "account-tests.csv"
+    path.write_text(
+        "번호,ID,작업 구분,연동,가아사 조건,실/비실,테스트 선택,테스트 결과,테스트 링크,테스트 일시\n"
+        "12,missing-id,,,,,TRUE,,,\n",
+        encoding="utf-8-sig",
+    )
+    job = load_account_test_jobs(path)[0]
+
+    class FailureResultBrowser:
+        sheet_updates = []
+
+        def ensure_v2r_login(self, _email, _password):
+            return None
+
+        def prepare_immediate_jobs(self, jobs):
+            jobs[0].status = JobStatus.FAILED
+            jobs[0].message = "V2R 미등록 계정"
+
+        def consume_failed_immediate_urls(self):
+            return set()
+
+        def update_sheet_cell(
+            self,
+            _url,
+            column,
+            row,
+            value,
+            **_kwargs,
+        ):
+            self.sheet_updates.append((column, row, value))
+
+    browser = FailureResultBrowser()
+    runner = ImmediateRunner(
+        browser=browser,
+        history_path=tmp_path / "history.json",
+        report_dir=tmp_path,
+        logger=logging.getLogger("failure-result-test"),
+    )
+    runner.run(
+        [job],
+        dry_run=False,
+        stop_event=threading.Event(),
+        progress=lambda _current, _total: None,
+        source_sheet_url="https://docs.google.com/spreadsheets/d/example/edit?gid=0",
+    )
+
+    assert browser.sheet_updates == [("H", 2, "V2R 미등록 계정")]
