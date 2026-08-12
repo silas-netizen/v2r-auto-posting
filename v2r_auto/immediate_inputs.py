@@ -30,6 +30,7 @@ KOREAN_SENTENCE_ENDINGS = tuple(
     sorted(
         {
             "더라고요",
+            "더라구요",
             "거든요",
             "했습니다",
             "였습니다",
@@ -86,20 +87,34 @@ def _find_header(headers: list[str], candidates: set[str]) -> str:
 
 
 def format_daily_body(body: str) -> str:
-    """Add readable paragraphs to punctuation-free Korean daily text."""
-    if "\n" in body:
-        return body
+    """Clean daily text and add readable Korean paragraphs."""
+    cleaned = body.replace("…", "")
+    cleaned = re.sub(r"\.{2,}", "", cleaned)
+    cleaned = re.sub(r"(?<!\d)\.(?!\d)", "", cleaned)
+    cleaned = re.sub(r"(?<!\d),(?!\d)", "", cleaned)
+    cleaned = re.sub(
+        r"[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200D]",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = "\n".join(line.strip() for line in cleaned.splitlines()).strip()
+    if "\n" in cleaned:
+        return cleaned
     sentences: list[str] = []
     current: list[str] = []
-    for token in re.findall(r"\S+", body):
+    for token in re.findall(r"\S+", cleaned):
         current.append(token)
-        if token.endswith(KOREAN_SENTENCE_ENDINGS):
+        ending_token = re.sub(r"[!?~ㅋㅎㅠㅜ]+$", "", token)
+        if ending_token.endswith(KOREAN_SENTENCE_ENDINGS):
             sentences.append(" ".join(current))
             current = []
     if current:
         sentences.append(" ".join(current))
-    if len(sentences) <= 2:
-        return body
+    if len(sentences) <= 1:
+        return cleaned
+    if len(sentences) == 2:
+        return "\n\n".join(sentences) if len(cleaned) > 100 else cleaned
     paragraphs = [
         "\n".join(sentences[index : index + 2])
         for index in range(0, len(sentences), 2)
@@ -111,6 +126,7 @@ def load_brand_immediate_jobs(
     path: str | Path,
     *,
     brand: str,
+    format_body: bool = False,
 ) -> list[ImmediateJob]:
     csv_path = Path(path)
     with csv_path.open("r", encoding="utf-8-sig", newline="") as stream:
@@ -146,6 +162,8 @@ def load_brand_immediate_jobs(
                 raise SheetSchemaError(
                     f"시트 행 {row_number} 원고 형식 오류: {exc}"
                 ) from exc
+            if format_body:
+                article.body = format_daily_body(article.body)
             job = ImmediateJob(
                 row_number=row_number,
                 article=article,

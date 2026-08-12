@@ -12,6 +12,17 @@ from .runner import ImmediateRunner
 from .state import AnotherInstanceRunningError, InstanceLock
 
 
+INFORMATIONAL_SHEET_ID = "1vSON0Rej9anDQXcAOXyBrCr50B4MMqZ79FahF4cDPJw"
+INFORMATIONAL_SHEET_GID = "1193993260"
+
+
+def is_informational_sheet(sheet_url: str) -> bool:
+    return (
+        f"/d/{INFORMATIONAL_SHEET_ID}/" in sheet_url
+        and f"gid={INFORMATIONAL_SHEET_GID}" in sheet_url
+    )
+
+
 class ImmediateAutomationApp(AutomationApp):
     app_name = "V2R 자사 카페 예약 발행"
     data_folder_name = "V2RImmediatePosting"
@@ -152,10 +163,18 @@ class ImmediateAutomationApp(AutomationApp):
         if not sheet_url:
             raise ValueError("Google 시트 URL을 입력하세요")
         csv_path = self.browser.download_sheet(sheet_url)
-        brand = load_sheet_brand(sheet_url)
-        if not brand:
+        informational = is_informational_sheet(sheet_url)
+        brand = "" if informational else load_sheet_brand(sheet_url)
+        if not brand and not informational:
             raise ValueError("Google 시트 제목에서 브랜드명을 찾지 못했습니다")
-        return load_brand_immediate_jobs(csv_path, brand=brand), sheet_url
+        return (
+            load_brand_immediate_jobs(
+                csv_path,
+                brand=brand,
+                format_body=informational,
+            ),
+            sheet_url,
+        )
 
     def _check_data(self) -> None:
         def work() -> None:
