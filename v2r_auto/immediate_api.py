@@ -234,6 +234,114 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                     item.writable_accounts.append(account)
         return list(menu_map.values()), healthy
 
+    def _prepare_account_tests(
+        self,
+        jobs: list[ImmediateJob],
+        cafes: list[CafeCatalogEntry],
+    ) -> None:
+        test_cafes = [
+            cafe for cafe in cafes if cafe.cafe_id in TEST_CAFE_IDS
+        ]
+        active_members: dict[int, set[str]] = {}
+        unavailable_members: set[str] = set()
+        for cafe in test_cafes:
+            response = self._request(
+                "GET",
+                "/naver_cafes/naver_join_cafe",
+                query={"cafe_id": cafe.cafe_id},
+            )
+            active_members[cafe.cafe_id] = set(
+                self._joined_accounts(response)
+            )
+            for item in _walk_dicts(response):
+                account = str(
+                    item.get("login_id") or item.get("naver_login_id") or ""
+                )
+                if account and (
+                    item.get("force_drop") or item.get("stop_cafe_member")
+                ):
+                    unavailable_members.add(account)
+
+        menu_cache: dict[tuple[int, str], list[CafeMenu]] = {}
+        both_index = 0
+        for job in jobs:
+            if (
+                job.status != JobStatus.PENDING
+                or job.source_kind != "account_test"
+            ):
+                continue
+            global_account = self.global_accounts.get(job.account)
+            if not global_account:
+                job.status = JobStatus.FAILED
+                job.message = "V2R 미등록 계정"
+                continue
+            if global_account.get("is_login_fail"):
+                job.status = JobStatus.FAILED
+                job.message = "네이버 로그인 실패"
+                continue
+            if global_account.get("is_block"):
+                job.status = JobStatus.FAILED
+                job.message = "V2R 계정 차단"
+                continue
+            joined = [
+                cafe
+                for cafe in test_cafes
+                if job.account in active_members.get(cafe.cafe_id, set())
+            ]
+            if not joined:
+                job.status = JobStatus.FAILED
+                job.message = (
+                    "활동정지·탈퇴"
+                    if job.account in unavailable_members
+                    else "테스트 카페 미가입"
+                )
+                continue
+            if len(joined) > 1:
+                cafe = joined[both_index % len(joined)]
+                both_index += 1
+            else:
+                cafe = joined[0]
+            cache_key = (cafe.cafe_id, job.account)
+            try:
+                menus = menu_cache.get(cache_key)
+                if menus is None:
+                    response = self._request(
+                        "GET",
+                        "/naver_cafes/menus",
+                        query={
+                            "cafe_id": cafe.cafe_id,
+                            "naver_login_id": job.account,
+                        },
+                    )
+                    menus = self._menu_rows(response)
+                    menu_cache[cache_key] = menus
+                menu = match_catalog_name(
+                    "자유게시판",
+                    menus,
+                    label="게시판",
+                )
+            except Exception as exc:
+                reason = str(exc)
+                job.status = JobStatus.FAILED
+                job.message = (
+                    "네이버 로그인 실패"
+                    if "NOT_LOGIN" in reason or "NAVER_LOGIN_FAIL" in reason
+                    else f"테스트 준비 실패: {reason[:120]}"
+                )
+                continue
+            job.cafe = cafe.name
+            job.cafe_id = cafe.cafe_id
+            job.menu_id = menu.menu_id
+            job.canonical_cafe_name = cafe.name
+            job.canonical_board_name = menu.name
+            self.logger.debug(
+                "행 %s 한줄테스트 준비: %s / %s / %s",
+                job.row_number,
+                cafe.name,
+                menu.name,
+                job.account,
+            )
+
     def prepare_jobs(self, jobs: list[ImmediateJob]) -> None:
         self._capture_authorization()
         cafe_payload = self._request("GET", "/naver_cafes/naver_join_cafes")
@@ -244,10 +352,14 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
             for item in _walk_dicts(global_payload)
             if item.get("naver_login_id")
         }
+        self._prepare_account_tests(jobs, cafes)
 
         by_wanted: dict[str, list[ImmediateJob]] = {}
         for job in jobs:
-            if job.status == JobStatus.PENDING:
+            if (
+                job.status == JobStatus.PENDING
+                and job.source_kind != "account_test"
+            ):
                 by_wanted.setdefault(job.cafe, []).append(job)
 
         for wanted, cafe_jobs in by_wanted.items():
@@ -348,6 +460,15 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         failed = set(self.failed_source_urls)
         self.failed_source_urls.clear()
         return failed
+
+    @staticmethod
+    def classify_failure(error: Exception) -> tuple[str, bool]:
+        text = str(error)
+        if "27000" in text or "게시글 작성 및 카페" in text:
+            return "코드 27000 활동 제한", False
+        if "20004" in text or "연속으로 등록" in text:
+            return "연속 글 등록 제한", False
+        return AffiliateApiPublisher.classify_failure(error)
 
     def _pool_for(
         self,

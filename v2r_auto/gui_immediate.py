@@ -8,12 +8,21 @@ from tkinter import filedialog, messagebox, ttk
 from .gui import AutomationApp
 from .images import load_sheet_brand
 from .immediate_inputs import (
+    ACCOUNT_TEST_SHEET_GID,
+    ACCOUNT_TEST_SHEET_ID,
     is_informational_sheet,
+    load_account_test_jobs,
     load_brand_immediate_jobs,
     load_daily_excel_jobs,
 )
 from .runner import ImmediateRunner
 from .state import AnotherInstanceRunningError, InstanceLock
+
+
+ACCOUNT_TEST_SHEET_URL = (
+    f"https://docs.google.com/spreadsheets/d/{ACCOUNT_TEST_SHEET_ID}/"
+    f"edit?gid={ACCOUNT_TEST_SHEET_GID}#gid={ACCOUNT_TEST_SHEET_GID}"
+)
 
 
 class ImmediateAutomationApp(AutomationApp):
@@ -34,6 +43,7 @@ class ImmediateAutomationApp(AutomationApp):
     def _create_variables(self) -> None:
         self.input_mode = tk.StringVar(value="brand")
         self.sheet_url = tk.StringVar()
+        self.test_sheet_url = tk.StringVar(value=ACCOUNT_TEST_SHEET_URL)
         self.excel_path = tk.StringVar()
         self.dry_run = tk.BooleanVar(value=True)
         self.progress_text = tk.StringVar(value="대기 중")
@@ -42,7 +52,7 @@ class ImmediateAutomationApp(AutomationApp):
         outer = ttk.Frame(self, padding=16)
         outer.pack(fill=tk.BOTH, expand=True)
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(7, weight=1)
+        outer.rowconfigure(8, weight=1)
 
         ttk.Label(outer, text=self.app_name, font=("", 18, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
@@ -66,6 +76,12 @@ class ImmediateAutomationApp(AutomationApp):
             variable=self.input_mode,
             value="daily",
         ).pack(side=tk.LEFT, padx=18)
+        ttk.Radiobutton(
+            modes,
+            text="전체 계정 한 줄 테스트 (Google Sheet)",
+            variable=self.input_mode,
+            value="account_test",
+        ).pack(side=tk.LEFT)
 
         self._entry_row(outer, 3, "Google 시트 URL", self.sheet_url)
         self._entry_row(
@@ -75,9 +91,15 @@ class ImmediateAutomationApp(AutomationApp):
             self.excel_path,
             button=("찾기", self._choose_excel),
         )
+        self._entry_row(
+            outer,
+            5,
+            "한줄테스트 시트",
+            self.test_sheet_url,
+        )
 
         actions = ttk.Frame(outer)
-        actions.grid(row=5, column=0, columnspan=3, sticky="ew", pady=10)
+        actions.grid(row=6, column=0, columnspan=3, sticky="ew", pady=10)
         ttk.Checkbutton(
             actions,
             text="검증 모드(실제 발행하지 않음)",
@@ -116,7 +138,7 @@ class ImmediateAutomationApp(AutomationApp):
         ).pack(side=tk.RIGHT)
 
         progress_frame = ttk.Frame(outer)
-        progress_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        progress_frame.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         progress_frame.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_frame, maximum=100)
         self.progress.grid(row=0, column=0, sticky="ew")
@@ -125,7 +147,7 @@ class ImmediateAutomationApp(AutomationApp):
         )
 
         log_frame = ttk.LabelFrame(outer, text="실시간 로그", padding=8)
-        log_frame.grid(row=7, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=8, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state=tk.DISABLED)
@@ -143,10 +165,23 @@ class ImmediateAutomationApp(AutomationApp):
             self.excel_path.set(selected)
 
     def _open_login(self) -> None:
-        sheet_url = self.sheet_url.get().strip() if self.input_mode.get() == "brand" else ""
+        mode = self.input_mode.get()
+        sheet_url = (
+            self.sheet_url.get().strip()
+            if mode == "brand"
+            else self.test_sheet_url.get().strip()
+            if mode == "account_test"
+            else ""
+        )
         self._run_background(lambda: self.browser.open_login_window(sheet_url))
 
     def _load_immediate_jobs(self):
+        if self.input_mode.get() == "account_test":
+            sheet_url = self.test_sheet_url.get().strip()
+            if not sheet_url:
+                raise ValueError("한줄테스트 Google 시트 URL을 입력하세요")
+            csv_path = self.browser.download_sheet(sheet_url)
+            return load_account_test_jobs(csv_path), sheet_url
         if self.input_mode.get() == "daily":
             path = self.excel_path.get().strip()
             if not path:
