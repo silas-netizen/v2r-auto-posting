@@ -7,7 +7,11 @@ from tkinter import filedialog, messagebox, ttk
 
 from .gui import AutomationApp
 from .images import load_sheet_brand
-from .immediate_inputs import load_brand_immediate_jobs, load_daily_excel_jobs
+from .immediate_inputs import (
+    is_informational_sheet,
+    load_brand_immediate_jobs,
+    load_daily_excel_jobs,
+)
 from .runner import ImmediateRunner
 from .state import AnotherInstanceRunningError, InstanceLock
 
@@ -152,10 +156,18 @@ class ImmediateAutomationApp(AutomationApp):
         if not sheet_url:
             raise ValueError("Google 시트 URL을 입력하세요")
         csv_path = self.browser.download_sheet(sheet_url)
-        brand = load_sheet_brand(sheet_url)
-        if not brand:
+        informational = is_informational_sheet(sheet_url)
+        brand = "" if informational else load_sheet_brand(sheet_url)
+        if not brand and not informational:
             raise ValueError("Google 시트 제목에서 브랜드명을 찾지 못했습니다")
-        return load_brand_immediate_jobs(csv_path, brand=brand), sheet_url
+        return (
+            load_brand_immediate_jobs(
+                csv_path,
+                brand=brand,
+                format_body=informational,
+            ),
+            sheet_url,
+        )
 
     def _check_data(self) -> None:
         def work() -> None:

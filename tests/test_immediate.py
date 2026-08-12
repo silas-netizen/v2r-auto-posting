@@ -15,6 +15,7 @@ from v2r_auto.immediate_api import (
 from v2r_auto.cafe_catalog import CafeMenu, match_catalog_name, normalized_name
 from v2r_auto.immediate_inputs import (
     format_daily_body,
+    is_informational_sheet,
     load_brand_immediate_jobs,
     load_daily_excel_jobs,
 )
@@ -40,6 +41,48 @@ def test_load_brand_sheet_with_board_and_optional_comments(tmp_path: Path) -> No
     assert jobs[0].comments
     assert jobs[1].comments == []
     assert jobs[1].image_disabled is True
+
+
+def test_brand_sheet_preserves_body_unless_special_format_is_enabled(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "brand.csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        '"키워드","제목 : 제목\n본문 : 첫 문장이에요. 두 번째 문장이에요, 세 번째 문장이에요😊",'
+        "고요한아침,writer,,,,,,가입인사\n",
+        encoding="utf-8-sig",
+    )
+
+    regular = load_brand_immediate_jobs(path, brand="팥순이")[0]
+    informational = load_brand_immediate_jobs(
+        path,
+        brand="",
+        format_body=True,
+    )[0]
+
+    assert "." in regular.body and "," in regular.body and "😊" in regular.body
+    assert "." not in informational.body
+    assert "," not in informational.body
+    assert "😊" not in informational.body
+
+
+def test_one_malformed_sheet_row_does_not_abort_other_rows(tmp_path: Path) -> None:
+    path = tmp_path / "brand.csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        '"오류","제목 :\n본문 : 본문",고요한아침,writer,,,,,,가입인사\n'
+        '"정상","제목 : 정상 제목\n본문 : 정상 본문",고요한아침,writer,,,,,,가입인사\n',
+        encoding="utf-8-sig",
+    )
+
+    jobs = load_brand_immediate_jobs(path, brand="", format_body=True)
+
+    assert len(jobs) == 2
+    assert jobs[0].status == JobStatus.FAILED
+    assert "제목" in jobs[0].message
+    assert jobs[1].status == JobStatus.PENDING
+    assert jobs[1].title == "정상 제목"
 
 
 def test_load_daily_excel_a_to_d(tmp_path: Path) -> None:
@@ -82,6 +125,45 @@ def test_daily_body_keeps_one_two_sentences_and_existing_lines() -> None:
 
     assert format_daily_body(short) == short
     assert format_daily_body(formatted) == formatted
+
+
+def test_daily_body_cleans_punctuation_and_picture_emoji_but_keeps_numbers() -> None:
+    body = (
+        "체온은 37.5도였어요😊 "
+        "가격은 1,500만원이었어요... "
+        "정말 놀랐어요ㅠㅠ"
+    )
+
+    formatted = format_daily_body(body)
+
+    assert "37.5" in formatted
+    assert "1,500" in formatted
+    assert "😊" not in formatted
+    assert "..." not in formatted
+    assert "ㅠㅠ" in formatted
+    assert formatted.count("\n") == 3
+
+
+def test_long_two_sentence_daily_body_adds_paragraph_break() -> None:
+    body = (
+        "오늘은 가족들과 오랜만에 멀리 있는 공원까지 산책을 다녀와서 "
+        "이야기도 많이 나누고 여유롭게 시간을 보냈어요 "
+        "집으로 돌아오는 길에는 근처 시장에도 들러서 저녁거리와 과일을 "
+        "사고 다음 주말 계획도 같이 정했어요"
+    )
+
+    assert "\n\n" in format_daily_body(body)
+
+
+def test_only_known_information_sheet_url_enables_special_formatting() -> None:
+    assert is_informational_sheet(
+        "https://docs.google.com/spreadsheets/d/"
+        "1vSON0Rej9anDQXcAOXyBrCr50B4MMqZ79FahF4cDPJw/edit"
+        "?gid=1193993260#gid=1193993260"
+    )
+    assert not is_informational_sheet(
+        "https://docs.google.com/spreadsheets/d/other/edit?gid=1193993260"
+    )
 
 
 class FakeImmediatePublisher(ImmediateApiPublisher):
