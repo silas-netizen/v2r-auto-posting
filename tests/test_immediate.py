@@ -136,6 +136,7 @@ def test_loads_only_checked_one_line_account_tests(tmp_path: Path) -> None:
     assert jobs[0].body == "김천kb보험 그라래12\n김천kb보험 그라래12"
     assert jobs[0].source_kind == "account_test"
     assert jobs[0].use_comment_ai is False
+    assert jobs[0].validate() == []
 
 
 def test_formats_punctuation_free_daily_body_into_two_sentence_paragraphs() -> None:
