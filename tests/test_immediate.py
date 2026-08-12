@@ -223,6 +223,7 @@ class FakeImmediatePublisher(ImmediateApiPublisher):
             return {
                 "cafe_menus": [
                     {"menuId": 34, "menuName": "가입인사🌱", "writable": True},
+                    {"menuId": 10, "menuName": "몸 증상", "writable": True},
                 ]
             }
         raise AssertionError((method, path, query))
@@ -247,6 +248,22 @@ def test_prepare_jobs_matches_live_ids_and_rotates_all_writers(tmp_path: Path) -
     assert all(job.cafe_id == 14567700 for job in jobs)
     assert all(job.menu_id == 34 for job in jobs)
     assert all(job.status == JobStatus.PENDING for job in jobs)
+
+
+def test_writer_rotation_does_not_restart_for_each_board(tmp_path: Path) -> None:
+    path = tmp_path / "daily.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["카페명", "게시판명", "각색제목", "각색본문"])
+    sheet.append(["고요한아침", "가입인사", "첫 글", "첫 본문"])
+    sheet.append(["고요한아침", "몸 증상", "둘째 글", "둘째 본문"])
+    workbook.save(path)
+    jobs = load_daily_excel_jobs(path)
+    publisher = FakeImmediatePublisher(None, logging.getLogger("test"))
+
+    publisher.prepare_jobs(jobs)
+
+    assert [job.account for job in jobs] == ["writer-a", "writer-b"]
 
 
 def test_prepare_jobs_unions_menus_from_all_healthy_accounts(tmp_path: Path) -> None:
@@ -466,3 +483,56 @@ def test_pause_waits_then_resumes_before_next_publish(tmp_path: Path) -> None:
     assert not thread.is_alive()
     assert browser.published == 1
     assert job.scheduled_at == scheduled_before_resume
+
+
+def test_sheet_write_failure_does_not_block_v2r_publish(tmp_path: Path) -> None:
+    path = tmp_path / "brand.csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        '"키워드","제목 : 제목\n본문 : 본문",고요한아침,,질문형,,,실명,,가입인사\n',
+        encoding="utf-8-sig",
+    )
+    job = load_brand_immediate_jobs(path, brand="팥순이")[0]
+
+    class SheetFailureBrowser:
+        published = 0
+
+        def ensure_v2r_login(self, _email, _password):
+            return None
+
+        def prepare_immediate_jobs(self, jobs):
+            jobs[0].cafe_id = 14567700
+            jobs[0].menu_id = 34
+            jobs[0].account = "writer"
+            jobs[0].canonical_cafe_name = "고요한 아침"
+            jobs[0].canonical_board_name = "가입인사"
+
+        def consume_failed_immediate_urls(self):
+            return set()
+
+        def update_sheet_cell(self, *_args):
+            raise RuntimeError("sheet unavailable")
+
+        def publish_immediate(self, _job, _dry_run):
+            self.published += 1
+            return "https://v2r.example/source"
+
+    browser = SheetFailureBrowser()
+    runner = ImmediateRunner(
+        browser=browser,
+        history_path=tmp_path / "history.json",
+        report_dir=tmp_path,
+        logger=logging.getLogger("sheet-failure-test"),
+    )
+    result, _report = runner.run(
+        [job],
+        dry_run=False,
+        stop_event=threading.Event(),
+        progress=lambda _current, _total: None,
+        source_sheet_url="https://docs.google.com/spreadsheets/d/example/edit?gid=0",
+    )
+
+    assert browser.published == 1
+    assert result.jobs[0].status == JobStatus.RESERVED
+    assert "D열 작성계정 저장 실패" in result.jobs[0].message
+    assert "F열 완료 링크 저장 실패" in result.jobs[0].message

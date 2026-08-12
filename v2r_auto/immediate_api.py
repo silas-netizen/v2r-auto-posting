@@ -47,7 +47,8 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
     def __init__(self, browser, logger):
         super().__init__(browser, logger)
         self.menu_pools: dict[tuple[int, int], list[str]] = {}
-        self.pool_indexes: dict[tuple[int, int, str], int] = {}
+        self.cafe_pools: dict[int, list[str]] = {}
+        self.pool_indexes: dict[tuple[int, str], int] = {}
         self.global_accounts: dict[str, dict[str, Any]] = {}
         data_dir = (
             self.browser.config.download_dir.parent
@@ -273,6 +274,7 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                 )
             if not menus:
                 raise AffiliateApiError(f"{cafe.name} 게시판 목록이 비어 있습니다")
+            self.cafe_pools[cafe.cafe_id] = list(healthy)
             for menu in menus:
                 self.menu_pools[(cafe.cafe_id, menu.menu_id)] = list(
                     menu.writable_accounts
@@ -350,8 +352,9 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
     def _pool_for(
         self,
         job: ImmediateJob,
-    ) -> tuple[tuple[int, int, str], list[str]]:
-        pool = self.menu_pools.get((job.cafe_id, job.menu_id), [])
+    ) -> tuple[tuple[int, str], list[str], set[str]]:
+        pool = self.cafe_pools.get(job.cafe_id, [])
+        allowed = set(self.menu_pools.get((job.cafe_id, job.menu_id), []))
         required_type = "실명" if job.source_kind == "daily" else job.account_type
         if required_type in {"실명", "비실명"}:
             wanted = required_type == "실명"
@@ -365,19 +368,19 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                     is wanted
                 )
             ]
-            key = (job.cafe_id, job.menu_id, required_type)
-            return key, pool
-        key = (job.cafe_id, job.menu_id, "전체")
-        return key, pool
+            key = (job.cafe_id, required_type)
+            return key, pool, allowed
+        key = (job.cafe_id, "전체")
+        return key, pool, allowed
 
     def pick_account(self, job: ImmediateJob) -> str:
-        key, pool = self._pool_for(job)
+        key, pool, allowed = self._pool_for(job)
         if not pool:
             return ""
         start = self.pool_indexes.get(key, 0)
         for offset in range(len(pool)):
             account = pool[(start + offset) % len(pool)]
-            if account not in self.blocked_accounts:
+            if account in allowed and account not in self.blocked_accounts:
                 self.pool_indexes[key] = (start + offset + 1) % len(pool)
                 return account
         return ""
