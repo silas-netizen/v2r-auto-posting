@@ -39,6 +39,7 @@ def test_load_brand_sheet_with_board_and_optional_comments(tmp_path: Path) -> No
     assert jobs[0].board == "극복후기"
     assert jobs[0].brand == "팥순이"
     assert jobs[0].comments
+    assert jobs[0].use_comment_ai is False
     assert jobs[1].comments == []
     assert jobs[1].image_disabled is True
 
@@ -59,12 +60,25 @@ def test_brand_sheet_preserves_body_unless_special_format_is_enabled(
         path,
         brand="",
         format_body=True,
+        use_comment_ai=True,
     )[0]
 
     assert "." in regular.body and "," in regular.body and "😊" in regular.body
     assert "." not in informational.body
     assert "," not in informational.body
     assert "😊" not in informational.body
+    assert regular.use_comment_ai is False
+    assert informational.use_comment_ai is True
+    publisher = ImmediateApiPublisher(None, logging.getLogger("test"))
+    for job in (regular, informational):
+        job.cafe_id = 14567700
+        job.menu_id = 34
+        job.account = "writer"
+        job.canonical_cafe_name = "고요한 아침"
+        job.canonical_board_name = "가입인사"
+        job.scheduled_at = datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)
+    assert publisher._destination(regular)["use_comment_ai"] is False
+    assert publisher._destination(informational)["use_comment_ai"] is True
 
 
 def test_one_malformed_sheet_row_does_not_abort_other_rows(tmp_path: Path) -> None:
@@ -101,6 +115,7 @@ def test_load_daily_excel_a_to_d(tmp_path: Path) -> None:
     assert jobs[0].title == "안녕하세요"
     assert jobs[0].body == "반갑습니다"
     assert jobs[0].comments == []
+    assert jobs[0].use_comment_ai is True
 
 
 def test_formats_punctuation_free_daily_body_into_two_sentence_paragraphs() -> None:

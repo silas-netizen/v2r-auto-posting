@@ -165,6 +165,7 @@ class ImmediateAutomationApp(AutomationApp):
                 csv_path,
                 brand=brand,
                 format_body=informational,
+                use_comment_ai=informational,
             ),
             sheet_url,
         )
