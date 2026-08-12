@@ -15,10 +15,10 @@ from v2r_auto.immediate_api import (
 from v2r_auto.cafe_catalog import CafeMenu, match_catalog_name, normalized_name
 from v2r_auto.immediate_inputs import (
     format_daily_body,
+    is_informational_sheet,
     load_brand_immediate_jobs,
     load_daily_excel_jobs,
 )
-from v2r_auto.gui_immediate import is_informational_sheet
 from v2r_auto.models import JobStatus
 from v2r_auto.history import HistoryStore
 from v2r_auto.runner import ImmediateRunner, assign_immediate_schedules

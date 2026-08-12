@@ -26,6 +26,8 @@ BRAND_OPTIONAL_COLUMNS = {
 }
 BOARD_HEADERS = {"게시판명", "게시판", "메뉴", "메뉴명"}
 DAILY_HEADERS = ("카페명", "게시판명", "각색제목", "각색본문")
+INFORMATIONAL_SHEET_ID = "1vSON0Rej9anDQXcAOXyBrCr50B4MMqZ79FahF4cDPJw"
+INFORMATIONAL_SHEET_GID = "1193993260"
 KOREAN_SENTENCE_ENDINGS = tuple(
     sorted(
         {
@@ -84,6 +86,13 @@ def _cell(value) -> str:
 
 def _find_header(headers: list[str], candidates: set[str]) -> str:
     return next((header for header in headers if header.strip() in candidates), "")
+
+
+def is_informational_sheet(sheet_url: str) -> bool:
+    return (
+        f"/d/{INFORMATIONAL_SHEET_ID}/" in sheet_url
+        and f"gid={INFORMATIONAL_SHEET_GID}" in sheet_url
+    )
 
 
 def format_daily_body(body: str) -> str:

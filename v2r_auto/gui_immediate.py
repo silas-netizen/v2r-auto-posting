@@ -7,20 +7,13 @@ from tkinter import filedialog, messagebox, ttk
 
 from .gui import AutomationApp
 from .images import load_sheet_brand
-from .immediate_inputs import load_brand_immediate_jobs, load_daily_excel_jobs
+from .immediate_inputs import (
+    is_informational_sheet,
+    load_brand_immediate_jobs,
+    load_daily_excel_jobs,
+)
 from .runner import ImmediateRunner
 from .state import AnotherInstanceRunningError, InstanceLock
-
-
-INFORMATIONAL_SHEET_ID = "1vSON0Rej9anDQXcAOXyBrCr50B4MMqZ79FahF4cDPJw"
-INFORMATIONAL_SHEET_GID = "1193993260"
-
-
-def is_informational_sheet(sheet_url: str) -> bool:
-    return (
-        f"/d/{INFORMATIONAL_SHEET_ID}/" in sheet_url
-        and f"gid={INFORMATIONAL_SHEET_GID}" in sheet_url
-    )
 
 
 class ImmediateAutomationApp(AutomationApp):
