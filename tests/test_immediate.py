@@ -641,3 +641,71 @@ def test_sheet_write_failure_does_not_block_v2r_publish(tmp_path: Path) -> None:
     assert result.jobs[0].status == JobStatus.RESERVED
     assert "D열 작성계정 저장 실패" in result.jobs[0].message
     assert "F열 완료 링크 저장 실패" in result.jobs[0].message
+
+
+def test_previous_account_test_success_restores_sheet_without_republish(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "account-tests.csv"
+    path.write_text(
+        "번호,ID,작업 구분,연동,가아사 조건,실/비실,테스트 선택,테스트 결과,테스트 링크,테스트 일시\n"
+        "12,test-id,,,,,TRUE,,,\n",
+        encoding="utf-8-sig",
+    )
+    old_job = load_account_test_jobs(path)[0]
+    old_job.cafe = "태극마케팅센터"
+    old_job.post_url = "https://v2r.example/old-success"
+    history_path = tmp_path / "history.json"
+    HistoryStore(history_path).record(old_job)
+    job = load_account_test_jobs(path)[0]
+
+    class RecoveryBrowser:
+        published = 0
+        sheet_updates = []
+
+        def ensure_v2r_login(self, _email, _password):
+            return None
+
+        def prepare_immediate_jobs(self, jobs):
+            jobs[0].cafe = "태극마케팅센터"
+            jobs[0].cafe_id = 31670254
+            jobs[0].menu_id = 1
+            jobs[0].canonical_cafe_name = "태극마케팅센터"
+            jobs[0].canonical_board_name = "자유게시판"
+
+        def consume_failed_immediate_urls(self):
+            return set()
+
+        def publish_immediate(self, _job, _dry_run):
+            self.published += 1
+            return "https://v2r.example/new"
+
+        def update_sheet_cell(
+            self,
+            _url,
+            column,
+            row,
+            value,
+            **_kwargs,
+        ):
+            self.sheet_updates.append((column, row, value))
+
+    browser = RecoveryBrowser()
+    runner = ImmediateRunner(
+        browser=browser,
+        history_path=history_path,
+        report_dir=tmp_path,
+        logger=logging.getLogger("recovery-test"),
+    )
+    result, _report = runner.run(
+        [job],
+        dry_run=False,
+        stop_event=threading.Event(),
+        progress=lambda _current, _total: None,
+        source_sheet_url="https://docs.google.com/spreadsheets/d/example/edit?gid=0",
+    )
+
+    assert browser.published == 0
+    assert result.jobs[0].status == JobStatus.SUCCESS
+    assert result.jobs[0].post_url == old_job.post_url
+    assert ("I", 2, old_job.post_url) in browser.sheet_updates
