@@ -67,6 +67,24 @@ def test_brand_sheet_preserves_body_unless_special_format_is_enabled(
     assert "😊" not in informational.body
 
 
+def test_one_malformed_sheet_row_does_not_abort_other_rows(tmp_path: Path) -> None:
+    path = tmp_path / "brand.csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        '"오류","제목 :\n본문 : 본문",고요한아침,writer,,,,,,가입인사\n'
+        '"정상","제목 : 정상 제목\n본문 : 정상 본문",고요한아침,writer,,,,,,가입인사\n',
+        encoding="utf-8-sig",
+    )
+
+    jobs = load_brand_immediate_jobs(path, brand="", format_body=True)
+
+    assert len(jobs) == 2
+    assert jobs[0].status == JobStatus.FAILED
+    assert "제목" in jobs[0].message
+    assert jobs[1].status == JobStatus.PENDING
+    assert jobs[1].title == "정상 제목"
+
+
 def test_load_daily_excel_a_to_d(tmp_path: Path) -> None:
     path = tmp_path / "daily.xlsx"
     workbook = Workbook()

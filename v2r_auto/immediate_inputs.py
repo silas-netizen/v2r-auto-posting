@@ -168,9 +168,16 @@ def load_brand_immediate_jobs(
             try:
                 article = parse_article(keyword, source)
             except ContentFormatError as exc:
-                raise SheetSchemaError(
-                    f"시트 행 {row_number} 원고 형식 오류: {exc}"
-                ) from exc
+                article = ParsedArticle(
+                    title="",
+                    body="",
+                    keyword=keyword,
+                    tag=re.sub(r"\s+", "", keyword),
+                    comments=[],
+                )
+                format_error = f"원고 형식 오류: {exc}"
+            else:
+                format_error = ""
             if format_body:
                 article.body = format_daily_body(article.body)
             job = ImmediateJob(
@@ -193,7 +200,10 @@ def load_brand_immediate_jobs(
                 source_kind="brand",
                 source_name=csv_path.name,
             )
-            if job.completion_url:
+            if format_error:
+                job.status = JobStatus.FAILED
+                job.message = format_error
+            elif job.completion_url:
                 job.status = JobStatus.SKIPPED
                 job.message = "완료 링크가 있어 건너뜀"
             elif not job.account and job.account_type not in {"실명", "비실명"}:
