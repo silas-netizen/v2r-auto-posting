@@ -475,8 +475,12 @@ class ImmediateRunner:
                         job.account,
                     )
                 except Exception as exc:
-                    job.status = JobStatus.FAILED
-                    job.message = f"D열 작성계정 저장 실패: {exc}"
+                    self.logger.warning(
+                        "행 %s D열 작성계정 1차 저장 실패: %s "
+                        "(발행은 계속하고 완료 후 다시 시도)",
+                        job.row_number,
+                        exc,
+                    )
 
         retrying = 0
 
@@ -675,12 +679,36 @@ class ImmediateRunner:
                     if not dry_run:
                         self.history.record(job)
                         if source_sheet_url and job.source_kind == "brand":
-                            self.browser.update_sheet_cell(
-                                source_sheet_url,
-                                "F",
-                                job.row_number,
-                                job.post_url,
-                            )
+                            sheet_errors: list[str] = []
+                            try:
+                                self.browser.update_sheet_cell(
+                                    source_sheet_url,
+                                    "D",
+                                    job.row_number,
+                                    job.account,
+                                )
+                            except Exception as sheet_error:
+                                sheet_errors.append(
+                                    f"D열 작성계정 저장 실패: {sheet_error}"
+                                )
+                            try:
+                                self.browser.update_sheet_cell(
+                                    source_sheet_url,
+                                    "F",
+                                    job.row_number,
+                                    job.post_url,
+                                )
+                            except Exception as sheet_error:
+                                sheet_errors.append(
+                                    f"F열 완료 링크 저장 실패: {sheet_error}"
+                                )
+                            if sheet_errors:
+                                job.message += " / " + " / ".join(sheet_errors)
+                                self.logger.error(
+                                    "행 %s 발행은 완료됐지만 시트 저장 실패: %s",
+                                    job.row_number,
+                                    " / ".join(sheet_errors),
+                                )
                     break
                 except Exception as exc:
                     reason, can_replace = self.browser.classify_immediate_failure(exc)
@@ -693,12 +721,20 @@ class ImmediateRunner:
                         retrying += 1
                         emit_status()
                         if source_sheet_url and job.source_kind == "brand":
-                            self.browser.update_sheet_cell(
-                                source_sheet_url,
-                                "D",
-                                job.row_number,
-                                replacement,
-                            )
+                            try:
+                                self.browser.update_sheet_cell(
+                                    source_sheet_url,
+                                    "D",
+                                    job.row_number,
+                                    replacement,
+                                )
+                            except Exception as sheet_error:
+                                self.logger.warning(
+                                    "행 %s 교체계정 D열 저장 실패: %s "
+                                    "(새 계정으로 발행은 계속)",
+                                    job.row_number,
+                                    sheet_error,
+                                )
                         self.logger.warning(
                             "행 %s 작성계정 교체 후 재시도: %s",
                             job.row_number,
