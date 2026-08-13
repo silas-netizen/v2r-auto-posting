@@ -14,9 +14,15 @@ from .models import AffiliateJob
 
 DRIVE_IMAGE_ROOT_ID = "13ouLpDi-mSJctFuw3iKCg-z4FZLPjKiK"
 DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/{folder_id}"
+DRIVE_EMBEDDED_FOLDER_URL = "https://drive.google.com/embeddedfolderview?id={folder_id}"
 DRIVE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 PLACEHOLDER_PATTERN = re.compile(r"\{([^{}\r\n]+)\}")
 SHEET_BRAND_PATTERN = re.compile(r"\(([^()]+)\)")
+EMBEDDED_ENTRY_PATTERN = re.compile(
+    r'<div class="flip-entry"[^>]*\bid="entry-([^"]+)"(.*?)(?=<div class="flip-entry"|\Z)',
+    flags=re.DOTALL,
+)
+EMBEDDED_TITLE_PATTERN = re.compile(r'<div class="flip-entry-title">([^<]+)</div>')
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,16 +121,51 @@ class GoogleDriveImageResolver:
                 items.append(DriveItem(item_id, name, is_folder))
         return items
 
+    @staticmethod
+    def parse_embedded_folder_page(source: str) -> list[DriveItem]:
+        """Parse the full public folder list, not just the first Drive screen."""
+        items: list[DriveItem] = []
+        seen: set[tuple[str, str, bool]] = set()
+        for match in EMBEDDED_ENTRY_PATTERN.finditer(source):
+            item_id = match.group(1)
+            chunk = match.group(2)
+            title_match = EMBEDDED_TITLE_PATTERN.search(chunk)
+            if not title_match:
+                continue
+            name = html.unescape(title_match.group(1)).strip()
+            if not name:
+                continue
+            is_folder = "/drive/folders/" in chunk or 'aria-label="Folder"' in chunk
+            key = (item_id, name, is_folder)
+            if key not in seen:
+                seen.add(key)
+                items.append(DriveItem(item_id, name, is_folder))
+        return items
+
+    def _fetch_folder_page(self, url: str) -> str:
+        request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with self.opener(request, timeout=30) as response:
+            return response.read().decode("utf-8", errors="ignore")
+
     def _list_folder(self, folder_id: str) -> list[DriveItem]:
         if folder_id in self._folder_cache:
             return self._folder_cache[folder_id]
-        request = Request(
-            DRIVE_FOLDER_URL.format(folder_id=folder_id),
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
-        with self.opener(request, timeout=30) as response:
-            source = response.read().decode("utf-8", errors="ignore")
-        items = self.parse_folder_page(source)
+        items: list[DriveItem] = []
+        try:
+            items = self.parse_embedded_folder_page(
+                self._fetch_folder_page(
+                    DRIVE_EMBEDDED_FOLDER_URL.format(folder_id=folder_id)
+                )
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Google Drive 전체 목록을 읽지 못해 첫 화면만 사용합니다: %s",
+                exc,
+            )
+        if not items:
+            items = self.parse_folder_page(
+                self._fetch_folder_page(DRIVE_FOLDER_URL.format(folder_id=folder_id))
+            )
         self._folder_cache[folder_id] = items
         return items
 
