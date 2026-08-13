@@ -729,7 +729,7 @@ class AffiliateApiPublisher:
             remaining = (
                 expected_start_at - datetime.now(timezone.utc)
             ).total_seconds()
-            wait_seconds = max(wait_seconds, remaining + 180)
+            wait_seconds = max(wait_seconds, remaining + 30 * 60)
         deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline:
             history = self._request(
