@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
 from .content import CommentNode, ParsedArticle
 
@@ -66,6 +67,8 @@ class AffiliateJob:
     revision_url: str = ""
     daily_post: "DailyPost | None" = None
     prepared_image_count: int = 0
+    photo_wash_prepared: bool = False
+    prepared_images: list[Any] = field(default_factory=list)
 
     @property
     def title(self) -> str:
@@ -133,6 +136,8 @@ class ImmediateJob:
     message: str = ""
     post_url: str = ""
     prepared_image_count: int = 0
+    photo_wash_prepared: bool = False
+    prepared_images: list[Any] = field(default_factory=list)
 
     @property
     def keyword(self) -> str:

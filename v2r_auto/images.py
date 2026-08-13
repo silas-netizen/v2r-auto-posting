@@ -227,10 +227,16 @@ class GoogleDriveImageResolver:
         target.write_bytes(data)
         return target
 
-    def resolve(self, job: AffiliateJob) -> list[ResolvedImage]:
+    def resolve(
+        self,
+        job: AffiliateJob,
+        *,
+        excluded_file_ids: set[str] | None = None,
+    ) -> list[ResolvedImage]:
         markers = placeholders(job.body)
         if job.image_disabled or not markers:
             return []
+        excluded_file_ids = excluded_file_ids or set()
         brand_folder = self._folder(self.root_folder_id, job.brand)
         if not brand_folder:
             self.logger.warning(
@@ -254,7 +260,11 @@ class GoogleDriveImageResolver:
                     marker,
                 )
                 continue
-            files = [item for item in self._list_folder(folder.item_id) if not item.is_folder]
+            files = [
+                item
+                for item in self._list_folder(folder.item_id)
+                if not item.is_folder and item.item_id not in excluded_file_ids
+            ]
             if keyword_match:
                 wanted = re.sub(r"\s+", "", job.keyword).casefold()
                 candidates = [item for item in files if self._file_key(item.name) == wanted]
@@ -265,7 +275,11 @@ class GoogleDriveImageResolver:
                         marker,
                     )
                     direct = self._search_file(folder.item_id, job.keyword)
-                    candidates = [direct] if direct else []
+                    candidates = (
+                        [direct]
+                        if direct and direct.item_id not in excluded_file_ids
+                        else []
+                    )
             else:
                 candidates = files
             if not candidates:
