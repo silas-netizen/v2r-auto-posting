@@ -10,9 +10,14 @@ from v2r_auto.exposure import (
     brand_found,
     collect_our_cafe_hits,
     is_cafe_article_url,
+    keywordstool_volume,
+    match_selected_rows,
     matching_cafe_name,
     parse_brands,
     parse_cafes,
+    parse_keyword_lines,
+    parse_qc_count,
+    preserve_cafe_id,
     same_search_query,
     strip_parenthetical,
 )
@@ -319,6 +324,86 @@ def test_notion_store_reads_and_patches_status() -> None:
     assert any(method == "PATCH" for method, _url in calls)
 
 
+def test_notion_store_writes_cafe_and_search_volumes() -> None:
+    bodies = []
+
+    def opener(request, timeout=30):
+        if request.data:
+            bodies.append(json.loads(request.data.decode("utf-8")))
+        if request.full_url.endswith("/databases/2260ab12-cdff-80c3-a4c0-d2f0ab1e9c44"):
+            return FakeResponse(
+                {
+                    "properties": {
+                        "키워드": {"type": "title"},
+                        "노출상태": {"type": "status"},
+                        "카페/ID": {"type": "rich_text"},
+                        "키워드 검색량": {"type": "number"},
+                        "노출된 검색량": {"type": "number"},
+                    }
+                }
+            )
+        if request.full_url.endswith("/query"):
+            return FakeResponse({"results": [], "has_more": False})
+        return FakeResponse({})
+
+    store = NotionExposureStore(
+        "secret",
+        "https://www.notion.so/2260ab12cdff80c3a4c0d2f0ab1e9c44",
+        __import__("logging").getLogger("test"),
+        opener=opener,
+    )
+    store.load_schema()
+    row = ExposureRow(
+        "page-1",
+        "다크 초콜릿",
+        "",
+        "",
+        "밀려남",
+        "노출상태",
+        "status",
+        current_cafe="씨씨앙/dtsx",
+        cafe_property="카페/ID",
+        cafe_type="rich_text",
+        volume_property="키워드 검색량",
+        volume_type="number",
+        exposed_volume_property="노출된 검색량",
+        exposed_volume_type="number",
+    )
+    store.update_check_result(
+        row,
+        status="노출완",
+        cafe_name="씨씨앙/dtsx",
+        search_volume=321,
+        volume_found=True,
+    )
+    payload = bodies[-1]["properties"]
+    assert payload["노출상태"]["status"]["name"] == "노출완"
+    assert payload["카페/ID"]["rich_text"][0]["text"]["content"] == "씨씨앙/dtsx"
+    assert payload["키워드 검색량"]["number"] == 321
+    assert payload["노출된 검색량"]["number"] == 321
+    store.update_check_result(
+        row,
+        status="밀려남",
+        cafe_name="",
+        search_volume=321,
+        volume_found=True,
+    )
+    hidden = bodies[-1]["properties"]
+    assert hidden["카페/ID"]["rich_text"] == []
+    assert hidden["키워드 검색량"]["number"] == 321
+    assert hidden["노출된 검색량"]["number"] is None
+    store.update_check_result(
+        row,
+        status="밀려남",
+        cafe_name="",
+        search_volume=None,
+        volume_found=False,
+    )
+    no_volume = bodies[-1]["properties"]
+    assert "키워드 검색량" not in no_volume
+    assert no_volume["노출된 검색량"]["number"] is None
+
+
 def test_naver_login_detected_from_cookies() -> None:
     from v2r_auto.exposure_naver import is_naver_logged_in_cookies
 
@@ -341,6 +426,11 @@ def test_naver_tab_is_home_or_search_only() -> None:
     )
     assert not search._is_naver_search_or_home("https://cafe.naver.com/ccang/1")
     assert not search._is_naver_search_or_home("https://nid.naver.com/nidlogin.login")
+    assert search._ads_login_required("https://nid.naver.com/nidlogin.login")
+    assert search._ads_login_required("https://searchad.naver.com/login")
+    assert not search._ads_login_required(
+        "https://manage.searchad.naver.com/customers/1/tool/keyword-planner"
+    )
 
 
 def test_pause_then_resume_continues_next_keyword() -> None:
@@ -418,3 +508,95 @@ def test_empty_keyword_after_parentheses_is_skipped() -> None:
         delay_seconds=0,
     ).run([_row("(메모만 있음)"), _row("코숨핏")], dry_run=True)
     assert naver.searched == ["코숨핏"]
+
+
+def test_parse_keyword_lines_skips_blank_and_notes() -> None:
+    text = """
+    다크 초콜릿 (메모)
+    
+    코숨핏
+    다크 초콜릿
+    """
+    assert parse_keyword_lines(text) == ["다크 초콜릿", "코숨핏"]
+
+
+def test_match_selected_rows_uses_notion_keyword() -> None:
+    rows = [
+        _row("다크 초콜릿 (효능으로 노출)"),
+        _row("코숨핏"),
+        _row("다른 키워드"),
+    ]
+    matched, missing = match_selected_rows(rows, ["다크 초콜릿", "없는 키워드"])
+    assert [row.keyword for row in matched] == ["다크 초콜릿 (효능으로 노출)"]
+    assert missing == ["없는 키워드"]
+
+
+def test_preserve_cafe_id_keeps_existing_suffix() -> None:
+    assert preserve_cafe_id("씨씨앙/dtsx", "씨씨앙") == "씨씨앙/dtsx"
+    assert preserve_cafe_id("양평맘/aa", "씨씨앙") == "씨씨앙"
+    assert preserve_cafe_id("씨씨앙/dtsx", "") == ""
+
+
+def test_keywordstool_adds_pc_and_mobile() -> None:
+    payload = {
+        "keywordList": [
+            {"relKeyword": "다크초콜릿", "monthlyPcQcCnt": 120, "monthlyMobileQcCnt": "< 10"},
+        ]
+    }
+    assert keywordstool_volume(payload, "다크 초콜릿") == 130
+    assert parse_qc_count("<10") == 10
+    nested = {
+        "data": {
+            "keywordList": [
+                {"relKeyword": "코숨핏", "monthlyPcQcCnt": 20, "monthlyMobileQcCnt": 30},
+            ]
+        }
+    }
+    assert keywordstool_volume(nested, "코숨핏") == 50
+
+
+def test_checker_writes_cafe_and_volumes() -> None:
+    post = "https://cafe.naver.com/ccang/1"
+    html = f"""
+    <a href="https://cafe.naver.com/ccang">씨씨앙</a>
+    <a href="{post}">글</a>
+    """
+    results = []
+
+    class FakeNotion:
+        def update_check_result(self, row, *, status, cafe_name="", search_volume=None, volume_found=False):
+            results.append((status, cafe_name, search_volume, volume_found))
+
+    class VolumeNaver(FakeNaver):
+        def lookup_search_volume(self, keyword: str) -> int:
+            return 321
+
+    row = _row("키워드")
+    row.current_cafe = "씨씨앙/dtsx"
+    ExposureChecker(
+        FakeNotion(),
+        VolumeNaver(html, {post: "코숨핏 후기"}),
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    ).run([row], dry_run=False)
+    assert results == [("노출완", "씨씨앙/dtsx", 321, True)]
+
+
+def test_hidden_clears_cafe_and_exposed_volume() -> None:
+    results = []
+
+    class FakeNotion:
+        def update_check_result(self, row, *, status, cafe_name="", search_volume=None, volume_found=False):
+            results.append((status, cafe_name, search_volume, volume_found))
+
+    class VolumeNaver(FakeNaver):
+        def lookup_search_volume(self, keyword: str) -> int:
+            return 50
+
+    ExposureChecker(
+        FakeNotion(),
+        VolumeNaver("<div id='main_pack'></div>"),
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    ).run([_row("키워드", "노출완")], dry_run=False)
+    assert results == [("밀려남", "", 50, True)]

@@ -9,7 +9,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
-from .exposure import compact_text, naver_search_url, same_search_query, strip_parenthetical
+from .exposure import compact_text, keywordstool_volume, naver_search_url, parse_qc_count, same_search_query, strip_parenthetical
 
 SEARCH_BOX_SELECTORS = (
     "#query",
@@ -54,6 +54,8 @@ class SeleniumNaverSearch:
         self.logger = logger
         self.timeout = timeout
         self._naver_handle: str | None = None
+        self._ads_handle: str | None = None
+        self._volume_unavailable = False
 
     def _driver(self):
         self._ensure_browser()
@@ -77,6 +79,8 @@ class SeleniumNaverSearch:
                     pass
                 self.browser.driver = None
                 self._naver_handle = None
+                self._ads_handle = None
+                self._volume_unavailable = False
         self.browser.start()
 
     def prepare_login(self, wait_seconds: float = 300) -> None:
@@ -88,6 +92,7 @@ class SeleniumNaverSearch:
             self.logger.info(
                 "네이버 로그인이 이미 되어 있습니다. 프로그램을 끄기 전까지 유지됩니다"
             )
+            self._open_keyword_tool_tab()
             return
         self.logger.info(
             "네이버에 한 번만 로그인하세요. 프로그램을 끄기 전까지 다시 묻지 않습니다"
@@ -97,6 +102,7 @@ class SeleniumNaverSearch:
         while time.time() < deadline:
             if self.is_logged_in():
                 self.logger.info("네이버 로그인을 확인했습니다. 이 크롬 창은 닫지 마세요")
+                self._open_keyword_tool_tab()
                 return
             time.sleep(1.2)
             if time.time() >= next_notice:
@@ -105,6 +111,7 @@ class SeleniumNaverSearch:
         self.logger.warning(
             "아직 로그인이 확인되지 않았습니다. 크롬에서 로그인하면 그때부터 유지됩니다"
         )
+        self._open_keyword_tool_tab()
 
     def require_login(self, wait_seconds: float = 90) -> None:
         self._driver()
@@ -158,6 +165,229 @@ class SeleniumNaverSearch:
             box.send_keys(Keys.ENTER)
         self._wait_for_integrated_results(driver, query)
         return driver.page_source
+
+    def lookup_search_volume(self, keyword: str) -> int | None:
+        if self._volume_unavailable:
+            return None
+        driver = self._driver()
+        naver = None
+        try:
+            naver = driver.current_window_handle
+        except Exception:
+            naver = self._naver_handle
+        try:
+            if not self._focus_keyword_tool(driver):
+                self._volume_unavailable = True
+                self.logger.warning(
+                    "검색광고 키워드 도구에 로그인하면 검색량을 채울 수 있습니다. 노출상태와 카페는 그대로 반영합니다"
+                )
+                return None
+            payload = self._fetch_keywordstool_json(driver, keyword)
+            volume = keywordstool_volume(payload or {}, keyword)
+            if volume is not None:
+                return volume
+            volume = self._scrape_keyword_tool(driver, keyword)
+            if volume is not None:
+                return volume
+            self.logger.warning("검색량을 찾지 못했습니다: %s", keyword)
+            return None
+        except Exception as exc:
+            self.logger.error("검색량 조회 실패 (%s): %s", keyword, exc)
+            return None
+        finally:
+            if naver:
+                try:
+                    driver.switch_to.window(naver)
+                except Exception:
+                    self._focus_naver_tab(driver)
+
+    def _open_keyword_tool_tab(self) -> None:
+        driver = self._driver()
+        try:
+            if self._existing_ads_handle(driver):
+                return
+            driver.switch_to.new_window("tab")
+            driver.get("https://manage.searchad.naver.com/")
+            self._ads_handle = driver.current_window_handle
+            self.logger.info(
+                "검색량 반영을 위해 검색광고 창을 열었습니다. 네이버 검색 로그인과 별도로, 이 탭에서 검색광고에도 로그인하세요"
+            )
+        except Exception as exc:
+            self.logger.warning("검색광고 창을 열지 못했습니다: %s", exc)
+        finally:
+            self._focus_naver_tab(driver)
+
+    def _existing_ads_handle(self, driver) -> str | None:
+        handles = list(driver.window_handles)
+        if self._ads_handle in handles:
+            return self._ads_handle
+        for handle in handles:
+            try:
+                driver.switch_to.window(handle)
+            except Exception:
+                continue
+            url = (driver.current_url or "").lower()
+            if "searchad.naver.com" in url:
+                self._ads_handle = handle
+                return handle
+        return None
+
+    def _ads_login_required(self, url: str) -> bool:
+        text = (url or "").lower()
+        if "nid.naver.com" in text or "nidlogin" in text:
+            return True
+        if "/login" in text:
+            return True
+        return False
+
+    def _focus_keyword_tool(self, driver) -> bool:
+        handle = self._existing_ads_handle(driver)
+        if not handle:
+            try:
+                driver.switch_to.new_window("tab")
+                driver.get("https://manage.searchad.naver.com/")
+                time.sleep(1.2)
+                self._ads_handle = driver.current_window_handle
+                handle = self._ads_handle
+            except Exception:
+                return False
+        else:
+            driver.switch_to.window(handle)
+        url = (driver.current_url or "").lower()
+        if self._ads_login_required(url):
+            return False
+        if "keyword" not in url and "planner" not in url:
+            for path in (
+                "https://manage.searchad.naver.com/tool/keyword-planner",
+                "https://searchad.naver.com/ncc/tool/keyword-planner",
+            ):
+                try:
+                    driver.get(path)
+                    time.sleep(1.2)
+                    url = (driver.current_url or "").lower()
+                    if self._ads_login_required(url):
+                        return False
+                    if "keyword" in url or "planner" in url or "searchad.naver.com" in url:
+                        break
+                except Exception:
+                    continue
+        return (
+            "searchad.naver.com" in (driver.current_url or "").lower()
+            and not self._ads_login_required(driver.current_url or "")
+        )
+
+    def _fetch_keywordstool_json(self, driver, keyword: str) -> dict | None:
+        script = """
+        const keyword = arguments[0];
+        const done = arguments[1];
+        const origin = location.origin;
+        const match = location.pathname.match(/customers\\/(\\d+)/);
+        const customerId = match ? match[1] : '';
+        const token = localStorage.getItem('nccToken')
+          || localStorage.getItem('token')
+          || sessionStorage.getItem('nccToken')
+          || '';
+        const urls = [
+          origin + '/keywordstool?hintKeywords=' + encodeURIComponent(keyword) + '&showDetail=1',
+          origin + '/ncc/keywordstool?hintKeywords=' + encodeURIComponent(keyword) + '&showDetail=1'
+        ];
+        if (customerId) {
+          urls.push(origin + '/customers/' + customerId + '/keywordstool?hintKeywords=' + encodeURIComponent(keyword) + '&showDetail=1');
+        }
+        const looksUseful = (data) => {
+          if (!data || typeof data !== 'object') return false;
+          if (data.keywordList || data.relKeywordList) return true;
+          if (data.data && (Array.isArray(data.data) || data.data.keywordList || data.data.relKeywordList)) return true;
+          return false;
+        };
+        (async () => {
+          for (const url of urls) {
+            try {
+              const headers = {Accept: 'application/json'};
+              if (token) {
+                headers.Authorization = token.indexOf('Bearer') === 0 ? token : ('Bearer ' + token);
+              }
+              const resp = await fetch(url, {credentials: 'include', headers});
+              if (!resp.ok) continue;
+              const data = await resp.json();
+              if (looksUseful(data)) {
+                done(data);
+                return;
+              }
+            } catch (e) {}
+          }
+          done(null);
+        })();
+        """
+        try:
+            driver.set_script_timeout(20)
+            payload = driver.execute_async_script(script, keyword)
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _scrape_keyword_tool(self, driver, keyword: str) -> int | None:
+        box = None
+        for selector in (
+            "textarea",
+            'input[placeholder*="키워드"]',
+            'input[type="text"]',
+            '[contenteditable="true"]',
+        ):
+            for element in driver.find_elements(By.CSS_SELECTOR, selector):
+                try:
+                    if element.is_displayed():
+                        box = element
+                        break
+                except Exception:
+                    continue
+            if box:
+                break
+        if box is None:
+            return None
+        box.click()
+        box.send_keys(Keys.CONTROL, "a")
+        box.send_keys(Keys.BACKSPACE)
+        box.send_keys(keyword)
+        clicked = False
+        for element in driver.find_elements(By.CSS_SELECTOR, "button, a.btn, input[type='button']"):
+            label = (element.text or element.get_attribute("value") or "").replace(" ", "")
+            if "조회" in label or "검색" in label:
+                try:
+                    if element.is_displayed():
+                        element.click()
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+        if not clicked:
+            box.send_keys(Keys.ENTER)
+        time.sleep(1.8)
+        return self._volume_from_keyword_table(driver, keyword)
+
+    def _volume_from_keyword_table(self, driver, keyword: str) -> int | None:
+        want = compact_text(keyword)
+        rows = driver.find_elements(By.CSS_SELECTOR, "tr, [role='row']")
+        for row in rows:
+            cells = [
+                cell.text.strip()
+                for cell in row.find_elements(By.CSS_SELECTOR, "th,td,[role='cell'],[role='gridcell']")
+            ]
+            if not cells:
+                cells = [part.strip() for part in (row.text or "").split("\n") if part.strip()]
+            if len(cells) < 2:
+                continue
+            names = [compact_text(cell.split("\n")[0]) for cell in cells]
+            if want not in names:
+                continue
+            start = names.index(want) + 1
+            numbers = [
+                parse_qc_count(cell.split("\n")[-1]) for cell in cells[start:]
+            ]
+            numbers = [item for item in numbers if item is not None]
+            if numbers:
+                return sum(numbers[:2])
+        return None
 
     def open_post_text(self, url: str) -> str:
         driver = self._driver()

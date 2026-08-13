@@ -10,8 +10,10 @@ from .exposure import (
     DEFAULT_BRAND_MARKERS,
     DEFAULT_CAFE_NAMES,
     ExposureChecker,
+    match_selected_rows,
     parse_brands,
     parse_cafes,
+    parse_keyword_lines,
 )
 from .exposure_naver import SeleniumNaverSearch
 from .exposure_notion import NotionError, NotionExposureStore
@@ -32,6 +34,8 @@ class ExposureApp(AutomationApp):
             messagebox.showerror("중복 실행", str(exc))
             self.destroy()
             raise SystemExit(1) from exc
+        self.geometry("960x860")
+        self.minsize(880, 740)
         self._load_settings()
 
     def _settings_path(self) -> Path:
@@ -73,20 +77,21 @@ class ExposureApp(AutomationApp):
         self.brands = tk.StringVar(value=", ".join(DEFAULT_BRAND_MARKERS))
         self.dry_run = tk.BooleanVar(value=True)
         self.progress_text = tk.StringVar(value="대기 중")
+        self.selected_count = tk.StringVar(value="0개 키워드")
         self.pause_event = threading.Event()
 
     def _build_ui(self) -> None:
         outer = ttk.Frame(self, padding=16)
         outer.pack(fill=tk.BOTH, expand=True)
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(9, weight=1)
+        outer.rowconfigure(10, weight=1)
 
         ttk.Label(outer, text=self.app_name, font=("", 18, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
         )
         ttk.Label(
             outer,
-            text="네이버는 한 번만 로그인하면 됩니다. 프로그램을 끄기 전까지 유지됩니다. 크롬 창은 닫지 마세요.",
+            text="네이버 검색은 한 번만 로그인하면 됩니다. 검색량을 채우려면 검색광고 탭에도 로그인하세요. 크롬 창은 닫지 마세요.",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
         self._entry_row(outer, 2, "노션 연결키", self.notion_token, show="*")
@@ -99,8 +104,34 @@ class ExposureApp(AutomationApp):
             text="연결키는 노션 설정 → 연결에 만든 암호입니다. 데이터베이스에 그 연결을 초대해 주세요.",
         ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
+        select_frame = ttk.LabelFrame(outer, text="선택 조회", padding=8)
+        select_frame.grid(row=7, column=0, columnspan=3, sticky="nsew", pady=(0, 8))
+        select_frame.columnconfigure(0, weight=1)
+        ttk.Label(
+            select_frame,
+            text="키워드 여러 개, 줄바꿈으로 붙여 넣기. 괄호 안은 빼고, 노션에 있는 키워드만 검사합니다. 검색량도 함께 반영합니다.",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        self.keyword_text = tk.Text(select_frame, height=7, wrap="word")
+        self.keyword_text.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        self.keyword_text.bind("<KeyRelease>", self._refresh_selected_count)
+        hint_row = ttk.Frame(select_frame)
+        hint_row.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 6))
+        ttk.Label(hint_row, text="빈 줄은 자동으로 무시됩니다.").pack(side=tk.LEFT)
+        ttk.Label(hint_row, textvariable=self.selected_count).pack(side=tk.RIGHT)
+        select_actions = ttk.Frame(select_frame)
+        select_actions.grid(row=3, column=0, columnspan=2, sticky="w")
+        self.selected_button = ttk.Button(
+            select_actions,
+            text="선택 키워드 검사",
+            command=self._start_selected,
+        )
+        self.selected_button.pack(side=tk.LEFT)
+        ttk.Button(select_actions, text="지우기", command=self._clear_selected).pack(
+            side=tk.LEFT, padx=6
+        )
+
         actions = ttk.Frame(outer)
-        actions.grid(row=7, column=0, columnspan=3, sticky="ew", pady=8)
+        actions.grid(row=8, column=0, columnspan=3, sticky="ew", pady=8)
         ttk.Checkbutton(
             actions,
             text="검증 모드(노션에 쓰지 않음)",
@@ -113,7 +144,7 @@ class ExposureApp(AutomationApp):
             side=tk.LEFT, padx=6
         )
         self.start_button = ttk.Button(
-            actions, text="3. 노출 검사 시작", command=self._start
+            actions, text="3. 전체 조회 시작", command=self._start
         )
         self.start_button.pack(side=tk.LEFT)
         self.pause_button = ttk.Button(
@@ -135,7 +166,7 @@ class ExposureApp(AutomationApp):
         ).pack(side=tk.RIGHT)
 
         progress_frame = ttk.Frame(outer)
-        progress_frame.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        progress_frame.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         progress_frame.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_frame, maximum=100)
         self.progress.grid(row=0, column=0, sticky="ew")
@@ -144,7 +175,7 @@ class ExposureApp(AutomationApp):
         )
 
         log_frame = ttk.LabelFrame(outer, text="실시간 로그", padding=8)
-        log_frame.grid(row=9, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=10, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state=tk.DISABLED)
@@ -194,7 +225,25 @@ class ExposureApp(AutomationApp):
 
         self._run_background(work)
 
+    def _refresh_selected_count(self, _event=None) -> None:
+        count = len(parse_keyword_lines(self.keyword_text.get("1.0", tk.END)))
+        self.selected_count.set(f"{count}개 키워드")
+
+    def _clear_selected(self) -> None:
+        self.keyword_text.delete("1.0", tk.END)
+        self._refresh_selected_count()
+
     def _start(self) -> None:
+        self._begin_check(selected_only=False)
+
+    def _start_selected(self) -> None:
+        selected = parse_keyword_lines(self.keyword_text.get("1.0", tk.END))
+        if not selected:
+            messagebox.showerror("입력 오류", "검사할 키워드를 한 줄에 하나씩 넣어 주세요")
+            return
+        self._begin_check(selected_only=True, selected=selected)
+
+    def _begin_check(self, *, selected_only: bool, selected: list[str] | None = None) -> None:
         if self.worker and not self.worker.done():
             return
         try:
@@ -208,18 +257,19 @@ class ExposureApp(AutomationApp):
         if dry_run:
             if not messagebox.askyesno(
                 "검증 모드",
-                "검증 모드입니다. 네이버만 확인하고 노션 노출상태는 바꾸지 않습니다. 계속할까요?",
+                "검증 모드입니다. 네이버만 확인하고 노션은 바꾸지 않습니다. 계속할까요?",
             ):
                 return
         elif not messagebox.askyesno(
             "실제 반영",
-            "검증 모드가 꺼져 있습니다. 검색 결과에 따라 노션 노출상태를 바꿀까요?",
+            "검증 모드가 꺼져 있습니다. 검색 결과에 따라 노션 노출상태, 카페/ID, 검색량을 바꿀까요?",
         ):
             return
         self._save_settings()
         self.stop_event.clear()
         self.pause_event.clear()
         self.start_button.configure(state=tk.DISABLED)
+        self.selected_button.configure(state=tk.DISABLED)
         self.pause_button.configure(state=tk.NORMAL)
         self.resume_button.configure(state=tk.DISABLED)
         self.stop_button.configure(state=tk.NORMAL)
@@ -229,6 +279,18 @@ class ExposureApp(AutomationApp):
         def work() -> None:
             try:
                 rows = store.load_rows()
+                if selected_only:
+                    rows, missing = match_selected_rows(rows, selected or [])
+                    for keyword in missing:
+                        self.logger.warning("노션에 없는 키워드라 건너뜁니다: %s", keyword)
+                    if not rows:
+                        self.ui_queue.put(
+                            ("error", ("선택 조회", "노션에서 맞는 키워드를 찾지 못했습니다"))
+                        )
+                        return
+                    self.logger.info("선택 조회 %s건을 검사합니다", len(rows))
+                else:
+                    self.logger.info("전체 조회 %s건을 검사합니다", len(rows))
                 naver = self._naver()
                 naver.require_login()
                 checker = ExposureChecker(
@@ -249,14 +311,15 @@ class ExposureApp(AutomationApp):
                     self.ui_queue.put(
                         (
                             "info",
-                            ("검사 중지", "중지했습니다. 다시 시작하려면 노출 검사 시작을 누르세요"),
+                            ("검사 중지", "중지했습니다. 이어서 보려면 다시 시작을 누르세요"),
                         )
                     )
                 else:
+                    label = "선택 조회" if selected_only else "전체 조회"
                     self.ui_queue.put(
                         (
                             "info",
-                            ("검사 종료", f"키워드 {len(rows)}건 검사를 마쳤습니다"),
+                            ("검사 종료", f"{label} {len(rows)}건 검사를 마쳤습니다"),
                         )
                     )
             except Exception as exc:
@@ -293,6 +356,7 @@ class ExposureApp(AutomationApp):
 
     def _worker_finished(self) -> None:
         super()._worker_finished()
+        self.selected_button.configure(state=tk.NORMAL)
         self.pause_button.configure(state=tk.DISABLED)
         self.resume_button.configure(state=tk.DISABLED)
         self.pause_event.clear()

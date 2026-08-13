@@ -8,11 +8,15 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .exposure import (
+    CAFE_HEADERS,
+    EXPOSED_VOLUME_HEADERS,
     ExposureRow,
     KEYWORD_HEADERS,
     POST_URL_HEADERS,
     SEARCH_URL_HEADERS,
+    STATUS_EXPOSED,
     STATUS_HEADERS,
+    VOLUME_HEADERS,
 )
 
 NOTION_VERSION = "2022-06-28"
@@ -60,13 +64,22 @@ def _plain_text(property_value: dict[str, Any] | None) -> str:
     if kind == "formula":
         formula = property_value.get("formula") or {}
         return str(formula.get("string") or formula.get("url") or "")
+    if kind == "number":
+        number = property_value.get("number")
+        if number is None:
+            return ""
+        return str(int(number) if float(number).is_integer() else number)
     return ""
 
 
+def _norm_header(name: str) -> str:
+    return (name or "").replace(" ", "").replace("#", "")
+
+
 def _find_property(schema: dict[str, Any], names: tuple[str, ...]) -> tuple[str, str]:
-    wanted = {name.replace(" ", "") for name in names}
+    wanted = {_norm_header(name) for name in names}
     for name, spec in schema.items():
-        if name.replace(" ", "") in wanted:
+        if _norm_header(name) in wanted:
             return name, str(spec.get("type") or "")
     raise NotionError("노션에서 열을 찾지 못했습니다: " + ", ".join(names))
 
@@ -89,6 +102,12 @@ class NotionExposureStore:
         self._status_type = ""
         self._search_url_name = ""
         self._post_url_name = ""
+        self._cafe_name = ""
+        self._cafe_type = ""
+        self._volume_name = ""
+        self._volume_type = ""
+        self._exposed_volume_name = ""
+        self._exposed_volume_type = ""
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         if not self.token:
@@ -129,9 +148,20 @@ class NotionExposureStore:
                 self._post_url_name, _post_type = _find_property(self._schema, POST_URL_HEADERS)
             except NotionError:
                 self._post_url_name = ""
+            self._cafe_name, self._cafe_type = self._optional_property(CAFE_HEADERS)
+            self._volume_name, self._volume_type = self._optional_property(VOLUME_HEADERS)
+            self._exposed_volume_name, self._exposed_volume_type = self._optional_property(
+                EXPOSED_VOLUME_HEADERS
+            )
             if self._status_type not in {"status", "select"}:
                 raise NotionError("노출상태 열은 선택형 또는 상태형이어야 합니다")
         return self._schema
+
+    def _optional_property(self, names: tuple[str, ...]) -> tuple[str, str]:
+        try:
+            return _find_property(self._schema or {}, names)
+        except NotionError:
+            return "", ""
 
     def load_rows(self) -> list[ExposureRow]:
         self.load_schema()
@@ -166,6 +196,17 @@ class NotionExposureStore:
                         current_status=_plain_text(properties.get(self._status_name)).strip(),
                         status_property=self._status_name,
                         status_type=self._status_type,
+                        current_cafe=(
+                            _plain_text(properties.get(self._cafe_name)).strip()
+                            if self._cafe_name
+                            else ""
+                        ),
+                        cafe_property=self._cafe_name,
+                        cafe_type=self._cafe_type,
+                        volume_property=self._volume_name,
+                        volume_type=self._volume_type,
+                        exposed_volume_property=self._exposed_volume_name,
+                        exposed_volume_type=self._exposed_volume_type,
                     )
                 )
             if not data.get("has_more"):
@@ -183,3 +224,55 @@ class NotionExposureStore:
             f"/pages/{row.page_id}",
             {"properties": {row.status_property: {key: {"name": status}}}},
         )
+
+    def update_check_result(
+        self,
+        row: ExposureRow,
+        *,
+        status: str,
+        cafe_name: str = "",
+        search_volume: int | None = None,
+        volume_found: bool = False,
+    ) -> None:
+        key = "status" if row.status_type == "status" else "select"
+        properties: dict[str, Any] = {row.status_property: {key: {"name": status}}}
+        if row.cafe_property:
+            written = self._writable_value(row.cafe_type, cafe_name)
+            if written is not None:
+                properties[row.cafe_property] = written
+        if volume_found and row.volume_property:
+            written = self._writable_value(row.volume_type, search_volume)
+            if written is not None:
+                properties[row.volume_property] = written
+        if row.exposed_volume_property:
+            if status == STATUS_EXPOSED and volume_found:
+                written_exposed = self._writable_value(
+                    row.exposed_volume_type, search_volume
+                )
+            elif status != STATUS_EXPOSED:
+                written_exposed = self._writable_value(row.exposed_volume_type, None)
+            else:
+                written_exposed = None
+            if written_exposed is not None:
+                properties[row.exposed_volume_property] = written_exposed
+        self._request("PATCH", f"/pages/{row.page_id}", {"properties": properties})
+
+    def _writable_value(self, kind: str, value: Any) -> dict[str, Any] | None:
+        if kind == "number":
+            if value in ("", None):
+                return {"number": None}
+            return {"number": int(value)}
+        if kind == "rich_text":
+            if value in ("", None):
+                return {"rich_text": []}
+            return {"rich_text": [{"text": {"content": str(value)}}]}
+        if kind == "title":
+            if value in ("", None):
+                return {"title": []}
+            return {"title": [{"text": {"content": str(value)}}]}
+        if kind == "select":
+            if value in ("", None):
+                return {"select": None}
+            return {"select": {"name": str(value)}}
+        self.logger.warning("노션 열 형식이 달라 값을 쓰지 않습니다: %s", kind)
+        return None

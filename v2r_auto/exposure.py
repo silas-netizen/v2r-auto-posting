@@ -29,6 +29,9 @@ KEYWORD_HEADERS = ("키워드",)
 STATUS_HEADERS = ("노출상태", "노출 상태")
 SEARCH_URL_HEADERS = ("통합검색", "통합 검색")
 POST_URL_HEADERS = ("작성 글", "작성글", "작성 글 링크", "작성글링크")
+CAFE_HEADERS = ("카페/ID", "카페 / ID", "카페ID")
+VOLUME_HEADERS = ("키워드 검색량", "#키워드검색량", "# 키워드 검색량")
+EXPOSED_VOLUME_HEADERS = ("노출된 검색량", "#노출된검색량", "# 노출된 검색량", "노출 검색량")
 _ANCHOR_RE = re.compile(
     r'(?is)<a\b[^>]*\bhref=["\']([^"\']+)["\'][^>]*>(.*?)</a>'
 )
@@ -43,6 +46,13 @@ class ExposureRow:
     current_status: str
     status_property: str
     status_type: str
+    current_cafe: str = ""
+    cafe_property: str = ""
+    cafe_type: str = ""
+    volume_property: str = ""
+    volume_type: str = ""
+    exposed_volume_property: str = ""
+    exposed_volume_type: str = ""
 
 
 @dataclass(slots=True)
@@ -67,6 +77,110 @@ def strip_parenthetical(keyword: str) -> str:
     text = keyword or ""
     text = re.sub(r"[\(（][^)\）]*[\)）]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
+
+
+def parse_keyword_lines(text: str) -> list[str]:
+    keywords: list[str] = []
+    seen: set[str] = set()
+    for line in (text or "").splitlines():
+        keyword = strip_parenthetical(line).strip()
+        key = compact_text(keyword)
+        if not keyword or key in seen:
+            continue
+        seen.add(key)
+        keywords.append(keyword)
+    return keywords
+
+
+def match_selected_rows(
+    rows: list[ExposureRow], selected: list[str]
+) -> tuple[list[ExposureRow], list[str]]:
+    grouped: dict[str, list[ExposureRow]] = {}
+    for row in rows:
+        grouped.setdefault(compact_text(strip_parenthetical(row.keyword)), []).append(row)
+    matched: list[ExposureRow] = []
+    missing: list[str] = []
+    used: set[str] = set()
+    for keyword in selected:
+        found = grouped.get(compact_text(keyword), [])
+        if not found:
+            missing.append(keyword)
+            continue
+        for row in found:
+            if row.page_id in used:
+                continue
+            matched.append(row)
+            used.add(row.page_id)
+    return matched, missing
+
+
+def preserve_cafe_id(current: str, cafe_name: str) -> str:
+    cafe = (cafe_name or "").strip()
+    if not cafe:
+        return ""
+    existing = (current or "").strip()
+    if existing and compact_text(existing).startswith(compact_text(cafe)):
+        return existing
+    return cafe
+
+
+def parse_qc_count(value) -> int | None:
+    text = str(value or "").replace(",", "").replace(" ", "")
+    if not text:
+        return None
+    folded = text.casefold()
+    if folded in {"<10", "< 10"} or folded.startswith("<10") or "미만" in text:
+        return 10
+    try:
+        number = float(text)
+    except ValueError:
+        return None
+    return int(number)
+
+
+def keywordstool_volume(payload: dict, keyword: str) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    items = (
+        payload.get("keywordList")
+        or payload.get("relKeywordList")
+        or payload.get("data")
+        or []
+    )
+    if isinstance(items, dict):
+        items = (
+            items.get("keywordList")
+            or items.get("relKeywordList")
+            or []
+        )
+    if not isinstance(items, list):
+        return None
+    want = compact_text(keyword)
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(
+            item.get("relKeyword")
+            or item.get("keyword")
+            or item.get("hintKeyword")
+            or ""
+        )
+        if compact_text(name) != want:
+            continue
+        pc = parse_qc_count(
+            item.get("monthlyPcQcCnt")
+            or item.get("monthlyPcQcCount")
+            or item.get("pcQcCnt")
+        )
+        mobile = parse_qc_count(
+            item.get("monthlyMobileQcCnt")
+            or item.get("monthlyMobileQcCount")
+            or item.get("mobileQcCnt")
+        )
+        if pc is None and mobile is None:
+            return None
+        return (pc or 0) + (mobile or 0)
+    return None
 
 
 def parse_name_list(value: str, defaults: tuple[str, ...]) -> list[str]:
@@ -329,6 +443,8 @@ class ExposureChecker:
             self.logger.error("네이버 검색 실패 (%s): %s", keyword, exc)
             return
         hits = collect_our_cafe_hits(html, self.cafe_names)
+        cafe_name = ""
+        status = STATUS_HIDDEN
         if not hits:
             named = matching_cafe_name(_strip_tags(html), self.cafe_names)
             if named:
@@ -339,46 +455,84 @@ class ExposureChecker:
                 )
             else:
                 self.logger.info("밀려남: %s / 통합검색에 우리 카페 없음", keyword)
-            self._apply_status(row, STATUS_HIDDEN, dry_run)
-            return
-        names = ", ".join(hit.cafe_name for hit in hits)
-        self.logger.info("우리 카페 글 %s건: %s", len(hits), names)
-        matched = ""
-        for hit in hits:
+        else:
+            names = ", ".join(hit.cafe_name for hit in hits)
+            self.logger.info("우리 카페 글 %s건: %s", len(hits), names)
+            matched = ""
+            for hit in hits:
+                try:
+                    post_text = self.naver.open_post_text(hit.url)
+                except Exception as exc:
+                    self.logger.error("카페 글 열기 실패 (%s): %s", hit.url, exc)
+                    continue
+                matched = brand_found(post_text, self.brands)
+                if matched:
+                    cafe_name = hit.cafe_name
+                    status = STATUS_EXPOSED
+                    self.logger.info(
+                        "노출완: %s / %s 글에서 식별어 %s",
+                        keyword,
+                        hit.cafe_name,
+                        matched,
+                    )
+                    break
+            if status != STATUS_EXPOSED:
+                self.logger.info("밀려남: %s / 우리 카페 글에 브랜드 식별어 없음", keyword)
+        volume = None
+        volume_found = False
+        lookup = getattr(self.naver, "lookup_search_volume", None)
+        if callable(lookup):
             try:
-                post_text = self.naver.open_post_text(hit.url)
+                volume = lookup(keyword)
+                volume_found = volume is not None
+                if volume_found:
+                    self.logger.info("키워드 검색량: %s = %s", keyword, volume)
             except Exception as exc:
-                self.logger.error("카페 글 열기 실패 (%s): %s", hit.url, exc)
-                continue
-            matched = brand_found(post_text, self.brands)
-            if matched:
-                self.logger.info(
-                    "노출완: %s / %s 글에서 식별어 %s",
-                    keyword,
-                    hit.cafe_name,
-                    matched,
-                )
-                break
-        if not matched:
-            self.logger.info("밀려남: %s / 우리 카페 글에 브랜드 식별어 없음", keyword)
-            self._apply_status(row, STATUS_HIDDEN, dry_run)
-            return
-        self._apply_status(row, STATUS_EXPOSED, dry_run)
+                self.logger.error("검색량 조회 실패 (%s): %s", keyword, exc)
+        self._write_result(
+            row,
+            status,
+            cafe_name,
+            volume,
+            volume_found,
+            dry_run,
+        )
 
-    def _apply_status(self, row: ExposureRow, new_status: str, dry_run: bool) -> None:
-        if row.current_status == new_status:
-            self.logger.info("상태 유지: %s", new_status)
-            return
+    def _write_result(
+        self,
+        row: ExposureRow,
+        status: str,
+        cafe_name: str,
+        volume: int | None,
+        volume_found: bool,
+        dry_run: bool,
+    ) -> None:
+        cafe_value = preserve_cafe_id(row.current_cafe, cafe_name) if cafe_name else ""
         if dry_run:
             self.logger.info(
-                "검증 모드: %s → %s (노션에 쓰지 않음)",
+                "검증 모드: %s → %s / 카페 %s / 검색량 %s (노션에 쓰지 않음)",
                 row.current_status or "(비어 있음)",
-                new_status,
+                status,
+                cafe_value or "(비움)",
+                volume if volume_found else "(조회 안 됨)",
             )
             return
-        self.notion.update_status(row, new_status)
-        row.current_status = new_status
-        self.logger.info("노션 노출상태 변경: %s → %s", row.keyword, new_status)
+        if hasattr(self.notion, "update_check_result"):
+            self.notion.update_check_result(
+                row,
+                status=status,
+                cafe_name=cafe_value,
+                search_volume=volume,
+                volume_found=volume_found,
+            )
+        elif row.current_status != status:
+            self.notion.update_status(row, status)
+        if row.current_status != status:
+            self.logger.info("노션 노출상태 변경: %s → %s", row.keyword, status)
+        else:
+            self.logger.info("상태 유지: %s", status)
+        row.current_status = status
+        row.current_cafe = cafe_value
 
 
 def dump_rows_preview(rows: list[ExposureRow]) -> str:
