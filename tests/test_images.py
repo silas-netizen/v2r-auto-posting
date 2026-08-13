@@ -129,7 +129,8 @@ def test_resolved_image_upload_failure_stops_text_only_publication(
     image_path.write_bytes(b"image")
 
     class FakeBrowser:
-        def upload_affiliate_images(self, job, menu_name, image_paths):
+        def upload_affiliate_images(self, job, destination, image_paths):
+            assert destination["menu_id"] == 14
             return [{}]
 
     class FakeResolver:
@@ -148,4 +149,13 @@ def test_resolved_image_upload_failure_stops_text_only_publication(
     publisher.image_resolver = FakeResolver()
 
     with pytest.raises(AffiliateApiError, match="사진 첨부에 실패"):
-        publisher._prepare_revision_content(job, {"menu_name": "게시판"})
+        publisher._prepare_revision_content(
+            job,
+            {
+                "cafe_id": 22788814,
+                "cafe_name": "양평 맘`s 전원 Story",
+                "naver_login_id": "writer",
+                "menu_id": 14,
+                "menu_name": "게시판",
+            },
+        )

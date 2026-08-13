@@ -100,6 +100,7 @@ def test_image_editor_is_prepared_in_visible_form_order() -> None:
 
     browser = object.__new__(ImageBrowser)
     browser.driver = FakeDriver()
+    browser.logger = __import__("logging").getLogger("test")
     job = AffiliateJob(
         row_number=2,
         keyword="요즘 그릭요거트",
@@ -114,12 +115,19 @@ def test_image_editor_is_prepared_in_visible_form_order() -> None:
         account="yun661021",
         article_type="후기형",
     )
+    destination = {
+        "cafe_id": 26616683,
+        "cafe_name": "러브 인썸 (Love in Some)",
+        "naver_login_id": "yun661021",
+        "menu_id": 9,
+        "menu_name": "뷰티&미용",
+    }
 
-    browser._prepare_seone_image_editor(job, "뷰티&미용")
+    browser._prepare_seone_image_editor(job, destination)
 
     assert calls[:6] == [
         ("open", ""),
-        ("카페", "러브인썸"),
+        ("카페", "러브 인썸 (Love in Some)"),
         ("계정", "yun661021"),
         ("게시판", "뷰티&미용"),
         ("제목", "그릭요거트 테스트"),
@@ -154,8 +162,9 @@ def test_image_upload_clicks_photo_button_then_selects_local_file(
         def wait(self):
             return FakeWait()
 
-        def _prepare_seone_image_editor(self, job, menu_name: str) -> None:
+        def _prepare_seone_image_editor(self, job, destination: dict) -> None:
             state["prepared"] = True
+            state["menu_id"] = destination["menu_id"]
 
         def _get_seone_document(self) -> dict:
             components = [component] if state["selected"] else []
@@ -183,10 +192,18 @@ def test_image_upload_clicks_photo_button_then_selects_local_file(
         account="yun661021",
         article_type="후기형",
     )
+    destination = {
+        "cafe_id": 26616683,
+        "cafe_name": "러브 인썸 (Love in Some)",
+        "naver_login_id": "yun661021",
+        "menu_id": 9,
+        "menu_name": "뷰티&미용",
+    }
 
-    uploaded = browser._upload_one_seone_image(job, "뷰티&미용", image_path)
+    uploaded = browser._upload_one_seone_image(job, destination, image_path)
 
     assert state["prepared"] is True
+    assert state["menu_id"] == 9
     assert state["clicked"] is True
     assert state["selected"] == str(image_path.resolve())
     assert uploaded == component

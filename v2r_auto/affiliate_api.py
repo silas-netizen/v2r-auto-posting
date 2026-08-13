@@ -932,7 +932,7 @@ class AffiliateApiPublisher:
         try:
             uploaded = self.browser.upload_affiliate_images(
                 job,
-                str(destination["menu_name"]),
+                destination,
                 [item.local_path for item in resolved],
             )
         except Exception as exc:

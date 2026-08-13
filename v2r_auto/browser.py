@@ -1097,13 +1097,22 @@ class V2RBrowser:
     def _prepare_seone_image_editor(
         self,
         job: AffiliateJob,
-        menu_name: str,
+        destination: dict,
     ) -> None:
-        """Prepare the visible SE-ONE form before using its photo toolbar."""
+        """Prepare SE-ONE with the exact destination already resolved by the API."""
         assert self.driver
+        cafe_name = str(destination["cafe_name"])
+        account = str(destination["naver_login_id"])
+        menu_name = str(destination["menu_name"])
+        self.logger.info(
+            "행 %s API 목적지로 사진 화면 준비: 카페 %s / 게시판 %s",
+            job.row_number,
+            destination.get("cafe_id"),
+            destination.get("menu_id"),
+        )
         self.open_se_one_writer()
-        self._select_option("카페", job.cafe)
-        self._select_option("계정", job.account)
+        self._select_option("카페", cafe_name)
+        self._select_option("계정", account)
         self._select_option("게시판", menu_name)
         self._fill_input(
             "제목",
@@ -1175,11 +1184,11 @@ class V2RBrowser:
     def _upload_one_seone_image(
         self,
         job: AffiliateJob,
-        menu_name: str,
+        destination: dict,
         image_path: Path,
     ) -> dict:
         assert self.driver
-        self._prepare_seone_image_editor(job, menu_name)
+        self._prepare_seone_image_editor(job, destination)
         existing_media_count = len(
             self._media_components(self._get_seone_document())
         )
@@ -1207,7 +1216,7 @@ class V2RBrowser:
     def upload_affiliate_images(
         self,
         job: AffiliateJob,
-        menu_name: str,
+        destination: dict,
         image_paths: list[Path],
     ) -> list[dict]:
         """Upload through V2R's SmartEditor, while article submission stays API-based."""
@@ -1222,7 +1231,7 @@ class V2RBrowser:
             )
             try:
                 uploaded.append(
-                    self._upload_one_seone_image(job, menu_name, image_path)
+                    self._upload_one_seone_image(job, destination, image_path)
                 )
             except Exception as exc:
                 self.logger.warning(
