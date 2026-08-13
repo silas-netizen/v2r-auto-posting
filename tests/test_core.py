@@ -262,6 +262,79 @@ def test_image_editor_retries_whole_setup_when_account_is_not_ready(
     assert state["opened"] == 2
 
 
+def test_fill_editor_uses_visible_smarteditor_paragraph(monkeypatch) -> None:
+    state = {"target": None, "keys": [], "default_content": False}
+
+    class FakeParagraph:
+        tag_name = "p"
+        rect = {"width": 800, "height": 24, "x": 454, "y": 562}
+
+        def is_displayed(self) -> bool:
+            return True
+
+        def get_attribute(self, name: str):
+            return ""
+
+    paragraph = FakeParagraph()
+
+    class FakeSwitchTo:
+        def default_content(self) -> None:
+            state["default_content"] = True
+
+    class FakeDriver:
+        switch_to = FakeSwitchTo()
+
+        def find_elements(self, by, selector):
+            if selector == ".se-module-text .se-text-paragraph":
+                return [paragraph]
+            return []
+
+    class FakeWait:
+        def until(self, condition):
+            return condition(browser.driver)
+
+    class FakeActions:
+        def __init__(self, driver):
+            return None
+
+        def move_to_element(self, element):
+            state["target"] = element
+            return self
+
+        def click(self):
+            return self
+
+        def key_down(self, key):
+            state["keys"].append(("down", key))
+            return self
+
+        def send_keys(self, value):
+            state["keys"].append(("text", value))
+            return self
+
+        def key_up(self, key):
+            state["keys"].append(("up", key))
+            return self
+
+        def perform(self):
+            return None
+
+    class EditorBrowser(V2RBrowser):
+        @property
+        def wait(self):
+            return FakeWait()
+
+    monkeypatch.setattr("v2r_auto.browser.ActionChains", FakeActions)
+    browser = object.__new__(EditorBrowser)
+    browser.driver = FakeDriver()
+
+    browser._fill_editor("첫 줄\n둘째 줄")
+
+    assert state["target"] is paragraph
+    assert ("text", "첫 줄\n둘째 줄") in state["keys"]
+    assert state["default_content"] is True
+
+
 def test_multiple_images_share_one_prepared_se_one_editor(
     tmp_path: Path,
 ) -> None:

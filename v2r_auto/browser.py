@@ -725,12 +725,30 @@ class V2RBrowser:
     def _fill_editor(self, body: str) -> None:
         assert self.driver
         def visible_editor():
+            native_paragraphs = [
+                element
+                for element in self.driver.find_elements(
+                    By.CSS_SELECTOR,
+                    ".se-module-text .se-text-paragraph",
+                )
+                if element.is_displayed()
+                and element.rect.get("width", 0) > 20
+                and element.rect.get("height", 0) > 10
+                and element.rect.get("x", -1) >= 0
+                and element.rect.get("y", -1) >= 0
+            ]
+            if native_paragraphs:
+                return native_paragraphs[0]
             smart_editor_iframes = [
                 element
                 for element in self.driver.find_elements(
                     By.CSS_SELECTOR, "iframe[title*='스마트 에디터']"
                 )
                 if element.is_displayed()
+                and element.rect.get("width", 0) > 20
+                and element.rect.get("height", 0) > 10
+                and element.rect.get("x", -1) >= 0
+                and element.rect.get("y", -1) >= 0
             ]
             editors = smart_editor_iframes or [
                 element
@@ -743,6 +761,10 @@ class V2RBrowser:
                 )
                 if element.is_displayed()
                 and element.get_attribute("title") != "Channel chat"
+                and element.rect.get("width", 0) > 20
+                and element.rect.get("height", 0) > 10
+                and element.rect.get("x", -1) >= 0
+                and element.rect.get("y", -1) >= 0
             ]
             return editors[0] if editors else False
 
@@ -756,9 +778,10 @@ class V2RBrowser:
                 editor = self.wait.until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "body"))
                 )
-            editor.click()
-            editor.send_keys(Keys.CONTROL, "a")
-            editor.send_keys(body)
+            actions = ActionChains(self.driver)
+            actions.move_to_element(editor).click()
+            actions.key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL)
+            actions.send_keys(body).perform()
         finally:
             self.driver.switch_to.default_content()
 
