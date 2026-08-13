@@ -43,3 +43,4 @@ jobs:
             dist/V2R-Immediate-Posting.exe
             dist/V2R-Exposure-Checker.exe
           if-no-files-found: error
+          retention-days: 1
