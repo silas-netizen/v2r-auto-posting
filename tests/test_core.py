@@ -416,6 +416,9 @@ def test_multiple_images_share_one_prepared_se_one_editor(
         def _focus_seone_text_paragraph(self) -> None:
             state["focused"] += 1
 
+        def _wait_for_seone_idle(self) -> None:
+            return None
+
         def _seone_photo_button(self):
             return object()
 

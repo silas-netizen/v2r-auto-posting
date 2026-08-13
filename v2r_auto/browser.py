@@ -749,6 +749,25 @@ class V2RBrowser:
             ) from exc
         ActionChains(self.driver).move_to_element(paragraphs[-1]).click().perform()
 
+    def _wait_for_seone_idle(self) -> None:
+        assert self.driver
+        try:
+            self.wait.until(
+                lambda driver: driver.execute_script(
+                    """
+                    const editor = window.SmartEditor &&
+                        window.SmartEditor.getEditor('cafepc001');
+                    return editor &&
+                        typeof editor.isDocumentProcessing === 'function' &&
+                        !editor.isDocumentProcessing();
+                    """
+                )
+            )
+        except TimeoutException as exc:
+            raise AutomationError(
+                "SmartEditor 사진 처리가 끝나지 않았습니다"
+            ) from exc
+
     def _fill_editor(self, body: str) -> None:
         assert self.driver
         def visible_editor():
@@ -1379,6 +1398,7 @@ class V2RBrowser:
             self._media_components(self._get_seone_document())
         )
 
+        self._wait_for_seone_idle()
         self._focus_seone_text_paragraph()
         button = self._seone_photo_button()
         inputs = self._seone_image_inputs()
@@ -1416,6 +1436,7 @@ class V2RBrowser:
             try:
                 media = self._media_components(self._get_seone_document())
                 if len(media) > existing_media_count:
+                    self._wait_for_seone_idle()
                     return media[-1]
             except AutomationError:
                 pass
