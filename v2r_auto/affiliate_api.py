@@ -936,12 +936,22 @@ class AffiliateApiPublisher:
                 [item.local_path for item in resolved],
             )
         except Exception as exc:
-            self.logger.warning(
-                "행 %s 이미지 업로드 실패로 이미지 없이 계속 발행: %s",
-                job.row_number,
-                exc,
+            raise AffiliateApiError(
+                f"사진 첨부에 실패하여 사진 없는 글 등록을 중단했습니다: {exc}"
+            ) from exc
+
+        failed = [
+            item.file_name
+            for item, component in zip(resolved, uploaded)
+            if not component
+        ]
+        if len(uploaded) < len(resolved):
+            failed.extend(item.file_name for item in resolved[len(uploaded) :])
+        if failed:
+            raise AffiliateApiError(
+                "사진 첨부에 실패하여 사진 없는 글 등록을 중단했습니다: "
+                + ", ".join(failed)
             )
-            return _content_json(clean_body)
 
         components = {
             item.occurrence: component

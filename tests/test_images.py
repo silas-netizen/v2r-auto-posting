@@ -2,10 +2,13 @@ import logging
 import random
 from pathlib import Path
 
-from v2r_auto.affiliate_api import AffiliateApiPublisher, _content_json
+import pytest
+
+from v2r_auto.affiliate_api import AffiliateApiError, AffiliateApiPublisher, _content_json
 from v2r_auto.images import (
     DriveItem,
     GoogleDriveImageResolver,
+    ResolvedImage,
     brand_from_sheet_title,
     placeholders,
     strip_placeholders,
@@ -116,3 +119,33 @@ def test_drive_failure_falls_back_to_clean_text() -> None:
     paragraphs = content["document"]["components"][0]["value"]
 
     assert [item["nodes"][0]["value"] for item in paragraphs] == ["첫 줄", "", "둘째 줄"]
+
+
+def test_resolved_image_upload_failure_stops_text_only_publication(
+    tmp_path: Path,
+) -> None:
+    job = make_job("첫 줄\n{키워드}\n둘째 줄")
+    image_path = tmp_path / "갓비움.jpg"
+    image_path.write_bytes(b"image")
+
+    class FakeBrowser:
+        def upload_affiliate_images(self, job, menu_name, image_paths):
+            return [{}]
+
+    class FakeResolver:
+        def resolve(self, _job):
+            return [
+                ResolvedImage(
+                    occurrence=0,
+                    marker="키워드",
+                    file_id="image-id",
+                    file_name=image_path.name,
+                    local_path=image_path,
+                )
+            ]
+
+    publisher = AffiliateApiPublisher(FakeBrowser(), logging.getLogger("test"))
+    publisher.image_resolver = FakeResolver()
+
+    with pytest.raises(AffiliateApiError, match="사진 첨부에 실패"):
+        publisher._prepare_revision_content(job, {"menu_name": "게시판"})
