@@ -12,6 +12,7 @@ from v2r_auto.exposure import (
     cafe_name_option,
     collect_our_cafe_hits,
     is_cafe_article_url,
+    is_clustered_sub_result,
     keyword_tool_query,
     keywordstool_volume,
     match_selected_rows,
@@ -147,6 +148,71 @@ def test_collects_product_review_module_with_long_cafe_name() -> None:
     hits = collect_our_cafe_hits(html, list(DEFAULT_CAFE_NAMES))
     assert [hit.cafe_name for hit in hits] == ["씨씨앙"]
     assert "cantsb/3453001" in hits[0].url
+
+
+def test_clustered_sub_result_is_detected() -> None:
+    main = '<a href="https://cafe.naver.com/cantsb/3448827" data-heatmap-target=".link">대표</a>'
+    sub = '<a href="https://cafe.naver.com/cantsb/3458225" data-heatmap-target=".series">서브</a>'
+    assert not is_clustered_sub_result(main)
+    assert is_clustered_sub_result(sub)
+
+
+def test_same_cafe_cluster_keeps_only_main_post() -> None:
+    html = """
+    <div id="main_pack">
+      <a href="https://cafe.naver.com/cantsb">
+        국내1위 다이어트 커뮤니티 씨씨앙(식단,운동,후기,헬스,체험단)
+      </a>
+      <a href="https://cafe.naver.com/cantsb/3448827?art=token"
+         data-heatmap-target=".link">
+        <span class="sds-comps-text-type-headline1">남재현 다이어트 성공방법 공유해요</span>
+      </a>
+      <a href="https://cafe.naver.com/cantsb/3448827?art=token"
+         data-heatmap-target="reviewbox_reply">RE 댓글 미리보기</a>
+      <a href="https://cafe.naver.com/cantsb/3458225?art=token"
+         data-heatmap-target=".series">
+        남재현 다이어트 드셔보신 분 계신가요?
+      </a>
+    </div>
+    """
+    hits = collect_our_cafe_hits(html, list(DEFAULT_CAFE_NAMES))
+    assert [hit.url.split("?")[0] for hit in hits] == [
+        "https://cafe.naver.com/cantsb/3448827"
+    ]
+
+
+def test_cluster_sub_post_alone_is_hidden() -> None:
+    main = "https://cafe.naver.com/cantsb/3448827"
+    sub = "https://cafe.naver.com/cantsb/3458225"
+    html = f"""
+    <a href="https://cafe.naver.com/cantsb">씨씨앙</a>
+    <a href="{main}" data-heatmap-target=".link">남재현 다이어트 성공방법 공유해요</a>
+    <a href="{sub}" data-heatmap-target=".series">남재현 다이어트 드셔보신 분 계신가요?</a>
+    """
+    opened = []
+
+    class FakeNotion:
+        def update_status(self, row, status):
+            opened.append(("status", status))
+
+        def update_check_result(self, row, *, status, cafe_name=None, search_volume=None, volume_found=False):
+            opened.append((status, cafe_name))
+
+    naver = FakeNaver(
+        html,
+        {
+            main: "일반 글",
+            sub: "본문에 팥순추출물 후기",
+        },
+    )
+    ExposureChecker(
+        FakeNotion(),
+        naver,
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    ).run([_row("남재현 다이어트")], dry_run=False)
+    assert naver.opened == [main]
+    assert opened[-1][0] == "밀려남"
 
 
 def test_same_search_query_ignores_spaces_only() -> None:

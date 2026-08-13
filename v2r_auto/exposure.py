@@ -316,6 +316,18 @@ def _absolute_url(href: str) -> str:
     return raw
 
 
+def is_clustered_sub_result(anchor_html: str) -> bool:
+    """같은 카페 묶음에서 대표 글 밑에 달린 서브 글인지 본다."""
+    end = (anchor_html or "").find(">")
+    tag = (anchor_html or "")[: end + 1] if end >= 0 else (anchor_html or "")
+    lowered = tag.casefold()
+    if 'data-heatmap-target=".series"' in lowered:
+        return True
+    if "data-heatmap-target='.series'" in lowered:
+        return True
+    return False
+
+
 def is_cafe_article_url(url: str) -> bool:
     parsed = urlparse(_absolute_url(url))
     if "cafe.naver.com" not in (parsed.netloc or "").lower():
@@ -370,18 +382,18 @@ def article_dedupe_key(url: str) -> str:
 
 def collect_our_cafe_hits(html: str, cafe_names: list[str]) -> list[CafeHit]:
     source = html or ""
-    anchors: list[tuple[int, str, str]] = []
+    anchors: list[tuple[int, str, str, str]] = []
     for match in _ANCHOR_RE.finditer(source):
         href = _absolute_url(match.group(1))
         if "cafe.naver.com" not in href.lower():
             continue
         text = _strip_tags(match.group(2))
-        anchors.append((match.start(), href, text))
+        anchors.append((match.start(), href, text, match.group(0)))
 
     our_ids: dict[str, str] = {}
     all_homes: list[tuple[int, str, str]] = []
     articles: list[tuple[int, str]] = []
-    for start, href, text in anchors:
+    for start, href, text, tag in anchors:
         identity = cafe_identity(href)
         cafe = matching_cafe_name(text, cafe_names)
         if identity and cafe and not is_cafe_article_url(href):
@@ -389,6 +401,8 @@ def collect_our_cafe_hits(html: str, cafe_names: list[str]) -> list[CafeHit]:
         if identity and not is_cafe_article_url(href):
             all_homes.append((start, identity, cafe))
         if is_cafe_article_url(href):
+            if is_clustered_sub_result(tag):
+                continue
             articles.append((start, href))
 
     hits: list[CafeHit] = []
