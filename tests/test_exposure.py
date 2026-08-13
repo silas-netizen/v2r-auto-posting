@@ -13,6 +13,7 @@ from v2r_auto.exposure import (
     matching_cafe_name,
     parse_brands,
     parse_cafes,
+    same_search_query,
     strip_parenthetical,
 )
 from v2r_auto.exposure_notion import NotionExposureStore, parse_database_id
@@ -120,6 +121,28 @@ def test_collects_only_our_cafe_articles() -> None:
     assert [hit.cafe_name for hit in hits] == ["러브인썸"]
     assert hits[0].url.endswith("/loveinsome/99")
     assert all("othercafe" not in hit.url for hit in hits)
+
+
+def test_collects_product_review_module_with_long_cafe_name() -> None:
+    html = """
+    <h2>상품리뷰 인기글</h2>
+    <div data-template-id="ugcItem">
+      <a href="https://cafe.naver.com/cantsb">
+        <span>국내1위 다이어트 커뮤니티 씨씨앙(식단,운동,후기,헬스,체험단)</span>
+      </a>
+      <a href="https://cafe.naver.com/cantsb/3453001?art=token">
+        다크 초콜릿 감량에 괜찮나요?
+      </a>
+    </div>
+    """
+    hits = collect_our_cafe_hits(html, list(DEFAULT_CAFE_NAMES))
+    assert [hit.cafe_name for hit in hits] == ["씨씨앙"]
+    assert "cantsb/3453001" in hits[0].url
+
+
+def test_same_search_query_ignores_spaces_only() -> None:
+    assert same_search_query("다크 초콜릿", "다크초콜릿")
+    assert not same_search_query("다크 초콜릿", "다크 초콜릿 효능")
 
 
 def test_checker_strips_notes_before_search() -> None:

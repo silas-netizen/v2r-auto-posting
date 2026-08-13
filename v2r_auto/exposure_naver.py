@@ -3,11 +3,13 @@ from __future__ import annotations
 import logging
 import time
 
+from urllib.parse import parse_qs, unquote_plus, urlparse
+
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
-from .exposure import strip_parenthetical
+from .exposure import compact_text, naver_search_url, same_search_query, strip_parenthetical
 
 SEARCH_BOX_SELECTORS = (
     "#query",
@@ -15,17 +17,22 @@ SEARCH_BOX_SELECTORS = (
     'input[name="query"]',
     "input.search_input",
 )
-AUTOCOMPLETE_SELECTORS = (
+AUTOCOMPLETE_ROOTS = (
+    "#autoFrame",
+    ".autoCompleteContainer",
+    ".atcmp_container",
+    ".kwd_lst",
+    "ul.lst_keyword",
+    ".nx_list_auto",
+    "._keyword_list",
+    ".auto_list",
+)
+AUTOCOMPLETE_ITEMS = (
+    "li a",
+    "li",
     ".item._item",
-    "ul.item_list > li a",
-    ".auto_list li a",
-    ".auto_list li",
     ".atcmp_keyword",
-    ".kwd_lst li a",
-    ".nx_list_auto li a",
-    "#autoFrame li a",
-    ".lnb_item",
-    "div.item a",
+    "a",
 )
 INTEGRATED_TAB_TEXTS = {"통합", "통합검색"}
 CAFE_IFRAME_SELECTORS = (
@@ -147,16 +154,9 @@ class SeleniumNaverSearch:
         box.send_keys(Keys.BACKSPACE)
         box.send_keys(query)
         time.sleep(0.55)
-        if not self._click_first_autocomplete(driver):
+        if not self._click_spacing_autocomplete(driver, query):
             box.send_keys(Keys.ENTER)
-        WebDriverWait(driver, self.timeout).until(
-            lambda item: item.find_elements(
-                By.CSS_SELECTOR, "#main_pack, #content, #lnb"
-            )
-        )
-        time.sleep(0.35)
-        self._stay_on_integrated_tab(driver)
-        self._scroll_to_end(driver)
+        self._wait_for_integrated_results(driver, query)
         return driver.page_source
 
     def open_post_text(self, url: str) -> str:
@@ -257,19 +257,72 @@ class SeleniumNaverSearch:
                     last_error = exc
         raise RuntimeError(f"네이버 검색창을 찾지 못했습니다: {last_error}")
 
-    def _click_first_autocomplete(self, driver) -> bool:
-        for selector in AUTOCOMPLETE_SELECTORS:
-            for element in driver.find_elements(By.CSS_SELECTOR, selector):
+    def _click_spacing_autocomplete(self, driver, query: str) -> bool:
+        for root_selector in AUTOCOMPLETE_ROOTS:
+            roots = driver.find_elements(By.CSS_SELECTOR, root_selector)
+            for root in roots:
                 try:
-                    if not element.is_displayed():
+                    if not root.is_displayed():
                         continue
-                    driver.execute_script("arguments[0].click();", element)
-                    self.logger.info("자동완성 첫 항목을 선택했습니다")
-                    return True
                 except Exception:
                     continue
+                for item_selector in AUTOCOMPLETE_ITEMS:
+                    for element in root.find_elements(By.CSS_SELECTOR, item_selector):
+                        try:
+                            if not element.is_displayed():
+                                continue
+                            suggestion = (element.text or "").strip()
+                            if not suggestion:
+                                continue
+                            if compact_text(suggestion) != compact_text(query):
+                                self.logger.info(
+                                    "자동완성 첫 항목이 다른 검색어라 입력한 키워드 그대로 검색합니다: %s",
+                                    suggestion.split("\n")[0][:40],
+                                )
+                                return False
+                            driver.execute_script("arguments[0].click();", element)
+                            self.logger.info("자동완성에서 띄어쓰기만 다른 항목을 선택했습니다")
+                            return True
+                        except Exception:
+                            continue
         self.logger.info("자동완성이 없어 입력한 키워드 그대로 검색합니다")
         return False
+
+    def _wait_for_integrated_results(self, driver, query: str) -> None:
+        WebDriverWait(driver, self.timeout).until(
+            lambda item: item.find_elements(
+                By.CSS_SELECTOR, "#main_pack, #content, #lnb"
+            )
+        )
+        time.sleep(0.35)
+        self._stay_on_integrated_tab(driver)
+        actual = self._actual_query(driver)
+        if actual and not same_search_query(query, actual):
+            self.logger.info(
+                "검색어가 달라져 다시 검색합니다: %s → %s", actual, query
+            )
+            driver.get(naver_search_url(query))
+            WebDriverWait(driver, self.timeout).until(
+                lambda item: item.find_elements(
+                    By.CSS_SELECTOR, "#main_pack, #content, #lnb"
+                )
+            )
+            time.sleep(0.35)
+            self._stay_on_integrated_tab(driver)
+        self._scroll_to_end(driver)
+        time.sleep(0.45)
+        self._scroll_to_end(driver, rounds=4)
+
+    def _actual_query(self, driver) -> str:
+        parsed = urlparse(driver.current_url or "")
+        values = parse_qs(parsed.query).get("query") or []
+        if values:
+            return unquote_plus(values[0])
+        try:
+            box = self._find_search_box(driver)
+            return (box.get_attribute("value") or "").strip()
+        except Exception:
+            return ""
 
     def _stay_on_integrated_tab(self, driver) -> None:
         current = (driver.current_url or "").lower()

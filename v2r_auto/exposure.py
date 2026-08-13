@@ -93,6 +93,10 @@ def naver_search_url(keyword: str) -> str:
     return "https://search.naver.com/search.naver?query=" + quote_plus(keyword.strip())
 
 
+def same_search_query(expected: str, actual: str) -> bool:
+    return compact_text(expected) == compact_text(actual)
+
+
 def matching_cafe_name(text: str, cafe_names: list[str]) -> str:
     compact = compact_text(text)
     for name in cafe_names:
@@ -221,6 +225,10 @@ def collect_our_cafe_hits(html: str, cafe_names: list[str]) -> list[CafeHit]:
             if nearest_ours:
                 cafe = nearest_cafe
         if not cafe:
+            # 상품리뷰 인기글처럼 카페 이름이 글 제목 위에 있는 칸
+            window = source[max(0, start - 1800) : start + 80]
+            cafe = matching_cafe_name(_strip_tags(window), cafe_names)
+        if not cafe:
             continue
         key = article_dedupe_key(href)
         if key in seen:
@@ -322,7 +330,15 @@ class ExposureChecker:
             return
         hits = collect_our_cafe_hits(html, self.cafe_names)
         if not hits:
-            self.logger.info("밀려남: %s / 통합검색에 우리 카페 없음", keyword)
+            named = matching_cafe_name(_strip_tags(html), self.cafe_names)
+            if named:
+                self.logger.warning(
+                    "밀려남: %s / 화면에 %s 이름은 보이지만 우리 카페 글 주소를 못 찾았습니다",
+                    keyword,
+                    named,
+                )
+            else:
+                self.logger.info("밀려남: %s / 통합검색에 우리 카페 없음", keyword)
             self._apply_status(row, STATUS_HIDDEN, dry_run)
             return
         names = ", ".join(hit.cafe_name for hit in hits)
