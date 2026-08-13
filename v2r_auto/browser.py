@@ -426,7 +426,6 @@ class V2RBrowser:
         self.driver.execute_script(
             "arguments[0].scrollIntoView({block: 'center'});", selection
         )
-        selection.click()
 
         def visible_options():
             return [
@@ -472,12 +471,19 @@ class V2RBrowser:
             ),
             poll_frequency=0.25,
         )
-        try:
-            options = option_wait.until(
-                lambda driver: visible_options()
-                or (selection.click() and False)
-            )
-        except TimeoutException as exc:
+        options = []
+        last_timeout: TimeoutException | None = None
+        for attempt in range(3):
+            if attempt:
+                ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+                time.sleep(0.25)
+            selection.click()
+            try:
+                options = option_wait.until(lambda driver: visible_options())
+                break
+            except TimeoutException as exc:
+                last_timeout = exc
+        if not options:
             fields = search_inputs()
             if fields:
                 try:
@@ -499,12 +505,35 @@ class V2RBrowser:
                         )
                     )
                     if selected:
+                        if label in {"카페", "계정"}:
+                            time.sleep(1)
                         return
                 except Exception:
                     pass
             raise AutomationError(
                 f"SE-ONE {label} 목록이 준비되지 않았습니다"
-            ) from exc
+            ) from last_timeout
+
+        def choose(option_element) -> None:
+            option_element.click()
+            try:
+                WebDriverWait(
+                    self.driver,
+                    3,
+                    poll_frequency=0.25,
+                ).until(
+                    lambda driver: self._se_one_option_matches(
+                        label,
+                        value,
+                        selection.text,
+                    )
+                )
+            except TimeoutException as exc:
+                raise AutomationError(
+                    f"SE-ONE {label} 선택 완료를 확인하지 못했습니다: {value}"
+                ) from exc
+            if label in {"카페", "계정"}:
+                time.sleep(1)
 
         direct = next(
             (
@@ -515,7 +544,7 @@ class V2RBrowser:
             None,
         )
         if direct is not None:
-            direct.click()
+            choose(direct)
             return
 
         fields = search_inputs()
@@ -542,7 +571,7 @@ class V2RBrowser:
 
         try:
             selected_option = self.wait.until(lambda driver: option())
-            selected_option.click()
+            choose(selected_option)
         except TimeoutException as exc:
             visible_options = [
                 item.text.strip().replace("\n", " / ")
