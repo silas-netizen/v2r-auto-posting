@@ -1308,6 +1308,32 @@ class V2RBrowser:
             if component.get("@ctype") in {"image", "imageGroup", "imageStrip"}
         ]
 
+    @staticmethod
+    def _image_component_ready(component: dict) -> bool:
+        images: list[dict] = []
+
+        def collect(value) -> None:
+            if isinstance(value, dict):
+                if value.get("@ctype") == "image":
+                    images.append(value)
+                for child in value.values():
+                    collect(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect(child)
+
+        collect(component)
+        return bool(images) and all(
+            isinstance(image.get("src"), str)
+            and bool(image["src"].strip())
+            and isinstance(image.get("path"), str)
+            and bool(image["path"].strip())
+            and isinstance(image.get("fileName"), str)
+            and bool(image["fileName"].strip())
+            and int(image.get("fileSize") or 0) > 0
+            for image in images
+        )
+
     def _prepare_seone_image_editor(
         self,
         job: AffiliateJob,
@@ -1466,7 +1492,10 @@ class V2RBrowser:
         while time.monotonic() < deadline:
             try:
                 media = self._media_components(self._get_seone_document())
-                if len(media) > existing_media_count:
+                if (
+                    len(media) > existing_media_count
+                    and self._image_component_ready(media[-1])
+                ):
                     self._wait_for_seone_idle()
                     return media[-1]
             except AutomationError:

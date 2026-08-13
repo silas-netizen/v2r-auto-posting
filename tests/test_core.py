@@ -435,6 +435,32 @@ def test_reads_document_from_public_smarteditor_api() -> None:
     assert browser._get_seone_document() == document
 
 
+def test_image_component_waits_for_final_resource_metadata() -> None:
+    incomplete = {
+        "@ctype": "image",
+        "src": "",
+        "path": None,
+        "fileName": None,
+        "fileSize": 0,
+    }
+    complete = {
+        "@ctype": "image",
+        "src": "https://example.test/photo.jpg?type=w1600",
+        "path": "/photo.jpg",
+        "fileName": "photo.jpg",
+        "fileSize": 1024,
+    }
+
+    assert V2RBrowser._image_component_ready(incomplete) is False
+    assert V2RBrowser._image_component_ready(complete) is True
+    assert V2RBrowser._image_component_ready(
+        {
+            "@ctype": "imageGroup",
+            "images": [complete, {**complete, "fileName": "second.jpg"}],
+        }
+    ) is True
+
+
 def test_multiple_images_share_one_prepared_se_one_editor(
     tmp_path: Path,
 ) -> None:
@@ -485,7 +511,14 @@ def test_multiple_images_share_one_prepared_se_one_editor(
 
         def _get_seone_document(self) -> dict:
             components = [
-                {"@ctype": "image", "id": f"uploaded-image-{index}"}
+                {
+                    "@ctype": "image",
+                    "id": f"uploaded-image-{index}",
+                    "src": f"https://example.test/image-{index}.jpg",
+                    "path": f"/image-{index}.jpg",
+                    "fileName": f"image-{index}.jpg",
+                    "fileSize": 1024,
+                }
                 for index, _path in enumerate(state["selected"], start=1)
             ]
             return {"document": {"components": components}}
