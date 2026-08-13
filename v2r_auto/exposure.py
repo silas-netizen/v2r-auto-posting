@@ -121,6 +121,26 @@ def cafe_id_name(value: str) -> str:
     return compact_text(text)
 
 
+def cafe_name_only(value: str) -> str:
+    text = (value or "").strip()
+    if "/" in text:
+        text = text.split("/", 1)[0].strip()
+    return text
+
+
+def cafe_name_option(cafe_name: str, options: list[str] | tuple[str, ...] = ()) -> str:
+    """카페/ID를 바꿀 때는 이름만 있는 옵션을 고른다. 뒤에 /아이디가 붙은 값은 쓰지 않는다."""
+    cafe = cafe_name_only(cafe_name)
+    if not cafe:
+        return ""
+    want = compact_text(cafe)
+    for opt in options:
+        text = str(opt or "").strip()
+        if text and "/" not in text and compact_text(text) == want:
+            return text
+    return cafe
+
+
 def preserve_cafe_id(current: str, cafe_name: str) -> str:
     existing = (current or "").strip()
     cafe = (cafe_name or "").strip()
@@ -128,7 +148,7 @@ def preserve_cafe_id(current: str, cafe_name: str) -> str:
         return existing
     if existing and cafe_id_name(existing) == compact_text(cafe):
         return existing
-    return cafe
+    return cafe_name_only(cafe)
 
 
 def cafe_id_for_check(
@@ -137,10 +157,12 @@ def cafe_id_for_check(
     existing = (current or "").strip()
     if status != STATUS_EXPOSED:
         return existing, None
-    kept = preserve_cafe_id(existing, found_cafe or "")
-    if not (found_cafe or "").strip() or kept == existing:
+    found = cafe_name_only(found_cafe or "")
+    if not found:
         return existing, None
-    return kept, kept
+    if existing and cafe_id_name(existing) == compact_text(found):
+        return existing, None
+    return found, found
 
 
 def keyword_tool_query(keyword: str) -> str:

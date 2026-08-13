@@ -17,6 +17,7 @@ from .exposure import (
     STATUS_EXPOSED,
     STATUS_HEADERS,
     VOLUME_HEADERS,
+    cafe_name_option,
 )
 
 NOTION_VERSION = "2022-06-28"
@@ -58,6 +59,12 @@ def _plain_text(property_value: dict[str, Any] | None) -> str:
     if kind == "select":
         selected = property_value.get("select") or {}
         return str(selected.get("name") or "")
+    if kind == "multi_select":
+        return ", ".join(
+            str(item.get("name") or "")
+            for item in property_value.get("multi_select") or []
+            if item.get("name")
+        )
     if kind == "status":
         selected = property_value.get("status") or {}
         return str(selected.get("name") or "")
@@ -108,6 +115,7 @@ class NotionExposureStore:
         self._volume_type = ""
         self._exposed_volume_name = ""
         self._exposed_volume_type = ""
+        self._cafe_options: list[str] = []
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         if not self.token:
@@ -149,6 +157,7 @@ class NotionExposureStore:
             except NotionError:
                 self._post_url_name = ""
             self._cafe_name, self._cafe_type = self._optional_property(CAFE_HEADERS)
+            self._cafe_options = self._property_option_names(self._cafe_name)
             self._volume_name, self._volume_type = self._optional_property(VOLUME_HEADERS)
             self._exposed_volume_name, self._exposed_volume_type = self._optional_property(
                 EXPOSED_VOLUME_HEADERS
@@ -162,6 +171,19 @@ class NotionExposureStore:
             return _find_property(self._schema or {}, names)
         except NotionError:
             return "", ""
+
+    def _property_option_names(self, prop_name: str) -> list[str]:
+        if not prop_name:
+            return []
+        spec = (self._schema or {}).get(prop_name) or {}
+        kind = str(spec.get("type") or "")
+        bucket = spec.get(kind) or {}
+        names: list[str] = []
+        for option in bucket.get("options") or []:
+            name = str((option or {}).get("name") or "").strip()
+            if name:
+                names.append(name)
+        return names
 
     def load_rows(self) -> list[ExposureRow]:
         self.load_schema()
@@ -237,7 +259,10 @@ class NotionExposureStore:
         key = "status" if row.status_type == "status" else "select"
         properties: dict[str, Any] = {row.status_property: {key: {"name": status}}}
         if row.cafe_property and cafe_name is not None:
-            written = self._writable_value(row.cafe_type, cafe_name)
+            chosen = cafe_name
+            if row.cafe_type in {"select", "multi_select"}:
+                chosen = cafe_name_option(cafe_name, self._cafe_options)
+            written = self._writable_value(row.cafe_type, chosen)
             if written is not None:
                 properties[row.cafe_property] = written
         if volume_found and row.volume_property:
@@ -274,5 +299,9 @@ class NotionExposureStore:
             if value in ("", None):
                 return {"select": None}
             return {"select": {"name": str(value)}}
+        if kind == "multi_select":
+            if value in ("", None):
+                return {"multi_select": []}
+            return {"multi_select": [{"name": str(value)}]}
         self.logger.warning("노션 열 형식이 달라 값을 쓰지 않습니다: %s", kind)
         return None

@@ -9,6 +9,7 @@ from v2r_auto.exposure import (
     ExposureRow,
     brand_found,
     cafe_id_for_check,
+    cafe_name_option,
     collect_our_cafe_hits,
     is_cafe_article_url,
     keyword_tool_query,
@@ -408,6 +409,63 @@ def test_notion_store_writes_cafe_and_search_volumes() -> None:
     assert no_volume["노출된 검색량"]["number"] is None
 
 
+def test_notion_cafe_select_uses_name_only_option() -> None:
+    bodies = []
+
+    def opener(request, timeout=30):
+        if request.data:
+            bodies.append(json.loads(request.data.decode("utf-8")))
+        if request.full_url.endswith("/databases/2260ab12-cdff-80c3-a4c0-d2f0ab1e9c44"):
+            return FakeResponse(
+                {
+                    "properties": {
+                        "키워드": {"type": "title"},
+                        "노출상태": {"type": "status"},
+                        "카페/ID": {
+                            "type": "select",
+                            "select": {
+                                "options": [
+                                    {"name": "마이웨딩드림"},
+                                    {"name": "씨씨앙"},
+                                    {"name": "씨씨앙/dtsx"},
+                                    {"name": "양평맘"},
+                                    {"name": "줌마/cqu"},
+                                ]
+                            },
+                        },
+                    }
+                }
+            )
+        if request.full_url.endswith("/query"):
+            return FakeResponse({"results": [], "has_more": False})
+        return FakeResponse({})
+
+    store = NotionExposureStore(
+        "secret",
+        "https://www.notion.so/2260ab12cdff80c3a4c0d2f0ab1e9c44",
+        __import__("logging").getLogger("test"),
+        opener=opener,
+    )
+    store.load_schema()
+    row = ExposureRow(
+        "page-1",
+        "키워드",
+        "",
+        "",
+        "밀려남",
+        "노출상태",
+        "status",
+        cafe_property="카페/ID",
+        cafe_type="select",
+    )
+    store.update_check_result(row, status="노출완", cafe_name="씨씨앙/dtsx")
+    payload = bodies[-1]["properties"]
+    assert payload["카페/ID"]["select"]["name"] == "씨씨앙"
+    store.update_check_result(row, status="노출완", cafe_name="줌마")
+    payload = bodies[-1]["properties"]
+    assert payload["카페/ID"]["select"]["name"] == "줌마"
+
+
 def test_naver_login_detected_from_cookies() -> None:
     from v2r_auto.exposure_naver import is_naver_logged_in_cookies
 
@@ -569,6 +627,13 @@ def test_preserve_cafe_id_keeps_existing_suffix() -> None:
     assert cafe_id_for_check("씨씨앙/dtsx", "노출완", "씨씨앙") == ("씨씨앙/dtsx", None)
     assert cafe_id_for_check("양평맘/aa", "노출완", "씨씨앙") == ("씨씨앙", "씨씨앙")
     assert cafe_id_for_check("", "노출완", "씨씨앙") == ("씨씨앙", "씨씨앙")
+    assert cafe_name_option(
+        "씨씨앙",
+        ["마이웨딩드림", "씨씨앙", "씨씨앙/dtsx", "양평맘", "줌마/cqu"],
+    ) == "씨씨앙"
+    assert cafe_name_option("씨씨앙/dtsx", ["씨씨앙", "씨씨앙/dtsx"]) == "씨씨앙"
+    assert cafe_name_option("양평맘/aa", ["양평맘", "양평맘/xx"]) == "양평맘"
+    assert cafe_name_option("줌마", ["줌마/cqu", "줌마/ypv"]) == "줌마"
 
 
 def test_keywordstool_adds_pc_and_mobile() -> None:
