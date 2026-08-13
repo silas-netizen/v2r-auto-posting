@@ -59,7 +59,7 @@ def is_keyword_tool_url(url: str) -> bool:
     text = (url or "").lower()
     if not is_ads_center_url(text):
         return False
-    return "keyword" in text or "planner" in text
+    return "keyword-planner" in text or "/sa/tool/keyword" in text
 
 
 def ads_account_id(url: str) -> str:
@@ -295,15 +295,12 @@ class SeleniumNaverSearch:
         return self._enter_keyword_tool(driver)
 
     def _enter_keyword_tool(self, driver) -> bool:
+        account = ads_account_id(driver.current_url or "")
+        if self._is_ads_not_found(driver):
+            self.logger.info("없는 주소라 광고주센터 메인으로 돌아갑니다")
+            self._open_ads_dashboard(driver, account)
         if self._is_keyword_tool_page(driver):
             return True
-        account = ads_account_id(driver.current_url or "")
-        if self._click_ads_menu(driver, "도구"):
-            time.sleep(0.7)
-        if self._click_keyword_tool_entry(driver):
-            time.sleep(1.2)
-            if self._is_keyword_tool_page(driver):
-                return True
         for path in self._keyword_tool_urls(account):
             try:
                 driver.get(path)
@@ -312,20 +309,30 @@ class SeleniumNaverSearch:
                 continue
             if self._ads_login_required(driver.current_url or ""):
                 return False
+            if self._is_ads_not_found(driver):
+                continue
+            if self._is_keyword_tool_page(driver):
+                return True
+        if self._click_ads_menu(driver, "도구"):
+            time.sleep(0.7)
+        if self._click_keyword_tool_entry(driver):
+            time.sleep(1.2)
             if self._is_keyword_tool_page(driver):
                 return True
         return self._is_keyword_tool_page(driver)
 
+    def _open_ads_dashboard(self, driver, account: str) -> None:
+        if account:
+            driver.get(f"https://ads.naver.com/manage/ad-accounts/{account}/dashboard")
+        else:
+            driver.get(ADS_HOME_URL)
+        time.sleep(1.2)
+
     def _keyword_tool_urls(self, account: str) -> list[str]:
         urls: list[str] = []
         if account:
-            urls.extend(
-                [
-                    f"https://ads.naver.com/manage/ad-accounts/{account}/tools/keyword",
-                    f"https://ads.naver.com/manage/ad-accounts/{account}/tool/keyword-planner",
-                    f"https://ads.naver.com/manage/ad-accounts/{account}/tools/keyword-planner",
-                    f"https://manage.searchad.naver.com/customers/{account}/tool/keyword-planner",
-                ]
+            urls.append(
+                f"https://ads.naver.com/manage/ad-accounts/{account}/sa/tool/keyword-planner"
             )
         urls.extend(
             [
@@ -335,7 +342,16 @@ class SeleniumNaverSearch:
         )
         return urls
 
+    def _is_ads_not_found(self, driver) -> bool:
+        try:
+            heading = compact_text(self._visible_text(driver)[:1500])
+        except Exception:
+            heading = ""
+        return "페이지를찾을수없습니다" in heading
+
     def _is_keyword_tool_page(self, driver) -> bool:
+        if self._is_ads_not_found(driver):
+            return False
         if is_keyword_tool_url(driver.current_url or ""):
             return True
         try:

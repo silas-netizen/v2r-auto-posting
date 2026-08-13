@@ -448,12 +448,17 @@ def test_naver_tab_is_home_or_search_only() -> None:
         "https://ads.naver.com/manage/ad-accounts/685753/dashboard"
     ) == "685753"
     assert is_keyword_tool_url(
-        "https://ads.naver.com/manage/ad-accounts/685753/tools/keyword"
+        "https://ads.naver.com/manage/ad-accounts/685753/sa/tool/keyword-planner"
     )
     assert not is_keyword_tool_url(
         "https://ads.naver.com/manage/ad-accounts/685753/dashboard"
     )
-    assert search._keyword_tool_urls("685753")[0].endswith("/685753/tools/keyword")
+    assert not is_keyword_tool_url(
+        "https://ads.naver.com/manage/ad-accounts/685753/tools/keyword"
+    )
+    assert search._keyword_tool_urls("685753")[0].endswith(
+        "/685753/sa/tool/keyword-planner"
+    )
 
 
 def test_pause_then_resume_continues_next_keyword() -> None:
