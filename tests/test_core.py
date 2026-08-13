@@ -6,6 +6,7 @@ import pytest
 
 from v2r_auto.browser import (
     AFFILIATE_CAFE_SEARCH_TERMS,
+    AutomationError,
     SE_ONE_SELECTION_INDEX,
     V2R_SE_ONE_URL,
     V2RBrowser,
@@ -50,6 +51,13 @@ def test_cafe_option_matching_ignores_display_whitespace() -> None:
 def test_account_selection_never_uses_partial_id_matches() -> None:
     assert not V2RBrowser._option_text_matches("계정", "prtchht", "prtchhtt")
     assert V2RBrowser._option_text_matches("계정", "prtchht", "prtchht")
+    browser = object.__new__(V2RBrowser)
+    assert browser._se_one_option_matches("계정", "doansli", "닉네임 🔥 doansli")
+    assert not browser._se_one_option_matches(
+        "계정",
+        "doansli",
+        "닉네임 🔥 doansli-extra",
+    )
 
 
 def test_board_selection_requires_exact_display_name() -> None:
@@ -190,17 +198,94 @@ def test_image_editor_is_prepared_in_visible_form_order() -> None:
     ]
 
 
-def test_image_upload_clicks_photo_button_then_selects_local_file(
+def test_image_editor_retries_whole_setup_when_account_is_not_ready(
+    monkeypatch,
+) -> None:
+    state = {"opened": 0}
+
+    class FakeWait:
+        def until(self, condition):
+            return True
+
+    class FakeDriver:
+        def find_elements(self, by, selector):
+            return [object()]
+
+    class RetryBrowser(V2RBrowser):
+        @property
+        def wait(self):
+            return FakeWait()
+
+        def open_se_one_writer(self) -> None:
+            state["opened"] += 1
+
+        def _select_option(self, label: str, value: str) -> None:
+            if label == "계정" and state["opened"] == 1:
+                raise AutomationError("SE-ONE 계정 목록이 준비되지 않았습니다")
+
+        def _fill_input(
+            self,
+            label: str,
+            value: str,
+            fallback_css: str | None = None,
+        ) -> None:
+            return None
+
+        def _fill_editor(self, body: str) -> None:
+            return None
+
+        def _get_seone_document(self) -> dict:
+            return {"document": {"components": []}}
+
+    monkeypatch.setattr("v2r_auto.browser.time.sleep", lambda _seconds: None)
+    browser = object.__new__(RetryBrowser)
+    browser.driver = FakeDriver()
+    browser.logger = __import__("logging").getLogger("test")
+    job = AffiliateJob(
+        row_number=2,
+        keyword="키워드",
+        article=ParsedArticle(
+            title="제목",
+            body="본문",
+            keyword="키워드",
+            tag="키워드",
+            comments=[],
+        ),
+        cafe="러브인썸",
+        account="doansli",
+        article_type="후기형",
+    )
+    destination = {
+        "cafe_id": 26616683,
+        "cafe_name": "러브 인썸 (Love in Some)",
+        "naver_login_id": "doansli",
+        "menu_id": 18,
+        "menu_name": "뷰티&미용",
+    }
+
+    browser._prepare_seone_image_editor(job, destination)
+
+    assert state["opened"] == 2
+
+
+def test_multiple_images_share_one_prepared_se_one_editor(
     tmp_path: Path,
 ) -> None:
-    image_path = tmp_path / "요즘 그릭요거트.jpg"
-    image_path.write_bytes(b"image")
-    state = {"prepared": False, "clicked": False, "selected": ""}
-    component = {"@ctype": "image", "id": "uploaded-image"}
+    image_paths = [
+        tmp_path / "요즘 그릭요거트.jpg",
+        tmp_path / "532357.jpg",
+    ]
+    for image_path in image_paths:
+        image_path.write_bytes(b"image")
+    state = {
+        "prepared": 0,
+        "clicked": 0,
+        "selected": [],
+    }
 
     class FakeInput:
         def send_keys(self, value: str) -> None:
-            state["selected"] = value
+            state["selected"].append(value)
 
     image_input = FakeInput()
 
@@ -210,7 +295,7 @@ def test_image_upload_clicks_photo_button_then_selects_local_file(
 
     class FakeDriver:
         def execute_script(self, script, button) -> None:
-            state["clicked"] = True
+            state["clicked"] += 1
 
     class ImageBrowser(V2RBrowser):
         @property
@@ -218,11 +303,14 @@ def test_image_upload_clicks_photo_button_then_selects_local_file(
             return FakeWait()
 
         def _prepare_seone_image_editor(self, job, destination: dict) -> None:
-            state["prepared"] = True
+            state["prepared"] += 1
             state["menu_id"] = destination["menu_id"]
 
         def _get_seone_document(self) -> dict:
-            components = [component] if state["selected"] else []
+            components = [
+                {"@ctype": "image", "id": f"uploaded-image-{index}"}
+                for index, _path in enumerate(state["selected"], start=1)
+            ]
             return {"document": {"components": components}}
 
         def _seone_photo_button(self):
@@ -255,13 +343,17 @@ def test_image_upload_clicks_photo_button_then_selects_local_file(
         "menu_name": "뷰티&미용",
     }
 
-    uploaded = browser._upload_one_seone_image(job, destination, image_path)
+    browser.logger = __import__("logging").getLogger("test")
+    uploaded = browser.upload_affiliate_images(job, destination, image_paths)
 
-    assert state["prepared"] is True
+    assert state["prepared"] == 1
     assert state["menu_id"] == 9
-    assert state["clicked"] is True
-    assert state["selected"] == str(image_path.resolve())
-    assert uploaded == component
+    assert state["clicked"] == 2
+    assert state["selected"] == [str(path.resolve()) for path in image_paths]
+    assert [component["id"] for component in uploaded] == [
+        "uploaded-image-1",
+        "uploaded-image-2",
+    ]
 
 
 def test_api_capture_summarizes_payload_keys_without_values() -> None:

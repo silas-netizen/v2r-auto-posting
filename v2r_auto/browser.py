@@ -409,9 +409,11 @@ class V2RBrowser:
 
     def _se_one_option_matches(self, label: str, value: str, option_text: str) -> bool:
         if label == "계정":
+            wanted = self._normalize_option_text(value)
+            account_tokens = re.findall(r"[0-9A-Za-z_-]+", option_text)
             return any(
-                self._normalize_option_text(line) == self._normalize_option_text(value)
-                for line in option_text.splitlines()
+                self._normalize_option_text(token) == wanted
+                for token in account_tokens
             )
         return self._option_text_matches(label, value, option_text)
 
@@ -435,12 +437,71 @@ class V2RBrowser:
                 if item.is_displayed()
             ]
 
+        search_value = (
+            AFFILIATE_CAFE_SEARCH_TERMS.get(value, value)
+            if label == "카페"
+            else value
+        )
+
+        def search_inputs():
+            fields = [
+                item
+                for item in selection.find_elements(By.CSS_SELECTOR, "input")
+                if item.is_displayed() and item.is_enabled()
+            ]
+            if fields:
+                return fields
+            return [
+                item
+                for item in self.driver.find_elements(
+                    By.CSS_SELECTOR,
+                    ".n-base-select-menu input, .n-base-selection input",
+                )
+                if item.is_displayed() and item.is_enabled()
+            ]
+
+        option_wait = WebDriverWait(
+            self.driver,
+            min(
+                6,
+                getattr(
+                    getattr(self, "config", None),
+                    "timeout_seconds",
+                    20,
+                ),
+            ),
+            poll_frequency=0.25,
+        )
         try:
-            options = self.wait.until(
+            options = option_wait.until(
                 lambda driver: visible_options()
                 or (selection.click() and False)
             )
         except TimeoutException as exc:
+            fields = search_inputs()
+            if fields:
+                try:
+                    search_input = fields[-1]
+                    search_input.send_keys(Keys.CONTROL, "a")
+                    search_input.send_keys(search_value)
+                    time.sleep(0.5)
+                    search_input.send_keys(Keys.ARROW_DOWN)
+                    search_input.send_keys(Keys.ENTER)
+                    selected = WebDriverWait(
+                        self.driver,
+                        3,
+                        poll_frequency=0.25,
+                    ).until(
+                        lambda driver: self._se_one_option_matches(
+                            label,
+                            value,
+                            selection.text,
+                        )
+                    )
+                    if selected:
+                        return
+                except Exception:
+                    pass
             raise AutomationError(
                 f"SE-ONE {label} 목록이 준비되지 않았습니다"
             ) from exc
@@ -457,28 +518,10 @@ class V2RBrowser:
             direct.click()
             return
 
-        search_value = (
-            AFFILIATE_CAFE_SEARCH_TERMS.get(value, value)
-            if label == "카페"
-            else value
-        )
-        search_inputs = [
-            item
-            for item in selection.find_elements(By.CSS_SELECTOR, "input")
-            if item.is_displayed() and item.is_enabled()
-        ]
-        if not search_inputs:
-            search_inputs = [
-                item
-                for item in self.driver.find_elements(
-                    By.CSS_SELECTOR,
-                    ".n-base-select-menu input, .n-base-selection input",
-                )
-                if item.is_displayed() and item.is_enabled()
-            ]
-        if search_inputs:
+        fields = search_inputs()
+        if fields:
             try:
-                search_input = search_inputs[-1]
+                search_input = fields[-1]
                 search_input.send_keys(Keys.CONTROL, "a")
                 search_input.send_keys(search_value)
             except Exception:
@@ -652,31 +695,43 @@ class V2RBrowser:
 
     def _fill_editor(self, body: str) -> None:
         assert self.driver
-        smart_editor_iframes = [
-            element
-            for element in self.driver.find_elements(
-                By.CSS_SELECTOR, "iframe[title*='스마트 에디터']"
-            )
-            if element.is_displayed()
-        ]
-        editors = smart_editor_iframes or [
-            element
-            for element in self.driver.find_elements(
-                By.CSS_SELECTOR,
-                "[contenteditable='true'], .ProseMirror, .ql-editor, .tox-edit-area iframe",
-            )
-            if element.is_displayed() and element.get_attribute("title") != "Channel chat"
-        ]
-        if not editors:
-            raise AutomationError("본문 편집기를 찾지 못했습니다")
-        editor = editors[0]
-        if editor.tag_name.lower() == "iframe":
-            self.driver.switch_to.frame(editor)
-            editor = self.driver.find_element(By.CSS_SELECTOR, "body")
-        editor.click()
-        editor.send_keys(Keys.CONTROL, "a")
-        editor.send_keys(body)
-        self.driver.switch_to.default_content()
+        def visible_editor():
+            smart_editor_iframes = [
+                element
+                for element in self.driver.find_elements(
+                    By.CSS_SELECTOR, "iframe[title*='스마트 에디터']"
+                )
+                if element.is_displayed()
+            ]
+            editors = smart_editor_iframes or [
+                element
+                for element in self.driver.find_elements(
+                    By.CSS_SELECTOR,
+                    (
+                        "[contenteditable='true'], .ProseMirror, .ql-editor, "
+                        ".tox-edit-area iframe"
+                    ),
+                )
+                if element.is_displayed()
+                and element.get_attribute("title") != "Channel chat"
+            ]
+            return editors[0] if editors else False
+
+        try:
+            editor = self.wait.until(lambda driver: visible_editor())
+        except TimeoutException as exc:
+            raise AutomationError("본문 편집기가 준비되지 않았습니다") from exc
+        try:
+            if editor.tag_name.lower() == "iframe":
+                self.driver.switch_to.frame(editor)
+                editor = self.wait.until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "body"))
+                )
+            editor.click()
+            editor.send_keys(Keys.CONTROL, "a")
+            editor.send_keys(body)
+        finally:
+            self.driver.switch_to.default_content()
 
     def open_se_one_writer(self) -> None:
         """Open the only supported new-post flow using V2R's direct SE-ONE URL."""
@@ -1134,27 +1189,47 @@ class V2RBrowser:
             destination.get("cafe_id"),
             destination.get("menu_id"),
         )
-        self.open_se_one_writer()
-        self._select_option("카페", cafe_name)
-        self._select_option("계정", account)
-        self._select_option("게시판", menu_name)
-        self._fill_input(
-            "제목",
-            job.title,
-            "input[placeholder*='제목'], textarea[placeholder*='제목']",
-        )
-        self._fill_editor(strip_placeholders(job.body))
-        self.wait.until(
-            lambda driver: driver.find_elements(By.CSS_SELECTOR, ".seone-container")
-        )
-
-        def editor_document_ready(_driver):
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
             try:
-                return self._get_seone_document()
-            except AutomationError:
-                return False
+                self.open_se_one_writer()
+                self._select_option("카페", cafe_name)
+                self._select_option("계정", account)
+                self._select_option("게시판", menu_name)
+                self._fill_input(
+                    "제목",
+                    job.title,
+                    "input[placeholder*='제목'], textarea[placeholder*='제목']",
+                )
+                self.wait.until(
+                    lambda driver: driver.find_elements(
+                        By.CSS_SELECTOR, ".seone-container"
+                    )
+                )
+                self._fill_editor(strip_placeholders(job.body))
 
-        self.wait.until(editor_document_ready)
+                def editor_document_ready(_driver):
+                    try:
+                        return self._get_seone_document()
+                    except AutomationError:
+                        return False
+
+                self.wait.until(editor_document_ready)
+                return
+            except (AutomationError, TimeoutException) as exc:
+                last_error = exc
+                if attempt == 3:
+                    break
+                self.logger.warning(
+                    "행 %s 사진 화면 준비 재시도 (%s/3): %s",
+                    job.row_number,
+                    attempt + 1,
+                    exc,
+                )
+                time.sleep(attempt)
+        raise AutomationError(
+            f"SE-ONE 사진 화면을 준비하지 못했습니다: {last_error}"
+        ) from last_error
 
     def _seone_image_inputs(self):
         assert self.driver
@@ -1207,12 +1282,9 @@ class V2RBrowser:
 
     def _upload_one_seone_image(
         self,
-        job: AffiliateJob,
-        destination: dict,
         image_path: Path,
     ) -> dict:
         assert self.driver
-        self._prepare_seone_image_editor(job, destination)
         existing_media_count = len(
             self._media_components(self._get_seone_document())
         )
@@ -1244,6 +1316,7 @@ class V2RBrowser:
         image_paths: list[Path],
     ) -> list[dict]:
         """Upload through V2R's SmartEditor, while article submission stays API-based."""
+        self._prepare_seone_image_editor(job, destination)
         uploaded: list[dict] = []
         for index, image_path in enumerate(image_paths, start=1):
             self.logger.info(
@@ -1254,16 +1327,11 @@ class V2RBrowser:
                 image_path.name,
             )
             try:
-                uploaded.append(
-                    self._upload_one_seone_image(job, destination, image_path)
-                )
+                uploaded.append(self._upload_one_seone_image(image_path))
             except Exception as exc:
-                self.logger.warning(
-                    "행 %s 이미지 1개 업로드 실패로 생략: %s",
-                    job.row_number,
-                    exc,
-                )
-                uploaded.append({})
+                raise AutomationError(
+                    f"{image_path.name} 사진 첨부 실패: {exc}"
+                ) from exc
         return uploaded
 
     def _get_affiliate_publisher(self):
