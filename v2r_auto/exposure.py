@@ -256,6 +256,7 @@ class ExposureChecker:
         *,
         dry_run: bool,
         stop_event=None,
+        pause_event=None,
         progress=None,
     ) -> list[ExposureRow]:
         total = len(rows)
@@ -263,14 +264,53 @@ class ExposureChecker:
             if stop_event is not None and stop_event.is_set():
                 self.logger.info("중지 요청으로 노출 검사를 멈춥니다")
                 break
+            self._wait_while_paused(pause_event, stop_event)
+            if stop_event is not None and stop_event.is_set():
+                self.logger.info("중지 요청으로 노출 검사를 멈춥니다")
+                break
+            keyword = strip_parenthetical(row.keyword)
+            if not keyword:
+                self.logger.warning("괄호를 빼니 검색어가 없어 건너뜁니다: %s", row.keyword)
+                if progress:
+                    progress(index, total)
+                continue
             if progress:
                 progress(index - 1, total)
             self._check_one(row, dry_run=dry_run)
+            self._wait_while_paused(pause_event, stop_event)
             if self.delay_seconds:
-                time.sleep(self.delay_seconds)
+                self._interruptible_delay(
+                    self.delay_seconds, stop_event, pause_event
+                )
             if progress:
                 progress(index, total)
         return rows
+
+    def _wait_while_paused(self, pause_event, stop_event) -> None:
+        if pause_event is None or not pause_event.is_set():
+            return
+        self.logger.info(
+            "일시 중지했습니다. 다시 시작을 누르면 다음 키워드부터 이어서 합니다"
+        )
+        while pause_event.is_set():
+            if stop_event is not None and stop_event.is_set():
+                return
+            if stop_event is not None:
+                stop_event.wait(0.2)
+            else:
+                time.sleep(0.2)
+        if stop_event is None or not stop_event.is_set():
+            self.logger.info("검사를 다시 시작합니다")
+
+    def _interruptible_delay(self, seconds: float, stop_event, pause_event) -> None:
+        end = time.time() + seconds
+        while time.time() < end:
+            if stop_event is not None and stop_event.is_set():
+                return
+            self._wait_while_paused(pause_event, stop_event)
+            if stop_event is not None and stop_event.is_set():
+                return
+            time.sleep(0.1)
 
     def _check_one(self, row: ExposureRow, *, dry_run: bool) -> None:
         keyword = strip_parenthetical(row.keyword)

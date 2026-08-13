@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 from urllib.error import HTTPError
 
 from v2r_auto.exposure import (
@@ -83,6 +85,7 @@ def test_strip_parenthetical_keeps_search_keyword() -> None:
         == "모로오렌지 추출물"
     )
     assert strip_parenthetical("코숨핏") == "코숨핏"
+    assert strip_parenthetical("통밀빵 100% 다이어트（메모）") == "통밀빵 100% 다이어트"
 
 
 def test_cafe_name_ignores_spaces() -> None:
@@ -315,3 +318,80 @@ def test_naver_tab_is_home_or_search_only() -> None:
     )
     assert not search._is_naver_search_or_home("https://cafe.naver.com/ccang/1")
     assert not search._is_naver_search_or_home("https://nid.naver.com/nidlogin.login")
+
+
+def test_pause_then_resume_continues_next_keyword() -> None:
+    naver = FakeNaver("<div id='main_pack'></div>")
+    pause = threading.Event()
+    pause.set()
+    checker = ExposureChecker(
+        type("N", (), {"update_status": staticmethod(lambda *_a: None)})(),
+        naver,
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    )
+
+    def work() -> None:
+        checker.run(
+            [_row("하나"), _row("둘")],
+            dry_run=True,
+            pause_event=pause,
+        )
+
+    thread = threading.Thread(target=work)
+    thread.start()
+    time.sleep(0.4)
+    assert naver.searched == []
+    pause.clear()
+    thread.join(timeout=2)
+    assert thread.is_alive() is False
+    assert naver.searched == ["하나", "둘"]
+
+
+def test_pause_after_first_keyword_waits_before_second() -> None:
+    pause = threading.Event()
+    naver = FakeNaver("<div id='main_pack'></div>")
+    original_search = naver.search_integrated
+
+    def search_and_pause(keyword: str) -> str:
+        html = original_search(keyword)
+        if keyword == "하나":
+            pause.set()
+        return html
+
+    naver.search_integrated = search_and_pause  # type: ignore[method-assign]
+    checker = ExposureChecker(
+        type("N", (), {"update_status": staticmethod(lambda *_a: None)})(),
+        naver,
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    )
+
+    def work() -> None:
+        checker.run(
+            [_row("하나"), _row("둘")],
+            dry_run=True,
+            pause_event=pause,
+        )
+
+    thread = threading.Thread(target=work)
+    thread.start()
+    deadline = time.time() + 2
+    while time.time() < deadline and not pause.is_set():
+        time.sleep(0.05)
+    time.sleep(0.3)
+    assert naver.searched == ["하나"]
+    pause.clear()
+    thread.join(timeout=2)
+    assert naver.searched == ["하나", "둘"]
+
+
+def test_empty_keyword_after_parentheses_is_skipped() -> None:
+    naver = FakeNaver("<div id='main_pack'></div>")
+    ExposureChecker(
+        type("N", (), {"update_status": staticmethod(lambda *_a: None)})(),
+        naver,
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    ).run([_row("(메모만 있음)"), _row("코숨핏")], dry_run=True)
+    assert naver.searched == ["코숨핏"]

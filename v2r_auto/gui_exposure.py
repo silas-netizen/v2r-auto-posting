@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
@@ -72,6 +73,7 @@ class ExposureApp(AutomationApp):
         self.brands = tk.StringVar(value=", ".join(DEFAULT_BRAND_MARKERS))
         self.dry_run = tk.BooleanVar(value=True)
         self.progress_text = tk.StringVar(value="대기 중")
+        self.pause_event = threading.Event()
 
     def _build_ui(self) -> None:
         outer = ttk.Frame(self, padding=16)
@@ -114,10 +116,18 @@ class ExposureApp(AutomationApp):
             actions, text="3. 노출 검사 시작", command=self._start
         )
         self.start_button.pack(side=tk.LEFT)
+        self.pause_button = ttk.Button(
+            actions, text="일시 중지", command=self._pause, state=tk.DISABLED
+        )
+        self.pause_button.pack(side=tk.LEFT, padx=(6, 0))
+        self.resume_button = ttk.Button(
+            actions, text="다시 시작", command=self._resume, state=tk.DISABLED
+        )
+        self.resume_button.pack(side=tk.LEFT, padx=6)
         self.stop_button = ttk.Button(
             actions, text="중지", command=self._stop, state=tk.DISABLED
         )
-        self.stop_button.pack(side=tk.LEFT, padx=6)
+        self.stop_button.pack(side=tk.LEFT)
         ttk.Button(
             actions,
             text="저장 폴더",
@@ -208,7 +218,10 @@ class ExposureApp(AutomationApp):
             return
         self._save_settings()
         self.stop_event.clear()
+        self.pause_event.clear()
         self.start_button.configure(state=tk.DISABLED)
+        self.pause_button.configure(state=tk.NORMAL)
+        self.resume_button.configure(state=tk.DISABLED)
         self.stop_button.configure(state=tk.NORMAL)
         self.progress.configure(value=0)
         self.progress_text.set("노션 키워드를 읽는 중")
@@ -229,14 +242,23 @@ class ExposureApp(AutomationApp):
                     rows,
                     dry_run=dry_run,
                     stop_event=self.stop_event,
+                    pause_event=self.pause_event,
                     progress=self._set_progress,
                 )
-                self.ui_queue.put(
-                    (
-                        "info",
-                        ("검사 종료", f"키워드 {len(rows)}건 검사를 마쳤습니다"),
+                if self.stop_event.is_set():
+                    self.ui_queue.put(
+                        (
+                            "info",
+                            ("검사 중지", "중지했습니다. 다시 시작하려면 노출 검사 시작을 누르세요"),
+                        )
                     )
-                )
+                else:
+                    self.ui_queue.put(
+                        (
+                            "info",
+                            ("검사 종료", f"키워드 {len(rows)}건 검사를 마쳤습니다"),
+                        )
+                    )
             except Exception as exc:
                 self.logger.exception("노출 검사 실행 실패")
                 self.ui_queue.put(("error", ("실행 실패", str(exc))))
@@ -244,6 +266,36 @@ class ExposureApp(AutomationApp):
                 self.ui_queue.put(("finished", None))
 
         self.worker = self.executor.submit(work)
+
+    def _pause(self) -> None:
+        if not self.worker or self.worker.done():
+            return
+        self.pause_event.set()
+        self.pause_button.configure(state=tk.DISABLED)
+        self.resume_button.configure(state=tk.NORMAL)
+        self.progress_text.set("일시 중지")
+        self.logger.info("일시 중지를 눌렀습니다. 지금 보는 키워드가 끝나면 멈춥니다")
+
+    def _resume(self) -> None:
+        if not self.worker or self.worker.done():
+            return
+        self.pause_event.clear()
+        self.pause_button.configure(state=tk.NORMAL)
+        self.resume_button.configure(state=tk.DISABLED)
+        self.progress_text.set("다시 시작")
+        self.logger.info("다시 시작을 눌렀습니다")
+
+    def _stop(self) -> None:
+        self.pause_event.clear()
+        self.pause_button.configure(state=tk.DISABLED)
+        self.resume_button.configure(state=tk.DISABLED)
+        super()._stop()
+
+    def _worker_finished(self) -> None:
+        super()._worker_finished()
+        self.pause_button.configure(state=tk.DISABLED)
+        self.resume_button.configure(state=tk.DISABLED)
+        self.pause_event.clear()
 
     def _on_close(self) -> None:
         try:
