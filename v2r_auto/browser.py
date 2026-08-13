@@ -733,12 +733,38 @@ class V2RBrowser:
             if element.is_displayed()
             and element.rect.get("width", 0) > 20
             and element.rect.get("height", 0) > 10
-            and element.rect.get("x", -1) >= 0
-            and element.rect.get("y", -1) >= 0
         ]
 
     def _focus_seone_text_paragraph(self) -> None:
         assert self.driver
+        document = self._get_seone_document()
+        paragraph_ids = [
+            str(paragraph.get("id") or "")
+            for component in document.get("document", {}).get("components", [])
+            if component.get("@ctype") == "text"
+            for paragraph in component.get("value", [])
+            if paragraph.get("id")
+        ]
+        for paragraph_id in reversed(paragraph_ids):
+            candidates = self.driver.find_elements(By.ID, paragraph_id)
+            target = next(
+                (
+                    element
+                    for element in candidates
+                    if element.is_displayed()
+                    and element.rect.get("width", 0) > 20
+                    and element.rect.get("height", 0) > 10
+                ),
+                None,
+            )
+            if target is None:
+                continue
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'});",
+                target,
+            )
+            ActionChains(self.driver).move_to_element(target).click().perform()
+            return
         try:
             paragraphs = self.wait.until(
                 lambda driver: self._visible_seone_text_paragraphs()

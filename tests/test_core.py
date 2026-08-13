@@ -335,6 +335,66 @@ def test_fill_editor_uses_visible_smarteditor_paragraph(monkeypatch) -> None:
     assert state["default_content"] is True
 
 
+def test_photo_focus_uses_last_document_paragraph_even_when_offscreen(
+    monkeypatch,
+) -> None:
+    state = {"target": None, "scrolled": None}
+
+    class FakeParagraph:
+        rect = {"width": 800, "height": 24, "x": 454, "y": -900}
+
+        def is_displayed(self) -> bool:
+            return True
+
+    paragraph = FakeParagraph()
+
+    class FakeDriver:
+        def find_elements(self, by, selector):
+            return [paragraph] if selector == "paragraph-last" else []
+
+        def execute_script(self, script, element):
+            state["scrolled"] = element
+
+    class FocusBrowser(V2RBrowser):
+        def _get_seone_document(self) -> dict:
+            return {
+                "document": {
+                    "components": [
+                        {
+                            "@ctype": "text",
+                            "value": [
+                                {"@ctype": "paragraph", "id": "paragraph-first"},
+                                {"@ctype": "paragraph", "id": "paragraph-last"},
+                            ],
+                        }
+                    ]
+                }
+            }
+
+    class FakeActions:
+        def __init__(self, driver):
+            return None
+
+        def move_to_element(self, element):
+            state["target"] = element
+            return self
+
+        def click(self):
+            return self
+
+        def perform(self):
+            return None
+
+    monkeypatch.setattr("v2r_auto.browser.ActionChains", FakeActions)
+    browser = object.__new__(FocusBrowser)
+    browser.driver = FakeDriver()
+
+    browser._focus_seone_text_paragraph()
+
+    assert state["scrolled"] is paragraph
+    assert state["target"] is paragraph
+
+
 def test_reads_document_from_public_smarteditor_api() -> None:
     document = {
         "document": {
