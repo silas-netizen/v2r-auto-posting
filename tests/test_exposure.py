@@ -11,6 +11,7 @@ from v2r_auto.exposure import (
     cafe_id_for_check,
     collect_our_cafe_hits,
     is_cafe_article_url,
+    keyword_tool_query,
     keywordstool_volume,
     match_selected_rows,
     matching_cafe_name,
@@ -21,6 +22,7 @@ from v2r_auto.exposure import (
     preserve_cafe_id,
     same_search_query,
     strip_parenthetical,
+    volume_from_result_cells,
 )
 from v2r_auto.exposure_notion import NotionExposureStore, parse_database_id
 
@@ -585,6 +587,8 @@ def test_keywordstool_adds_pc_and_mobile() -> None:
         }
     }
     assert keywordstool_volume(nested, "코숨핏") == 50
+    assert keyword_tool_query("bnr17 유산균 효과") == "bnr17유산균효과"
+    assert volume_from_result_cells(["BNR17유산균효과", "20", "110"], "bnr17 유산균 효과") == 130
 
 
 def test_checker_writes_cafe_and_volumes() -> None:

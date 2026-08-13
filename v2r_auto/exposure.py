@@ -143,6 +143,28 @@ def cafe_id_for_check(
     return kept, kept
 
 
+def keyword_tool_query(keyword: str) -> str:
+    return re.sub(r"\s+", "", strip_parenthetical(keyword or ""))
+
+
+def volume_from_result_cells(cells: list[str], keyword: str) -> int | None:
+    want = compact_text(keyword)
+    texts = [str(cell or "").strip() for cell in cells if str(cell or "").strip()]
+    if len(texts) < 2:
+        return None
+    names = [compact_text(cell.split("\n")[0]) for cell in texts]
+    if want not in names:
+        return None
+    start = names.index(want) + 1
+    numbers = [parse_qc_count(cell.split("\n")[-1]) for cell in texts[start:]]
+    numbers = [item for item in numbers if item is not None]
+    if len(numbers) >= 2:
+        return numbers[0] + numbers[1]
+    if numbers:
+        return numbers[0]
+    return None
+
+
 def parse_qc_count(value) -> int | None:
     text = str(value or "").replace(",", "").replace(" ", "")
     if not text:
@@ -189,11 +211,13 @@ def keywordstool_volume(payload: dict, keyword: str) -> int | None:
         pc = parse_qc_count(
             item.get("monthlyPcQcCnt")
             or item.get("monthlyPcQcCount")
+            or item.get("monthlyPcQc")
             or item.get("pcQcCnt")
         )
         mobile = parse_qc_count(
             item.get("monthlyMobileQcCnt")
             or item.get("monthlyMobileQcCount")
+            or item.get("monthlyMobileQc")
             or item.get("mobileQcCnt")
         )
         if pc is None and mobile is None:

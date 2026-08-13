@@ -10,7 +10,16 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 
-from .exposure import compact_text, keywordstool_volume, naver_search_url, parse_qc_count, same_search_query, strip_parenthetical
+from .exposure import (
+    compact_text,
+    keyword_tool_query,
+    keywordstool_volume,
+    naver_search_url,
+    parse_qc_count,
+    same_search_query,
+    strip_parenthetical,
+    volume_from_result_cells,
+)
 
 SEARCH_BOX_SELECTORS = (
     "#query",
@@ -205,11 +214,11 @@ class SeleniumNaverSearch:
                     "광고주센터 키워드 도구로 들어가면 검색량을 채울 수 있습니다. 노출상태와 카페는 그대로 반영합니다"
                 )
                 return None
-            payload = self._fetch_keywordstool_json(driver, keyword)
-            volume = keywordstool_volume(payload or {}, keyword)
+            volume = self._scrape_keyword_tool(driver, keyword)
             if volume is not None:
                 return volume
-            volume = self._scrape_keyword_tool(driver, keyword)
+            payload = self._fetch_keywordstool_json(driver, keyword)
+            volume = keywordstool_volume(payload or {}, keyword)
             if volume is not None:
                 return volume
             self.logger.warning("검색량을 찾지 못했습니다: %s", keyword)
@@ -467,65 +476,130 @@ class SeleniumNaverSearch:
         return payload if isinstance(payload, dict) else None
 
     def _scrape_keyword_tool(self, driver, keyword: str) -> int | None:
-        box = None
-        for selector in (
-            'textarea[placeholder*="키워드"]',
-            "textarea",
-            'input[placeholder*="키워드"]',
-        ):
-            for element in driver.find_elements(By.CSS_SELECTOR, selector):
-                try:
-                    if element.is_displayed():
-                        box = element
-                        break
-                except Exception:
-                    continue
-            if box:
-                break
-        if box is None:
+        query = keyword_tool_query(keyword)
+        if not query:
             return None
-        box.click()
-        box.send_keys(Keys.CONTROL, "a")
-        box.send_keys(Keys.BACKSPACE)
-        box.send_keys(keyword)
-        clicked = False
-        for element in driver.find_elements(By.CSS_SELECTOR, "button, a.btn, input[type='button']"):
-            label = compact_text(element.text or element.get_attribute("value") or "")
-            if label in {"조회", "조회하기"} or label.endswith("조회하기"):
+        self._check_keyword_hint_box(driver)
+        box = self._find_keyword_tool_box(driver)
+        if box is None:
+            self.logger.warning("키워드 도구 입력칸을 찾지 못했습니다")
+            return None
+        self._fill_keyword_tool_box(driver, box, query)
+        if not self._click_keyword_lookup(driver):
+            box.send_keys(Keys.ENTER)
+        time.sleep(2.4)
+        volume = self._volume_from_keyword_table(driver, query)
+        if volume is not None:
+            self.logger.info("키워드 도구 검색량(PC+모바일): %s = %s", query, volume)
+        return volume
+
+    def _check_keyword_hint_box(self, driver) -> None:
+        script = """
+        const wraps = Array.from(document.querySelectorAll('label, .ant-checkbox-wrapper'));
+        for (const wrap of wraps) {
+          const text = (wrap.innerText || '').replace(/\\s+/g, '');
+          if (text !== '키워드') continue;
+          const box = wrap.querySelector('input[type="checkbox"]');
+          if (box && !box.checked) {
+            wrap.click();
+            return true;
+          }
+          return false;
+        }
+        return false;
+        """
+        try:
+            driver.execute_script(script)
+        except Exception:
+            return
+
+    def _find_keyword_tool_box(self, driver):
+        script = """
+        const visible = (el) => {
+          const r = el.getBoundingClientRect();
+          return r.width > 40 && r.height > 12 && el.offsetParent !== null;
+        };
+        const boxes = Array.from(document.querySelectorAll('textarea, input[type="text"]')).filter(visible);
+        const hinted = boxes.find((el) => (el.getAttribute('placeholder') || '').includes('한 줄에 하나씩'));
+        if (hinted) return hinted;
+        const section = Array.from(document.querySelectorAll('*')).find((el) => {
+          const text = (el.innerText || '').replace(/\\s+/g, '');
+          return text.includes('연관키워드조회기준') && text.length < 3500;
+        });
+        if (section) {
+          const inner = Array.from(section.querySelectorAll('textarea, input[type="text"]')).filter(visible);
+          if (inner.length) return inner[0];
+        }
+        return null;
+        """
+        try:
+            box = driver.execute_script(script)
+        except Exception:
+            box = None
+        if box is not None:
+            return box
+        for xpath in (
+            "//textarea[contains(@placeholder, '한 줄에 하나씩')]",
+            "//*[contains(normalize-space(), '연관키워드 조회 기준')]/following::textarea[1]",
+        ):
+            found = driver.find_elements(By.XPATH, xpath)
+            for element in found:
                 try:
                     if element.is_displayed():
-                        element.click()
-                        clicked = True
-                        break
+                        return element
                 except Exception:
                     continue
-        if not clicked:
-            box.send_keys(Keys.ENTER)
-        time.sleep(1.8)
-        return self._volume_from_keyword_table(driver, keyword)
+        return None
+
+    def _fill_keyword_tool_box(self, driver, box, query: str) -> None:
+        script = """
+        const el = arguments[0];
+        const val = arguments[1];
+        el.focus();
+        const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+        if (desc && desc.set) desc.set.call(el, val);
+        else el.value = val;
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+        el.dispatchEvent(new Event('change', {bubbles: true}));
+        """
+        try:
+            driver.execute_script(script, box, query)
+        except Exception:
+            box.click()
+            box.send_keys(Keys.CONTROL, "a")
+            box.send_keys(Keys.BACKSPACE)
+            box.send_keys(query)
+
+    def _click_keyword_lookup(self, driver) -> bool:
+        script = """
+        const buttons = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+        const btn = buttons.find((el) => (el.innerText || '').replace(/\\s+/g, '') === '조회하기');
+        if (!btn) return false;
+        btn.click();
+        return true;
+        """
+        try:
+            return bool(driver.execute_script(script))
+        except Exception:
+            return False
 
     def _volume_from_keyword_table(self, driver, keyword: str) -> int | None:
-        want = compact_text(keyword)
-        rows = driver.find_elements(By.CSS_SELECTOR, "tr, [role='row']")
+        rows = driver.find_elements(
+            By.CSS_SELECTOR, "tr, [role='row'], .ant-table-row"
+        )
         for row in rows:
             cells = [
                 cell.text.strip()
-                for cell in row.find_elements(By.CSS_SELECTOR, "th,td,[role='cell'],[role='gridcell']")
+                for cell in row.find_elements(
+                    By.CSS_SELECTOR, "th,td,[role='cell'],[role='gridcell'],.ant-table-cell"
+                )
             ]
             if not cells:
                 cells = [part.strip() for part in (row.text or "").split("\n") if part.strip()]
-            if len(cells) < 2:
-                continue
-            names = [compact_text(cell.split("\n")[0]) for cell in cells]
-            if want not in names:
-                continue
-            start = names.index(want) + 1
-            numbers = [
-                parse_qc_count(cell.split("\n")[-1]) for cell in cells[start:]
-            ]
-            numbers = [item for item in numbers if item is not None]
-            if numbers:
-                return sum(numbers[:2])
+            volume = volume_from_result_cells(cells, keyword)
+            if volume is not None:
+                return volume
         return None
 
     def open_post_text(self, url: str) -> str:
