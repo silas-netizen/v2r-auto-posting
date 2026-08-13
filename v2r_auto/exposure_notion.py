@@ -230,13 +230,13 @@ class NotionExposureStore:
         row: ExposureRow,
         *,
         status: str,
-        cafe_name: str = "",
+        cafe_name: str | None = None,
         search_volume: int | None = None,
         volume_found: bool = False,
     ) -> None:
         key = "status" if row.status_type == "status" else "select"
         properties: dict[str, Any] = {row.status_property: {key: {"name": status}}}
-        if row.cafe_property:
+        if row.cafe_property and cafe_name is not None:
             written = self._writable_value(row.cafe_type, cafe_name)
             if written is not None:
                 properties[row.cafe_property] = written

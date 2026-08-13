@@ -8,6 +8,7 @@ from v2r_auto.exposure import (
     ExposureChecker,
     ExposureRow,
     brand_found,
+    cafe_id_for_check,
     collect_our_cafe_hits,
     is_cafe_article_url,
     keywordstool_volume,
@@ -384,22 +385,23 @@ def test_notion_store_writes_cafe_and_search_volumes() -> None:
     store.update_check_result(
         row,
         status="밀려남",
-        cafe_name="",
+        cafe_name=None,
         search_volume=321,
         volume_found=True,
     )
     hidden = bodies[-1]["properties"]
-    assert hidden["카페/ID"]["rich_text"] == []
+    assert "카페/ID" not in hidden
     assert hidden["키워드 검색량"]["number"] == 321
     assert hidden["노출된 검색량"]["number"] is None
     store.update_check_result(
         row,
         status="밀려남",
-        cafe_name="",
+        cafe_name=None,
         search_volume=None,
         volume_found=False,
     )
     no_volume = bodies[-1]["properties"]
+    assert "카페/ID" not in no_volume
     assert "키워드 검색량" not in no_volume
     assert no_volume["노출된 검색량"]["number"] is None
 
@@ -534,7 +536,11 @@ def test_match_selected_rows_uses_notion_keyword() -> None:
 def test_preserve_cafe_id_keeps_existing_suffix() -> None:
     assert preserve_cafe_id("씨씨앙/dtsx", "씨씨앙") == "씨씨앙/dtsx"
     assert preserve_cafe_id("양평맘/aa", "씨씨앙") == "씨씨앙"
-    assert preserve_cafe_id("씨씨앙/dtsx", "") == ""
+    assert preserve_cafe_id("씨씨앙/dtsx", "") == "씨씨앙/dtsx"
+    assert cafe_id_for_check("씨씨앙/dtsx", "밀려남", "") == ("씨씨앙/dtsx", None)
+    assert cafe_id_for_check("씨씨앙/dtsx", "노출완", "씨씨앙") == ("씨씨앙/dtsx", None)
+    assert cafe_id_for_check("양평맘/aa", "노출완", "씨씨앙") == ("씨씨앙", "씨씨앙")
+    assert cafe_id_for_check("", "노출완", "씨씨앙") == ("씨씨앙", "씨씨앙")
 
 
 def test_keywordstool_adds_pc_and_mobile() -> None:
@@ -564,7 +570,7 @@ def test_checker_writes_cafe_and_volumes() -> None:
     results = []
 
     class FakeNotion:
-        def update_check_result(self, row, *, status, cafe_name="", search_volume=None, volume_found=False):
+        def update_check_result(self, row, *, status, cafe_name=None, search_volume=None, volume_found=False):
             results.append((status, cafe_name, search_volume, volume_found))
 
     class VolumeNaver(FakeNaver):
@@ -579,24 +585,56 @@ def test_checker_writes_cafe_and_volumes() -> None:
         __import__("logging").getLogger("test"),
         delay_seconds=0,
     ).run([row], dry_run=False)
-    assert results == [("노출완", "씨씨앙/dtsx", 321, True)]
+    assert results == [("노출완", None, 321, True)]
+    assert row.current_cafe == "씨씨앙/dtsx"
 
 
-def test_hidden_clears_cafe_and_exposed_volume() -> None:
+def test_exposed_updates_cafe_only_when_different() -> None:
+    post = "https://cafe.naver.com/ccang/1"
+    html = f"""
+    <a href="https://cafe.naver.com/ccang">씨씨앙</a>
+    <a href="{post}">글</a>
+    """
     results = []
 
     class FakeNotion:
-        def update_check_result(self, row, *, status, cafe_name="", search_volume=None, volume_found=False):
+        def update_check_result(self, row, *, status, cafe_name=None, search_volume=None, volume_found=False):
+            results.append((status, cafe_name, search_volume, volume_found))
+
+    class VolumeNaver(FakeNaver):
+        def lookup_search_volume(self, keyword: str) -> int:
+            return 10
+
+    row = _row("키워드")
+    row.current_cafe = "양평맘/aa"
+    ExposureChecker(
+        FakeNotion(),
+        VolumeNaver(html, {post: "코숨핏 후기"}),
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    ).run([row], dry_run=False)
+    assert results == [("노출완", "씨씨앙", 10, True)]
+    assert row.current_cafe == "씨씨앙"
+
+
+def test_hidden_keeps_cafe_and_clears_exposed_volume() -> None:
+    results = []
+
+    class FakeNotion:
+        def update_check_result(self, row, *, status, cafe_name=None, search_volume=None, volume_found=False):
             results.append((status, cafe_name, search_volume, volume_found))
 
     class VolumeNaver(FakeNaver):
         def lookup_search_volume(self, keyword: str) -> int:
             return 50
 
+    row = _row("키워드", "노출완")
+    row.current_cafe = "씨씨앙/dtsx"
     ExposureChecker(
         FakeNotion(),
         VolumeNaver("<div id='main_pack'></div>"),
         __import__("logging").getLogger("test"),
         delay_seconds=0,
-    ).run([_row("키워드", "노출완")], dry_run=False)
-    assert results == [("밀려남", "", 50, True)]
+    ).run([row], dry_run=False)
+    assert results == [("밀려남", None, 50, True)]
+    assert row.current_cafe == "씨씨앙/dtsx"

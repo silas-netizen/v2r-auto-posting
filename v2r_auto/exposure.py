@@ -114,14 +114,33 @@ def match_selected_rows(
     return matched, missing
 
 
+def cafe_id_name(value: str) -> str:
+    text = (value or "").strip()
+    if "/" in text:
+        text = text.split("/", 1)[0].strip()
+    return compact_text(text)
+
+
 def preserve_cafe_id(current: str, cafe_name: str) -> str:
+    existing = (current or "").strip()
     cafe = (cafe_name or "").strip()
     if not cafe:
-        return ""
-    existing = (current or "").strip()
-    if existing and compact_text(existing).startswith(compact_text(cafe)):
+        return existing
+    if existing and cafe_id_name(existing) == compact_text(cafe):
         return existing
     return cafe
+
+
+def cafe_id_for_check(
+    current: str, status: str, found_cafe: str
+) -> tuple[str, str | None]:
+    existing = (current or "").strip()
+    if status != STATUS_EXPOSED:
+        return existing, None
+    kept = preserve_cafe_id(existing, found_cafe or "")
+    if not (found_cafe or "").strip() or kept == existing:
+        return existing, None
+    return kept, kept
 
 
 def parse_qc_count(value) -> int | None:
@@ -507,13 +526,18 @@ class ExposureChecker:
         volume_found: bool,
         dry_run: bool,
     ) -> None:
-        cafe_value = preserve_cafe_id(row.current_cafe, cafe_name) if cafe_name else ""
+        cafe_value, cafe_write = cafe_id_for_check(row.current_cafe, status, cafe_name)
+        cafe_log = cafe_write or cafe_value or "(없음)"
+        if cafe_write:
+            cafe_log = f"변경 {cafe_write}"
+        elif cafe_value:
+            cafe_log = f"유지 {cafe_value}"
         if dry_run:
             self.logger.info(
                 "검증 모드: %s → %s / 카페 %s / 검색량 %s (노션에 쓰지 않음)",
                 row.current_status or "(비어 있음)",
                 status,
-                cafe_value or "(비움)",
+                cafe_log,
                 volume if volume_found else "(조회 안 됨)",
             )
             return
@@ -521,7 +545,7 @@ class ExposureChecker:
             self.notion.update_check_result(
                 row,
                 status=status,
-                cafe_name=cafe_value,
+                cafe_name=cafe_write,
                 search_volume=volume,
                 volume_found=volume_found,
             )
@@ -531,6 +555,8 @@ class ExposureChecker:
             self.logger.info("노션 노출상태 변경: %s → %s", row.keyword, status)
         else:
             self.logger.info("상태 유지: %s", status)
+        if cafe_write:
+            self.logger.info("노션 카페/ID 변경: %s → %s", row.keyword, cafe_write)
         row.current_status = status
         row.current_cafe = cafe_value
 

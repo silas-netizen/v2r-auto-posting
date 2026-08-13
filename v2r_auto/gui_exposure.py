@@ -262,7 +262,7 @@ class ExposureApp(AutomationApp):
                 return
         elif not messagebox.askyesno(
             "실제 반영",
-            "검증 모드가 꺼져 있습니다. 검색 결과에 따라 노션 노출상태, 카페/ID, 검색량을 바꿀까요?",
+            "검증 모드가 꺼져 있습니다. 검색 결과에 따라 노션 노출상태와 검색량을 바꿉니다. 카페/ID는 노출완이고 카페가 다를 때만 바꿉니다. 계속할까요?",
         ):
             return
         self._save_settings()
