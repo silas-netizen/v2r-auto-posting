@@ -4,6 +4,8 @@
 저장소: `https://github.com/silas-netizen/v2r-auto-posting`  
 기준 브랜치: `cursor/immediate-cafe-api-f548`
 
+처음 쓰는 사람용 설명서는 `사용설명서.md`이다. 이 문서는 AI·개발 인수인계용이다.
+
 ## 새 AI가 가장 먼저 지켜야 할 것
 
 1. 이 문서를 처음부터 끝까지 읽은 후 코드를 확인한다.
