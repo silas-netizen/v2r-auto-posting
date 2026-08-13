@@ -375,6 +375,76 @@ def test_affiliate_runner_uses_single_revision_flow(tmp_path: Path) -> None:
     assert report.exists()
 
 
+def test_affiliate_runner_reserves_all_daily_posts_before_waiting_for_revisions(
+    tmp_path: Path,
+) -> None:
+    first = load_affiliate_jobs(
+        write_affiliate_csv(tmp_path),
+        selected_row_number=2,
+    )[0]
+    second = load_affiliate_jobs(
+        write_affiliate_csv(tmp_path),
+        selected_row_number=2,
+    )[0]
+    first.cafe = "씨씨앙"
+    second.cafe = "양평맘"
+    events: list[tuple[str, str]] = []
+
+    class PreReserveBrowser(FakeAffiliateBrowser):
+        def reserve_affiliate_daily(self, job, resume=None, checkpoint=None):
+            events.append(("daily", job.cafe))
+            if checkpoint:
+                checkpoint(
+                    "DAILY_CREATED",
+                    daily_source_id=f"daily-{job.cafe}",
+                    daily_scheduled_at=job.daily_scheduled_at.isoformat(),
+                )
+            return f"https://v2r.example/daily-{job.cafe}"
+
+        def publish_affiliate_revision(
+            self,
+            job,
+            dry_run: bool,
+            resume=None,
+            checkpoint=None,
+        ) -> str:
+            assert not dry_run
+            assert resume.get("daily_source_id") == f"daily-{job.cafe}"
+            events.append(("revision", job.cafe))
+            return f"https://v2r.example/revision-{job.cafe}"
+
+        def update_completion_link(self, sheet_url, row_number, url):
+            return None
+
+    browser = PreReserveBrowser()
+    runner = AffiliateRunner(
+        browser=browser,  # type: ignore[arg-type]
+        report_dir=tmp_path,
+        logger=logging.getLogger("test"),
+    )
+
+    runner.run(
+        jobs=[first, second],
+        email="",
+        password="",
+        dry_run=False,
+        stop_event=threading.Event(),
+        progress=lambda current, total: None,
+        daily_posts=[
+            DailyPost(2, "씨씨앙", "씨씨앙 일상", "내용"),
+            DailyPost(3, "양평맘", "양평맘 일상", "내용"),
+        ],
+        source_sheet_url="https://docs.google.com/spreadsheets/d/example/edit?gid=0",
+    )
+
+    assert events == [
+        ("daily", "씨씨앙"),
+        ("daily", "양평맘"),
+        ("revision", "씨씨앙"),
+        ("revision", "양평맘"),
+    ]
+
+
 def test_affiliate_runner_retries_with_replacement_account(tmp_path: Path) -> None:
     job = load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0]
     job.account_type = "실명"

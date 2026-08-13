@@ -1229,6 +1229,21 @@ class V2RBrowser:
             checkpoint=checkpoint,
         )
 
+    def reserve_affiliate_daily(
+        self,
+        job: AffiliateJob,
+        resume=None,
+        checkpoint=None,
+    ) -> str:
+        """Register only the scheduled daily source before revision monitoring."""
+        return self._get_affiliate_publisher().publish(
+            job,
+            False,
+            resume=resume,
+            checkpoint=checkpoint,
+            daily_only=True,
+        )
+
     def _get_seone_document(self) -> dict:
         """Read the current SmartEditor document without publishing the draft."""
         assert self.driver

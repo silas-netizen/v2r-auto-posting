@@ -235,6 +235,82 @@ class AffiliateRunner:
                 )
         assign_daily_posts(jobs, daily_posts)
 
+        last_daily_scheduled: dict[str, datetime] = {}
+        for job in jobs:
+            if job.daily_scheduled_at:
+                previous = last_daily_scheduled.get(job.cafe)
+                if previous is None or job.daily_scheduled_at > previous:
+                    last_daily_scheduled[job.cafe] = job.daily_scheduled_at
+        for job in jobs:
+            if job.status != JobStatus.PENDING:
+                continue
+            if job.daily_scheduled_at is None:
+                assign_next_affiliate_daily_schedule(
+                    job,
+                    last_daily_scheduled,
+                )
+                record_info = state_records.get(id(job))
+                if self.state and record_info:
+                    self.state.update(
+                        record_info[0],
+                        daily_scheduled_at=(
+                            job.daily_scheduled_at.isoformat()
+                            .replace("+00:00", "Z")
+                        ),
+                    )
+
+        runtime_resumes: dict[int, dict] = {
+            id(job): (
+                state_records[id(job)][1]
+                if id(job) in state_records
+                else {}
+            )
+            for job in jobs
+        }
+        if not dry_run:
+            last_daily_created: dict[str, float] = {}
+            for job in jobs:
+                if job.status != JobStatus.PENDING or job.validate():
+                    continue
+                remaining = 20 - (
+                    time.monotonic()
+                    - last_daily_created.get(job.cafe, 0)
+                )
+                if remaining > 0 and stop_event.wait(remaining):
+                    break
+                last_daily_created[job.cafe] = time.monotonic()
+                record_info = state_records.get(id(job))
+                job_key = record_info[0] if record_info else ""
+                resume = runtime_resumes[id(job)]
+
+                def daily_checkpoint(
+                    stage: str,
+                    _job_key: str = job_key,
+                    _resume: dict = resume,
+                    **values,
+                ) -> None:
+                    if self.state and _job_key:
+                        self.state.update(
+                            _job_key,
+                            stage=stage,
+                            **values,
+                        )
+                    _resume.update(values)
+                    _resume["stage"] = stage
+
+                try:
+                    self.browser.reserve_affiliate_daily(
+                        job,
+                        resume=resume,
+                        checkpoint=daily_checkpoint,
+                    )
+                except Exception as exc:
+                    self.logger.warning(
+                        "행 %s 일상 글 사전 예약 실패, 본 처리에서 재시도: %s",
+                        job.row_number,
+                        exc,
+                    )
+
         total = len(jobs)
         retry_count = 0
 
@@ -253,12 +329,6 @@ class AffiliateRunner:
 
         emit_status()
         last_cafe_started: dict[str, float] = {}
-        last_daily_scheduled: dict[str, datetime] = {}
-        for job in jobs:
-            if job.daily_scheduled_at:
-                previous = last_daily_scheduled.get(job.cafe)
-                if previous is None or job.daily_scheduled_at > previous:
-                    last_daily_scheduled[job.cafe] = job.daily_scheduled_at
         last_failure_reason = ""
         consecutive_failures = 0
         circuit_open = False
@@ -286,21 +356,6 @@ class AffiliateRunner:
                 self.logger.error("행 %s 검증 실패: %s", job.row_number, job.message)
                 continue
 
-            if job.daily_scheduled_at is None:
-                assign_next_affiliate_daily_schedule(
-                    job,
-                    last_daily_scheduled,
-                )
-                record_info = state_records.get(id(job))
-                if self.state and record_info:
-                    self.state.update(
-                        record_info[0],
-                        daily_scheduled_at=(
-                            job.daily_scheduled_at.isoformat()
-                            .replace("+00:00", "Z")
-                        ),
-                    )
-
             while True:
                 if not dry_run:
                     remaining = 20 - (
@@ -325,7 +380,7 @@ class AffiliateRunner:
                 try:
                     record_info = state_records.get(id(job))
                     job_key = record_info[0] if record_info else ""
-                    resume = record_info[1] if record_info else {}
+                    resume = runtime_resumes[id(job)]
                     if self.state and job_key:
                         self.state.increment_attempt(job_key)
 

@@ -1157,6 +1157,7 @@ class AffiliateApiPublisher:
         dry_run: bool,
         resume: dict[str, Any] | None = None,
         checkpoint=None,
+        daily_only: bool = False,
     ) -> str:
         if job.daily_post is None:
             raise AffiliateApiError("배정된 일상 글이 없습니다")
@@ -1237,6 +1238,11 @@ class AffiliateApiPublisher:
                 daily_source_id,
                 expected=job.cafe != "씨씨앙",
             )
+            if daily_only:
+                return (
+                    "https://v2r.daboja.im/nc/articleDetail/"
+                    f"{daily_source_id}"
+                )
             written_at = self._wait_for_written_at(
                 daily_source_id,
                 destination["cafe_id"],
