@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
+from .affiliate_api import AffiliateDailyPending, AffiliateRunStopped
 from .browser import V2RBrowser
 from .cafe_catalog import TEST_CAFE_IDS
 from .daily_posts import assign_daily_posts
@@ -185,8 +186,25 @@ class AffiliateRunner:
         daily_posts: list[DailyPost],
         source_sheet_url: str,
         status: Callable[[dict[str, int]], None] | None = None,
+        pause_event: threading.Event | None = None,
     ) -> tuple[RunResult, Path]:
         started_at = datetime.now()
+        pause_event = pause_event or threading.Event()
+        pause_logged = False
+
+        def wait_control() -> None:
+            nonlocal pause_logged
+            if stop_event.is_set():
+                raise AffiliateRunStopped("사용자가 중지함")
+            if pause_event.is_set() and not pause_logged:
+                self.logger.info("일시정지됨: 다시 시작을 기다립니다")
+                pause_logged = True
+            while pause_event.is_set():
+                if stop_event.wait(0.2):
+                    raise AffiliateRunStopped("사용자가 중지함")
+            if pause_logged:
+                self.logger.info("다시 시작: 중단된 제휴 작업을 이어서 처리합니다")
+                pause_logged = False
         for job in jobs:
             if needs_photo_wash(job) and not job.photo_wash_prepared:
                 job.status = JobStatus.FAILED
@@ -272,11 +290,19 @@ class AffiliateRunner:
             for job in jobs:
                 if job.status != JobStatus.PENDING or job.validate():
                     continue
+                try:
+                    wait_control()
+                except AffiliateRunStopped:
+                    break
                 remaining = 20 - (
                     time.monotonic()
                     - last_daily_created.get(job.cafe, 0)
                 )
                 if remaining > 0 and stop_event.wait(remaining):
+                    break
+                try:
+                    wait_control()
+                except AffiliateRunStopped:
                     break
                 last_daily_created[job.cafe] = time.monotonic()
                 record_info = state_records.get(id(job))
@@ -321,6 +347,9 @@ class AffiliateRunner:
                 {
                     "pending": sum(job.status == JobStatus.PENDING for job in jobs),
                     "success": sum(job.status == JobStatus.SUCCESS for job in jobs),
+                    "reserved": sum(
+                        job.status == JobStatus.RESERVED for job in jobs
+                    ),
                     "failed": sum(job.status == JobStatus.FAILED for job in jobs),
                     "skipped": sum(job.status == JobStatus.SKIPPED for job in jobs),
                     "retrying": retry_count,
@@ -334,6 +363,12 @@ class AffiliateRunner:
         circuit_open = False
         for index, job in enumerate(jobs, start=1):
             progress(index - 1, total)
+            try:
+                wait_control()
+            except AffiliateRunStopped:
+                job.status = JobStatus.SKIPPED
+                job.message = "사용자가 중지함"
+                continue
             if circuit_open:
                 job.status = JobStatus.SKIPPED
                 job.message = "동일 오류 5회 연속 발생으로 전체 작업 일시정지"
@@ -357,6 +392,12 @@ class AffiliateRunner:
                 continue
 
             while True:
+                try:
+                    wait_control()
+                except AffiliateRunStopped:
+                    job.status = JobStatus.SKIPPED
+                    job.message = "사용자가 중지함"
+                    break
                 if not dry_run:
                     remaining = 20 - (
                         time.monotonic() - last_cafe_started.get(job.cafe, 0)
@@ -369,6 +410,12 @@ class AffiliateRunner:
                             job.status = JobStatus.SKIPPED
                             job.message = "사용자가 중지함"
                             break
+                    try:
+                        wait_control()
+                    except AffiliateRunStopped:
+                        job.status = JobStatus.SKIPPED
+                        job.message = "사용자가 중지함"
+                        break
                     last_cafe_started[job.cafe] = time.monotonic()
                 self.logger.info(
                     "[%s/%s] 행 %s 제휴 수정 발행 시작: %s",
@@ -387,14 +434,15 @@ class AffiliateRunner:
                     def checkpoint(stage: str, **values) -> None:
                         if self.state and job_key:
                             self.state.update(job_key, stage=stage, **values)
-                            resume.update(values)
-                            resume["stage"] = stage
+                        resume.update(values)
+                        resume["stage"] = stage
 
                     job.revision_url = self.browser.publish_affiliate_revision(
                         job,
                         dry_run,
                         resume=resume,
                         checkpoint=checkpoint if not dry_run else None,
+                        wait_control=wait_control if not dry_run else None,
                     )
                     job.status = JobStatus.SUCCESS
                     last_failure_reason = ""
@@ -420,6 +468,19 @@ class AffiliateRunner:
                                 "행 %s 발행은 성공했지만 F열 링크 저장 실패",
                                 job.row_number,
                             )
+                    break
+                except AffiliateDailyPending as exc:
+                    job.status = JobStatus.RESERVED
+                    job.message = str(exc)
+                    self.logger.warning(
+                        "행 %s 일상 예약은 유지하고 다음 실행에서 다시 확인: %s",
+                        job.row_number,
+                        exc,
+                    )
+                    break
+                except AffiliateRunStopped:
+                    job.status = JobStatus.SKIPPED
+                    job.message = "사용자가 중지함"
                     break
                 except Exception as exc:
                     reason, retryable = self.browser.classify_affiliate_failure(exc)

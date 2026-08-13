@@ -2,10 +2,15 @@ import logging
 import random
 import threading
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from v2r_auto.affiliate_api import AffiliateApiPublisher, _content_json
+from v2r_auto.affiliate_api import (
+    AffiliateApiPublisher,
+    AffiliateDailyPending,
+    _content_json,
+)
 from v2r_auto.content import parse_article
 from v2r_auto.daily_posts import assign_daily_posts, load_daily_posts
 from v2r_auto.models import DailyPost, JobStatus
@@ -341,7 +346,12 @@ class FakeAffiliateBrowser:
         return []
 
     def publish_affiliate_revision(
-        self, job, dry_run: bool, resume=None, checkpoint=None
+        self,
+        job,
+        dry_run: bool,
+        resume=None,
+        checkpoint=None,
+        wait_control=None,
     ) -> str:
         assert dry_run
         self.published.append(job)
@@ -407,6 +417,7 @@ def test_affiliate_runner_reserves_all_daily_posts_before_waiting_for_revisions(
             dry_run: bool,
             resume=None,
             checkpoint=None,
+            wait_control=None,
         ) -> str:
             assert not dry_run
             assert resume.get("daily_source_id") == f"daily-{job.cafe}"
@@ -445,6 +456,104 @@ def test_affiliate_runner_reserves_all_daily_posts_before_waiting_for_revisions(
     ]
 
 
+def test_affiliate_runner_pause_waits_before_new_api_work(tmp_path: Path) -> None:
+    job = load_affiliate_jobs(
+        write_affiliate_csv(tmp_path),
+        selected_row_number=2,
+    )[0]
+    pause_event = threading.Event()
+    pause_event.set()
+    events: list[str] = []
+
+    class PauseBrowser(FakeAffiliateBrowser):
+        def reserve_affiliate_daily(self, job, resume=None, checkpoint=None):
+            assert not pause_event.is_set()
+            events.append("daily")
+            if checkpoint:
+                checkpoint("DAILY_CREATED", daily_source_id="daily-1")
+            return "https://v2r.example/daily-1"
+
+        def publish_affiliate_revision(
+            self,
+            job,
+            dry_run: bool,
+            resume=None,
+            checkpoint=None,
+            wait_control=None,
+        ) -> str:
+            events.append("revision")
+            return "https://v2r.example/revision-1"
+
+        def update_completion_link(self, sheet_url, row_number, url):
+            return None
+
+    threading.Timer(0.05, pause_event.clear).start()
+    started = time.monotonic()
+    runner = AffiliateRunner(
+        browser=PauseBrowser(),  # type: ignore[arg-type]
+        report_dir=tmp_path,
+        logger=logging.getLogger("test"),
+    )
+    runner.run(
+        jobs=[job],
+        email="",
+        password="",
+        dry_run=False,
+        stop_event=threading.Event(),
+        progress=lambda current, total: None,
+        daily_posts=[DailyPost(2, "양평맘", "일상", "내용")],
+        source_sheet_url="https://sheet.example",
+        pause_event=pause_event,
+    )
+
+    assert time.monotonic() - started >= 0.04
+    assert events == ["daily", "revision"]
+
+
+def test_affiliate_daily_pending_keeps_reservation_for_next_run(
+    tmp_path: Path,
+) -> None:
+    job = load_affiliate_jobs(
+        write_affiliate_csv(tmp_path),
+        selected_row_number=2,
+    )[0]
+
+    class PendingBrowser(FakeAffiliateBrowser):
+        def reserve_affiliate_daily(self, job, resume=None, checkpoint=None):
+            if checkpoint:
+                checkpoint("DAILY_CREATED", daily_source_id="daily-1")
+            return "https://v2r.example/daily-1"
+
+        def publish_affiliate_revision(
+            self,
+            job,
+            dry_run: bool,
+            resume=None,
+            checkpoint=None,
+            wait_control=None,
+        ) -> str:
+            raise AffiliateDailyPending("예약은 유지하고 다음 실행에서 확인")
+
+    runner = AffiliateRunner(
+        browser=PendingBrowser(),  # type: ignore[arg-type]
+        report_dir=tmp_path,
+        logger=logging.getLogger("test"),
+    )
+    result, _report = runner.run(
+        jobs=[job],
+        email="",
+        password="",
+        dry_run=False,
+        stop_event=threading.Event(),
+        progress=lambda current, total: None,
+        daily_posts=[DailyPost(2, "양평맘", "일상", "내용")],
+        source_sheet_url="https://sheet.example",
+    )
+
+    assert result.reserved == 1
+    assert job.status == JobStatus.RESERVED
+
+
 def test_affiliate_runner_retries_with_replacement_account(tmp_path: Path) -> None:
     job = load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0]
     job.account_type = "실명"
@@ -456,7 +565,12 @@ def test_affiliate_runner_retries_with_replacement_account(tmp_path: Path) -> No
             self.sheet_updates = []
 
         def publish_affiliate_revision(
-            self, job, dry_run: bool, resume=None, checkpoint=None
+            self,
+            job,
+            dry_run: bool,
+            resume=None,
+            checkpoint=None,
+            wait_control=None,
         ) -> str:
             self.calls += 1
             if self.calls == 1:

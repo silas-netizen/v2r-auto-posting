@@ -51,6 +51,14 @@ class AffiliateApiError(RuntimeError):
     pass
 
 
+class AffiliateDailyPending(AffiliateApiError):
+    pass
+
+
+class AffiliateRunStopped(AffiliateApiError):
+    pass
+
+
 def _walk_dicts(value: Any) -> Iterator[dict[str, Any]]:
     if isinstance(value, dict):
         yield value
@@ -723,6 +731,7 @@ class AffiliateApiPublisher:
         source_id: str,
         cafe_id: int,
         expected_start_at: datetime | None = None,
+        wait_control=None,
     ) -> datetime:
         wait_seconds = 90.0
         if expected_start_at is not None:
@@ -732,6 +741,8 @@ class AffiliateApiPublisher:
             wait_seconds = max(wait_seconds, remaining + 30 * 60)
         deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline:
+            if wait_control:
+                wait_control()
             history = self._request(
                 "GET",
                 "/naver_cafe_articles/board_histories",
@@ -751,7 +762,10 @@ class AffiliateApiPublisher:
                 reason = str(item.get("fail_reason") or "원인 불명")
                 raise AffiliateApiError(f"일상 글 발행 실패: {reason}")
             time.sleep(2)
-        raise AffiliateApiError("일상 글 등록 완료 시간을 확인하지 못했습니다")
+        raise AffiliateDailyPending(
+            "일상 글이 예약시간 이후 30분 동안 예약대기 상태입니다. "
+            "예약은 유지하며 다음 실행에서 다시 확인합니다"
+        )
 
     @staticmethod
     def _comment_permission(detail: dict[str, Any]) -> bool | None:
@@ -1158,6 +1172,7 @@ class AffiliateApiPublisher:
         resume: dict[str, Any] | None = None,
         checkpoint=None,
         daily_only: bool = False,
+        wait_control=None,
     ) -> str:
         if job.daily_post is None:
             raise AffiliateApiError("배정된 일상 글이 없습니다")
@@ -1247,6 +1262,7 @@ class AffiliateApiPublisher:
                 daily_source_id,
                 destination["cafe_id"],
                 expected_start_at=job.daily_scheduled_at,
+                wait_control=wait_control,
             )
             job.daily_written_at = written_at
             if checkpoint:
@@ -1294,6 +1310,8 @@ class AffiliateApiPublisher:
                     daily_source_id=daily_source_id,
                     revision_source_id=revision_source_id,
                 )
+        except (AffiliateDailyPending, AffiliateRunStopped):
+            raise
         except Exception:
             if revision_source_id:
                 self._delete_source(revision_source_id)

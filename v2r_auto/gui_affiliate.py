@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import threading
 import tkinter as tk
 import time
 from pathlib import Path
@@ -34,6 +35,7 @@ class AffiliateAutomationApp(AutomationApp):
     data_folder_name = "V2RAffiliatePosting"
 
     def __init__(self):
+        self.pause_event = threading.Event()
         self.photo_wash_plan: PhotoWashPlan | None = None
         super().__init__()
         self._cleanup_old_files()
@@ -104,6 +106,13 @@ class AffiliateAutomationApp(AutomationApp):
         self.start_button.pack(side=tk.LEFT)
         self.stop_button = ttk.Button(actions, text="중지", command=self._stop, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, padx=6)
+        self.pause_button = ttk.Button(
+            actions,
+            text="일시정지",
+            command=self._toggle_pause,
+            state=tk.DISABLED,
+        )
+        self.pause_button.pack(side=tk.LEFT)
 
         progress_frame = ttk.Frame(outer)
         progress_frame.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 10))
@@ -243,8 +252,10 @@ class AffiliateAutomationApp(AutomationApp):
 
         dry_run = self.dry_run.get()
         self.stop_event.clear()
+        self.pause_event.clear()
         self.start_button.configure(state=tk.DISABLED)
         self.stop_button.configure(state=tk.NORMAL)
+        self.pause_button.configure(state=tk.NORMAL, text="일시정지")
         self.progress.configure(value=0)
         self.progress_text.set("행 데이터 준비 중")
 
@@ -274,6 +285,7 @@ class AffiliateAutomationApp(AutomationApp):
                     daily_posts=daily_posts,
                     source_sheet_url=sheet_url,
                     status=self._set_status,
+                    pause_event=self.pause_event,
                 )
                 self.ui_queue.put(
                     (
@@ -295,6 +307,24 @@ class AffiliateAutomationApp(AutomationApp):
 
         self.worker = self.executor.submit(work)
 
+    def _toggle_pause(self) -> None:
+        if not self.worker or self.worker.done():
+            return
+        if self.pause_event.is_set():
+            self.pause_event.clear()
+            self.pause_button.configure(text="일시정지")
+            self.logger.info("다시 시작을 요청했습니다")
+        else:
+            self.pause_event.set()
+            self.pause_button.configure(text="다시 시작")
+            self.progress_text.set("현재 작업 후 일시정지")
+            self.logger.info("일시정지를 요청했습니다")
+
+    def _worker_finished(self) -> None:
+        self.pause_event.clear()
+        self.pause_button.configure(state=tk.DISABLED, text="일시정지")
+        super()._worker_finished()
+
     def _set_status(self, values: dict[str, int]) -> None:
         self.ui_queue.put(("affiliate_status", values))
 
@@ -306,7 +336,8 @@ class AffiliateAutomationApp(AutomationApp):
                 break
             if kind == "affiliate_status":
                 self.progress_text.set(
-                    "대기 {pending} | 성공 {success} | 재시도 {retrying} | "
+                    "대기 {pending} | 예약 {reserved} | 성공 {success} | "
+                    "재시도 {retrying} | "
                     "실패 {failed} | 건너뜀 {skipped}".format(**payload)
                 )
             else:

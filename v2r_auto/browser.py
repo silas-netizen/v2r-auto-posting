@@ -1220,6 +1220,7 @@ class V2RBrowser:
         dry_run: bool,
         resume=None,
         checkpoint=None,
+        wait_control=None,
     ) -> str:
         """Run the live-verified affiliate flow through V2R's own API."""
         return self._get_affiliate_publisher().publish(
@@ -1227,6 +1228,7 @@ class V2RBrowser:
             dry_run,
             resume=resume,
             checkpoint=checkpoint,
+            wait_control=wait_control,
         )
 
     def reserve_affiliate_daily(
