@@ -7,10 +7,12 @@ from tkinter import messagebox, ttk
 
 from .exposure import (
     DEFAULT_BRAND_MARKERS,
+    DEFAULT_CAFE_NAMES,
     ExposureChecker,
     parse_brands,
+    parse_cafes,
 )
-from .exposure_naver import fetch_naver_html
+from .exposure_naver import SeleniumNaverSearch
 from .exposure_notion import NotionError, NotionExposureStore
 from .gui import AutomationApp
 from .state import AnotherInstanceRunningError, InstanceLock
@@ -47,12 +49,16 @@ class ExposureApp(AutomationApp):
         brands = str(data.get("brands") or "").strip()
         if brands:
             self.brands.set(brands)
+        cafes = str(data.get("cafes") or "").strip()
+        if cafes:
+            self.cafes.set(cafes)
 
     def _save_settings(self) -> None:
         payload = {
             "notion_token": self.notion_token.get().strip(),
             "database_url": self.database_url.get().strip(),
             "brands": self.brands.get().strip(),
+            "cafes": self.cafes.get().strip(),
         }
         self._settings_path().write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
@@ -62,6 +68,7 @@ class ExposureApp(AutomationApp):
     def _create_variables(self) -> None:
         self.notion_token = tk.StringVar()
         self.database_url = tk.StringVar()
+        self.cafes = tk.StringVar(value=", ".join(DEFAULT_CAFE_NAMES))
         self.brands = tk.StringVar(value=", ".join(DEFAULT_BRAND_MARKERS))
         self.dry_run = tk.BooleanVar(value=True)
         self.progress_text = tk.StringVar(value="대기 중")
@@ -70,27 +77,28 @@ class ExposureApp(AutomationApp):
         outer = ttk.Frame(self, padding=16)
         outer.pack(fill=tk.BOTH, expand=True)
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(8, weight=1)
+        outer.rowconfigure(9, weight=1)
 
         ttk.Label(outer, text=self.app_name, font=("", 18, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
         )
         ttk.Label(
             outer,
-            text="노션 키워드를 네이버 통합검색에서 확인하고 노출상태를 바꿉니다",
+            text="노션 키워드를 네이버 통합검색에서만 확인하고, 우리 카페 글만 열어 노출상태를 바꿉니다",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
         self._entry_row(outer, 2, "노션 연결키", self.notion_token, show="*")
-        self._entry_row(outer, 3, "노션 데이터베이스 주소", self.database_url)
-        self._entry_row(outer, 4, "브랜드 식별어", self.brands)
+        self._entry_row(outer, 3, "노션 DB 주소", self.database_url)
+        self._entry_row(outer, 4, "우리 카페", self.cafes)
+        self._entry_row(outer, 5, "브랜드 식별어", self.brands)
 
         ttk.Label(
             outer,
             text="연결키는 노션 설정 → 연결에 만든 암호입니다. 데이터베이스에 그 연결을 초대해 주세요.",
-        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
         actions = ttk.Frame(outer)
-        actions.grid(row=6, column=0, columnspan=3, sticky="ew", pady=8)
+        actions.grid(row=7, column=0, columnspan=3, sticky="ew", pady=8)
         ttk.Checkbutton(
             actions,
             text="검증 모드(노션에 쓰지 않음)",
@@ -117,7 +125,7 @@ class ExposureApp(AutomationApp):
         ).pack(side=tk.RIGHT)
 
         progress_frame = ttk.Frame(outer)
-        progress_frame.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        progress_frame.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         progress_frame.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_frame, maximum=100)
         self.progress.grid(row=0, column=0, sticky="ew")
@@ -126,7 +134,7 @@ class ExposureApp(AutomationApp):
         )
 
         log_frame = ttk.LabelFrame(outer, text="실시간 로그", padding=8)
-        log_frame.grid(row=8, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=9, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state=tk.DISABLED)
@@ -142,8 +150,10 @@ class ExposureApp(AutomationApp):
             self.browser.start()
             if not self.browser.driver:
                 raise RuntimeError("Chrome이 시작되지 않았습니다")
-            self.browser.driver.get("https://search.naver.com/")
-            self.logger.info("네이버 검색 창을 열었습니다. 필요하면 네이버에 로그인하세요")
+            self.browser.driver.get("https://www.naver.com/")
+            self.logger.info(
+                "네이버 창을 열었습니다. 로그인된 상태로 검사해야 결과가 맞습니다"
+            )
 
         self._run_background(work)
 
@@ -186,6 +196,7 @@ class ExposureApp(AutomationApp):
         try:
             store = self._store()
             brands = parse_brands(self.brands.get())
+            cafes = parse_cafes(self.cafes.get())
         except ValueError as exc:
             messagebox.showerror("입력 오류", str(exc))
             return
@@ -213,9 +224,10 @@ class ExposureApp(AutomationApp):
                 rows = store.load_rows()
                 checker = ExposureChecker(
                     store,
-                    lambda url: fetch_naver_html(self.browser, url),
+                    SeleniumNaverSearch(self.browser, self.logger),
                     self.logger,
                     brands=brands,
+                    cafe_names=cafes,
                 )
                 checker.run(
                     rows,
