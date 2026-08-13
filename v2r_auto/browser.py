@@ -1169,46 +1169,68 @@ class V2RBrowser:
         )
 
     def _get_seone_document(self) -> dict:
-        """Read the document through the editor state injected by the V2R page."""
+        """Read the current SmartEditor document without publishing the draft."""
         assert self.driver
         script = """
             const done = arguments[arguments.length - 1];
-            const container = document.querySelector('.seone-container');
-            let instance = container && container.__vueParentComponent;
-            const candidates = [];
-            while (instance) {
-                candidates.push(
-                    instance.setupState,
-                    instance.ctx,
-                    instance.proxy,
-                    instance.provides
-                );
-                let provided = instance.provides;
-                while (provided) {
+            (async () => {
+                try {
+                    const smartEditor = window.SmartEditor;
+                    const editor = smartEditor && (
+                        smartEditor.getEditor('cafepc001') ||
+                        Object.values(smartEditor._editors || {})[0]
+                    );
+                    if (editor && typeof editor.getDocumentData === 'function') {
+                        const value = await editor.getDocumentData();
+                        if (value) {
+                            done({ok: true, value});
+                            return;
+                        }
+                    }
+                } catch (_) {}
+
+                const container = document.querySelector('.seone-container');
+                let instance = container && container.__vueParentComponent;
+                const candidates = [];
+                while (instance) {
+                    candidates.push(
+                        instance.setupState,
+                        instance.ctx,
+                        instance.proxy,
+                        instance.provides
+                    );
+                    let provided = instance.provides;
+                    while (provided) {
+                        try {
+                            for (const key of Reflect.ownKeys(provided)) {
+                                candidates.push(provided[key]);
+                            }
+                        } catch (_) {}
+                        provided = Object.getPrototypeOf(provided);
+                    }
+                    instance = instance.parent;
+                }
+                for (const candidate of candidates) {
+                    if (!candidate) continue;
                     try {
-                        for (const key of Reflect.ownKeys(provided)) {
-                            candidates.push(provided[key]);
+                        let getter = candidate.seoneGetDocument;
+                        if (
+                            getter &&
+                            typeof getter === 'object' &&
+                            'value' in getter
+                        ) {
+                            getter = getter.value;
+                        }
+                        if (typeof getter !== 'function') continue;
+                        const value = await getter.call(candidate);
+                        if (value) {
+                            done({ok: true, value});
+                            return;
                         }
                     } catch (_) {}
-                    provided = Object.getPrototypeOf(provided);
                 }
-                instance = instance.parent;
-            }
-            for (const candidate of candidates) {
-                if (!candidate) continue;
-                try {
-                    let getter = candidate.seoneGetDocument;
-                    if (getter && typeof getter === 'object' && 'value' in getter) {
-                        getter = getter.value;
-                    }
-                    if (typeof getter !== 'function') continue;
-                    Promise.resolve(getter.call(candidate))
-                        .then(value => done({ok: true, value}))
-                        .catch(error => done({ok: false, error: String(error)}));
-                    return;
-                } catch (_) {}
-            }
-            done({ok: false, error: 'SE-ONE document getter not found'});
+                done({ok: false, error: 'SE-ONE document getter not found'});
+            })();
         """
         result = self.driver.execute_async_script(script)
         if not result or not result.get("ok") or not result.get("value"):

@@ -335,6 +335,29 @@ def test_fill_editor_uses_visible_smarteditor_paragraph(monkeypatch) -> None:
     assert state["default_content"] is True
 
 
+def test_reads_document_from_public_smarteditor_api() -> None:
+    document = {
+        "document": {
+            "components": [
+                {"@ctype": "text", "value": []},
+                {"@ctype": "image", "id": "image-1"},
+            ]
+        },
+        "documentId": "",
+    }
+
+    class FakeDriver:
+        def execute_async_script(self, script):
+            assert "getDocumentData" in script
+            assert "cafepc001" in script
+            return {"ok": True, "value": document}
+
+    browser = object.__new__(V2RBrowser)
+    browser.driver = FakeDriver()
+
+    assert browser._get_seone_document() == document
+
+
 def test_multiple_images_share_one_prepared_se_one_editor(
     tmp_path: Path,
 ) -> None:
