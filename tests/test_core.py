@@ -376,15 +376,17 @@ def test_multiple_images_share_one_prepared_se_one_editor(
     class FakeInput:
         def __init__(self, input_id: str):
             self.id = input_id
+            self.value = ""
 
         def send_keys(self, value: str) -> None:
             state["selected"].append(value)
+            self.value = value
+
+        def get_attribute(self, name: str):
+            return self.value if name == "value" else ""
 
     base_input = FakeInput("base-input")
-    generated_inputs = [
-        FakeInput("generated-input-1"),
-        FakeInput("generated-input-2"),
-    ]
+    generated_inputs = [FakeInput("generated-input-1")]
 
     class FakeWait:
         def until(self, condition):

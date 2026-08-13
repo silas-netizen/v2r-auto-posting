@@ -1368,13 +1368,28 @@ class V2RBrowser:
         if button is not None:
             existing_input_ids = {item.id for item in inputs}
             self.driver.execute_script("arguments[0].click();", button)
-            inputs = self.wait.until(
-                lambda _driver: [
-                    item
-                    for item in self._seone_image_inputs()
-                    if item.id not in existing_input_ids
-                ]
-            )
+            time.sleep(0.5)
+            current_inputs = self._seone_image_inputs()
+            new_inputs = [
+                item
+                for item in current_inputs
+                if item.id not in existing_input_ids
+            ]
+            reusable_inputs = [
+                item
+                for item in current_inputs
+                if not item.get_attribute("value")
+            ]
+            inputs = new_inputs or reusable_inputs
+            if not inputs:
+                inputs = self.wait.until(
+                    lambda _driver: [
+                        item
+                        for item in self._seone_image_inputs()
+                        if item.id not in existing_input_ids
+                        or not item.get_attribute("value")
+                    ]
+                )
         elif not inputs:
             raise AutomationError("SE-ONE 사진 첨부 버튼을 찾지 못했습니다")
 
