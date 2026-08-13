@@ -54,6 +54,22 @@ def assign_immediate_schedules(
         last_by_cafe[job.cafe_id] = job.scheduled_at
 
 
+def assign_next_affiliate_daily_schedule(
+    job: AffiliateJob,
+    last_by_cafe: dict[str, datetime],
+    *,
+    now: datetime | None = None,
+    rng: random.Random | None = None,
+) -> datetime:
+    now = now or datetime.now(timezone.utc)
+    rng = rng or random.SystemRandom()
+    anchor = max(now, last_by_cafe.get(job.cafe, now))
+    scheduled_at = anchor + timedelta(minutes=rng.randint(5, 15))
+    job.daily_scheduled_at = scheduled_at
+    last_by_cafe[job.cafe] = scheduled_at
+    return scheduled_at
+
+
 class AutomationRunner:
     def __init__(
         self,
@@ -188,6 +204,10 @@ class AffiliateRunner:
                     job.message = "작업 DB에서 이미 완료됨"
                 elif record.get("account") and not job.account:
                     job.account = record["account"]
+                if record.get("daily_scheduled_at"):
+                    job.daily_scheduled_at = datetime.fromisoformat(
+                        str(record["daily_scheduled_at"]).replace("Z", "+00:00")
+                    )
 
         self.browser.ensure_v2r_login(email, password)
         self.browser.start_affiliate_api_run(jobs)
@@ -233,6 +253,12 @@ class AffiliateRunner:
 
         emit_status()
         last_cafe_started: dict[str, float] = {}
+        last_daily_scheduled: dict[str, datetime] = {}
+        for job in jobs:
+            if job.daily_scheduled_at:
+                previous = last_daily_scheduled.get(job.cafe)
+                if previous is None or job.daily_scheduled_at > previous:
+                    last_daily_scheduled[job.cafe] = job.daily_scheduled_at
         last_failure_reason = ""
         consecutive_failures = 0
         circuit_open = False
@@ -259,6 +285,21 @@ class AffiliateRunner:
                 job.message = ", ".join(errors)
                 self.logger.error("행 %s 검증 실패: %s", job.row_number, job.message)
                 continue
+
+            if job.daily_scheduled_at is None:
+                assign_next_affiliate_daily_schedule(
+                    job,
+                    last_daily_scheduled,
+                )
+                record_info = state_records.get(id(job))
+                if self.state and record_info:
+                    self.state.update(
+                        record_info[0],
+                        daily_scheduled_at=(
+                            job.daily_scheduled_at.isoformat()
+                            .replace("+00:00", "Z")
+                        ),
+                    )
 
             while True:
                 if not dry_run:

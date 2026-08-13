@@ -66,6 +66,8 @@ class AffiliateJob:
     daily_post_url: str = ""
     revision_url: str = ""
     daily_post: "DailyPost | None" = None
+    daily_scheduled_at: datetime | None = None
+    daily_written_at: datetime | None = None
     prepared_image_count: int = 0
     photo_wash_prepared: bool = False
     prepared_images: list[Any] = field(default_factory=list)

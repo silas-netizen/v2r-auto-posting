@@ -611,9 +611,9 @@ class AffiliateApiPublisher:
         }
 
     @staticmethod
-    def _write_options() -> dict[str, Any]:
+    def _write_options(*, enable_comment: bool = True) -> dict[str, Any]:
         return {
-            "enableComment": True,
+            "enableComment": enable_comment,
             "externalOpen": True,
             "enableScrap": True,
             "enableCopy": False,
@@ -634,12 +634,15 @@ class AffiliateApiPublisher:
         parent_source_id: str | None = None,
         content_json: str | None = None,
         recovery_statuses: tuple[str, ...] = ("DONE",),
+        enable_comment: bool = True,
     ) -> str:
         payload: dict[str, Any] = {
             "tag_list": tags,
             "title": title,
             "content_json": content_json or _content_json(body),
-            "cafe_write_options": self._write_options(),
+            "cafe_write_options": self._write_options(
+                enable_comment=enable_comment
+            ),
             "comments": comments,
             "destination": destination,
             "likes": [],
@@ -715,8 +718,19 @@ class AffiliateApiPublisher:
         except Exception:
             self.logger.exception("실패 찌꺼기 글 삭제 실패: %s", source_id)
 
-    def _wait_for_written_at(self, source_id: str, cafe_id: int) -> datetime:
-        deadline = time.monotonic() + 90
+    def _wait_for_written_at(
+        self,
+        source_id: str,
+        cafe_id: int,
+        expected_start_at: datetime | None = None,
+    ) -> datetime:
+        wait_seconds = 90.0
+        if expected_start_at is not None:
+            remaining = (
+                expected_start_at - datetime.now(timezone.utc)
+            ).total_seconds()
+            wait_seconds = max(wait_seconds, remaining + 180)
+        deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline:
             history = self._request(
                 "GET",
@@ -738,6 +752,46 @@ class AffiliateApiPublisher:
                 raise AffiliateApiError(f"일상 글 발행 실패: {reason}")
             time.sleep(2)
         raise AffiliateApiError("일상 글 등록 완료 시간을 확인하지 못했습니다")
+
+    @staticmethod
+    def _comment_permission(detail: dict[str, Any]) -> bool | None:
+        destination = detail.get("naver_cafe_article_destination") or {}
+        source = detail.get("naver_cafe_article_source") or {}
+        options = (
+            destination.get("write_options")
+            or destination.get("cafe_write_options")
+            or source.get("write_options")
+            or source.get("cafe_write_options")
+            or {}
+        )
+        if isinstance(options, str):
+            try:
+                options = json.loads(options)
+            except json.JSONDecodeError:
+                return None
+        if not isinstance(options, dict):
+            return None
+        value = options.get("enableComment")
+        if value is None:
+            value = options.get("enable_comment")
+        return value if isinstance(value, bool) else None
+
+    def _verify_comment_permission(
+        self,
+        source_id: str,
+        expected: bool,
+    ) -> None:
+        detail = self._request(
+            "GET",
+            "/naver_cafe_articles/article",
+            query={"source_id": source_id},
+        )
+        actual = self._comment_permission(detail)
+        if actual is not expected:
+            raise AffiliateApiError(
+                "등록 후 댓글 허용 설정 검증에 실패했습니다: "
+                f"기대 {expected} / 실제 {actual}"
+            )
 
     def _comment(
         self,
@@ -1001,6 +1055,10 @@ class AffiliateApiPublisher:
         )
         source = detail["naver_cafe_article_source"]
         destination = detail["naver_cafe_article_destination"]
+        if self._comment_permission(detail) is not True:
+            raise AffiliateApiError(
+                "등록 후 수정 글 댓글 허용 설정 검증에 실패했습니다"
+            )
         comments = detail["naver_cafe_article_source_comments"]
         document = json.loads(detail["naver_cafe_article_source_detail"]["body"])
         body_lines = [
@@ -1114,6 +1172,14 @@ class AffiliateApiPublisher:
             return ""
 
         resume = resume or {}
+        if job.daily_scheduled_at is None and resume.get("daily_scheduled_at"):
+            job.daily_scheduled_at = datetime.fromisoformat(
+                str(resume["daily_scheduled_at"]).replace("Z", "+00:00")
+            )
+        if job.daily_scheduled_at is None:
+            job.daily_scheduled_at = datetime.now(timezone.utc) + timedelta(
+                minutes=random.SystemRandom().randint(5, 15)
+            )
         revision_source_id = str(resume.get("revision_source_id") or "")
         if revision_source_id:
             detail = self._request(
@@ -1134,25 +1200,58 @@ class AffiliateApiPublisher:
         daily_source_id = str(resume.get("daily_source_id") or "")
         if not daily_source_id:
             daily_destination = dict(destination)
-            daily_destination["start_at"] = None
+            daily_destination["start_at"] = (
+                job.daily_scheduled_at.isoformat().replace("+00:00", "Z")
+            )
             daily_source_id = self._create_source(
                 job.daily_post.title,
                 job.daily_post.body,
                 [],
                 daily_destination,
                 [],
+                recovery_statuses=("RESERVED", "DONE"),
+                enable_comment=job.cafe != "씨씨앙",
             )
             if checkpoint:
-                checkpoint("DAILY_CREATED", daily_source_id=daily_source_id)
+                checkpoint(
+                    "DAILY_CREATED",
+                    daily_source_id=daily_source_id,
+                    daily_scheduled_at=(
+                        job.daily_scheduled_at.isoformat()
+                        .replace("+00:00", "Z")
+                    ),
+                )
+            self.logger.info(
+                "행 %s 제휴 일상 글 예약: %s / 댓글 허용 %s",
+                job.row_number,
+                job.daily_scheduled_at.astimezone().strftime(
+                    "%Y-%m-%d %H:%M"
+                ),
+                job.cafe != "씨씨앙",
+            )
         job.daily_post_url = (
             f"https://v2r.daboja.im/nc/articleDetail/{daily_source_id}"
         )
         try:
-            written_at = self._wait_for_written_at(
-                daily_source_id, destination["cafe_id"]
+            self._verify_comment_permission(
+                daily_source_id,
+                expected=job.cafe != "씨씨앙",
             )
+            written_at = self._wait_for_written_at(
+                daily_source_id,
+                destination["cafe_id"],
+                expected_start_at=job.daily_scheduled_at,
+            )
+            job.daily_written_at = written_at
             if checkpoint:
-                checkpoint("DAILY_DONE", daily_source_id=daily_source_id)
+                checkpoint(
+                    "DAILY_DONE",
+                    daily_source_id=daily_source_id,
+                    daily_scheduled_at=(
+                        job.daily_scheduled_at.isoformat()
+                        .replace("+00:00", "Z")
+                    ),
+                )
             revision_at = written_at + timedelta(hours=CAFE_DELAYS[job.cafe])
 
             revision_destination = dict(destination)

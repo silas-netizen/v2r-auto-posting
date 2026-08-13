@@ -9,7 +9,7 @@ from v2r_auto.affiliate_api import AffiliateApiPublisher, _content_json
 from v2r_auto.content import parse_article
 from v2r_auto.daily_posts import assign_daily_posts, load_daily_posts
 from v2r_auto.models import DailyPost, JobStatus
-from v2r_auto.runner import AffiliateRunner
+from v2r_auto.runner import AffiliateRunner, assign_next_affiliate_daily_schedule
 from v2r_auto.sheet import load_affiliate_jobs
 
 
@@ -107,6 +107,65 @@ def test_daily_posts_are_matched_to_cafe_without_reuse(tmp_path: Path) -> None:
     assign_daily_posts(jobs, load_daily_posts(path), random.Random(1))
 
     assert {job.daily_post.title for job in jobs if job.daily_post} == {"첫 일상", "둘 일상"}
+
+
+def test_affiliate_daily_schedules_are_random_and_independent_per_cafe(
+    tmp_path: Path,
+) -> None:
+    jobs = [
+        load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0],
+        load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0],
+        load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0],
+    ]
+    jobs[0].cafe = "씨씨앙"
+    jobs[1].cafe = "씨씨앙"
+    jobs[2].cafe = "양평맘"
+    now = datetime(2026, 8, 13, 9, 0, tzinfo=timezone.utc)
+    last_by_cafe: dict[str, datetime] = {}
+    rng = random.Random(7)
+
+    for job in jobs:
+        assign_next_affiliate_daily_schedule(
+            job,
+            last_by_cafe,
+            now=now,
+            rng=rng,
+        )
+
+    assert timedelta(minutes=5) <= jobs[0].daily_scheduled_at - now <= timedelta(
+        minutes=15
+    )
+    assert timedelta(minutes=5) <= (
+        jobs[1].daily_scheduled_at - jobs[0].daily_scheduled_at
+    ) <= timedelta(minutes=15)
+    assert timedelta(minutes=5) <= jobs[2].daily_scheduled_at - now <= timedelta(
+        minutes=15
+    )
+
+
+def test_cccang_daily_disables_comments_but_revision_enables_them() -> None:
+    assert (
+        AffiliateApiPublisher._write_options(enable_comment=False)[
+            "enableComment"
+        ]
+        is False
+    )
+    assert (
+        AffiliateApiPublisher._write_options(enable_comment=True)[
+            "enableComment"
+        ]
+        is True
+    )
+    assert (
+        AffiliateApiPublisher._comment_permission(
+            {
+                "naver_cafe_article_destination": {
+                    "write_options": {"enableComment": False}
+                }
+            }
+        )
+        is False
+    )
 
 
 def test_api_content_preserves_blank_lines_as_paragraphs() -> None:

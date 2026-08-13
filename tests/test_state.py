@@ -27,6 +27,7 @@ def test_job_state_resumes_source_ids(tmp_path: Path) -> None:
         record["job_key"],
         stage="DAILY_CREATED",
         daily_source_id="daily-1",
+        daily_scheduled_at="2026-08-13T09:10:00Z",
     )
     store.close()
 
@@ -37,6 +38,7 @@ def test_job_state_resumes_source_ids(tmp_path: Path) -> None:
 
     assert resumed["stage"] == "DAILY_CREATED"
     assert resumed["daily_source_id"] == "daily-1"
+    assert resumed["daily_scheduled_at"] == "2026-08-13T09:10:00Z"
     reopened.close()
 
 

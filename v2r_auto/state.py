@@ -79,6 +79,7 @@ class JobStateStore:
                 stage TEXT NOT NULL,
                 account TEXT NOT NULL DEFAULT '',
                 daily_source_id TEXT NOT NULL DEFAULT '',
+                daily_scheduled_at TEXT NOT NULL DEFAULT '',
                 revision_source_id TEXT NOT NULL DEFAULT '',
                 last_error TEXT NOT NULL DEFAULT '',
                 attempts INTEGER NOT NULL DEFAULT 0,
@@ -88,6 +89,19 @@ class JobStateStore:
             )
             """
         )
+        columns = {
+            str(row["name"])
+            for row in self.connection.execute(
+                "PRAGMA table_info(affiliate_jobs)"
+            ).fetchall()
+        }
+        if "daily_scheduled_at" not in columns:
+            self.connection.execute(
+                """
+                ALTER TABLE affiliate_jobs
+                ADD COLUMN daily_scheduled_at TEXT NOT NULL DEFAULT ''
+                """
+            )
         self.connection.commit()
         self.cleanup()
 
