@@ -416,7 +416,12 @@ def test_naver_login_detected_from_cookies() -> None:
 
 
 def test_naver_tab_is_home_or_search_only() -> None:
-    from v2r_auto.exposure_naver import SeleniumNaverSearch
+    from v2r_auto.exposure_naver import (
+        SeleniumNaverSearch,
+        ads_account_id,
+        is_ads_center_url,
+        is_keyword_tool_url,
+    )
 
     search = SeleniumNaverSearch(
         type("Browser", (), {"driver": None})(),
@@ -428,11 +433,27 @@ def test_naver_tab_is_home_or_search_only() -> None:
     )
     assert not search._is_naver_search_or_home("https://cafe.naver.com/ccang/1")
     assert not search._is_naver_search_or_home("https://nid.naver.com/nidlogin.login")
+    assert not search._is_naver_search_or_home(
+        "https://ads.naver.com/manage/ad-accounts/685753/dashboard"
+    )
     assert search._ads_login_required("https://nid.naver.com/nidlogin.login")
     assert search._ads_login_required("https://searchad.naver.com/login")
     assert not search._ads_login_required(
-        "https://manage.searchad.naver.com/customers/1/tool/keyword-planner"
+        "https://ads.naver.com/manage/ad-accounts/685753/dashboard"
     )
+    assert is_ads_center_url("https://ads.naver.com/manage/ad-accounts/685753/dashboard")
+    assert is_ads_center_url("https://manage.searchad.naver.com/")
+    assert not is_ads_center_url("https://www.naver.com/")
+    assert ads_account_id(
+        "https://ads.naver.com/manage/ad-accounts/685753/dashboard"
+    ) == "685753"
+    assert is_keyword_tool_url(
+        "https://ads.naver.com/manage/ad-accounts/685753/tools/keyword"
+    )
+    assert not is_keyword_tool_url(
+        "https://ads.naver.com/manage/ad-accounts/685753/dashboard"
+    )
+    assert search._keyword_tool_urls("685753")[0].endswith("/685753/tools/keyword")
 
 
 def test_pause_then_resume_continues_next_keyword() -> None:

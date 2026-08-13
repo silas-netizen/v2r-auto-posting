@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 from urllib.parse import parse_qs, unquote_plus, urlparse
@@ -41,11 +42,33 @@ CAFE_IFRAME_SELECTORS = (
     "iframe#cafe_content",
 )
 NAVER_LOGIN_COOKIES = {"NID_AUT", "NID_SES"}
+ADS_HOME_URL = "https://ads.naver.com/"
 
 
 def is_naver_logged_in_cookies(cookies) -> bool:
     names = {str(item.get("name") or "") for item in cookies or []}
     return bool(names & NAVER_LOGIN_COOKIES)
+
+
+def is_ads_center_url(url: str) -> bool:
+    text = (url or "").lower()
+    return "ads.naver.com" in text or "searchad.naver.com" in text
+
+
+def is_keyword_tool_url(url: str) -> bool:
+    text = (url or "").lower()
+    if not is_ads_center_url(text):
+        return False
+    return "keyword" in text or "planner" in text
+
+
+def ads_account_id(url: str) -> str:
+    text = url or ""
+    match = re.search(r"ad-accounts/(\d+)", text, flags=re.I)
+    if match:
+        return match.group(1)
+    match = re.search(r"customers/(\d+)", text, flags=re.I)
+    return match.group(1) if match else ""
 
 
 class SeleniumNaverSearch:
@@ -179,7 +202,7 @@ class SeleniumNaverSearch:
             if not self._focus_keyword_tool(driver):
                 self._volume_unavailable = True
                 self.logger.warning(
-                    "검색광고 키워드 도구에 로그인하면 검색량을 채울 수 있습니다. 노출상태와 카페는 그대로 반영합니다"
+                    "광고주센터 키워드 도구로 들어가면 검색량을 채울 수 있습니다. 노출상태와 카페는 그대로 반영합니다"
                 )
                 return None
             payload = self._fetch_keywordstool_json(driver, keyword)
@@ -204,30 +227,45 @@ class SeleniumNaverSearch:
     def _open_keyword_tool_tab(self) -> None:
         driver = self._driver()
         try:
-            if self._existing_ads_handle(driver):
-                return
-            driver.switch_to.new_window("tab")
-            driver.get("https://manage.searchad.naver.com/")
-            self._ads_handle = driver.current_window_handle
+            if not self._existing_ads_handle(driver):
+                driver.switch_to.new_window("tab")
+                driver.get(ADS_HOME_URL)
+                time.sleep(1.4)
+                self._ads_handle = driver.current_window_handle
             self.logger.info(
-                "검색량 반영을 위해 검색광고 창을 열었습니다. 네이버 검색 로그인과 별도로, 이 탭에서 검색광고에도 로그인하세요"
+                "검색량 반영을 위해 광고주센터 창을 열었습니다. 이 탭에서 로그인되어 있으면 키워드 도구로 들어갑니다"
             )
+            if self._ads_login_required(driver.current_url or ""):
+                self.logger.warning(
+                    "광고주센터 로그인이 필요합니다. 이 탭에서 로그인한 뒤 검사를 시작하면 검색량을 채웁니다"
+                )
+                return
+            if self._enter_keyword_tool(driver):
+                self.logger.info("키워드 도구 화면입니다. 검사할 때 여기서 검색량을 읽습니다")
+            else:
+                self.logger.warning(
+                    "광고주센터 메인은 열렸습니다. 검사 중에 왼쪽 메뉴 도구 → 키워드 도구로 다시 들어갑니다"
+                )
         except Exception as exc:
-            self.logger.warning("검색광고 창을 열지 못했습니다: %s", exc)
+            self.logger.warning("광고주센터 창을 열지 못했습니다: %s", exc)
         finally:
             self._focus_naver_tab(driver)
 
     def _existing_ads_handle(self, driver) -> str | None:
         handles = list(driver.window_handles)
         if self._ads_handle in handles:
-            return self._ads_handle
+            try:
+                driver.switch_to.window(self._ads_handle)
+                if is_ads_center_url(driver.current_url or ""):
+                    return self._ads_handle
+            except Exception:
+                pass
         for handle in handles:
             try:
                 driver.switch_to.window(handle)
             except Exception:
                 continue
-            url = (driver.current_url or "").lower()
-            if "searchad.naver.com" in url:
+            if is_ads_center_url(driver.current_url or ""):
                 self._ads_handle = handle
                 return handle
         return None
@@ -245,54 +283,140 @@ class SeleniumNaverSearch:
         if not handle:
             try:
                 driver.switch_to.new_window("tab")
-                driver.get("https://manage.searchad.naver.com/")
-                time.sleep(1.2)
+                driver.get(ADS_HOME_URL)
+                time.sleep(1.4)
                 self._ads_handle = driver.current_window_handle
-                handle = self._ads_handle
             except Exception:
                 return False
         else:
             driver.switch_to.window(handle)
-        url = (driver.current_url or "").lower()
-        if self._ads_login_required(url):
+        if self._ads_login_required(driver.current_url or ""):
             return False
-        if "keyword" not in url and "planner" not in url:
-            for path in (
+        return self._enter_keyword_tool(driver)
+
+    def _enter_keyword_tool(self, driver) -> bool:
+        if self._is_keyword_tool_page(driver):
+            return True
+        account = ads_account_id(driver.current_url or "")
+        if self._click_ads_menu(driver, "도구"):
+            time.sleep(0.7)
+        if self._click_keyword_tool_entry(driver):
+            time.sleep(1.2)
+            if self._is_keyword_tool_page(driver):
+                return True
+        for path in self._keyword_tool_urls(account):
+            try:
+                driver.get(path)
+                time.sleep(1.2)
+            except Exception:
+                continue
+            if self._ads_login_required(driver.current_url or ""):
+                return False
+            if self._is_keyword_tool_page(driver):
+                return True
+        return self._is_keyword_tool_page(driver)
+
+    def _keyword_tool_urls(self, account: str) -> list[str]:
+        urls: list[str] = []
+        if account:
+            urls.extend(
+                [
+                    f"https://ads.naver.com/manage/ad-accounts/{account}/tools/keyword",
+                    f"https://ads.naver.com/manage/ad-accounts/{account}/tool/keyword-planner",
+                    f"https://ads.naver.com/manage/ad-accounts/{account}/tools/keyword-planner",
+                    f"https://manage.searchad.naver.com/customers/{account}/tool/keyword-planner",
+                ]
+            )
+        urls.extend(
+            [
                 "https://manage.searchad.naver.com/tool/keyword-planner",
                 "https://searchad.naver.com/ncc/tool/keyword-planner",
-            ):
+            ]
+        )
+        return urls
+
+    def _is_keyword_tool_page(self, driver) -> bool:
+        if is_keyword_tool_url(driver.current_url or ""):
+            return True
+        try:
+            heading = compact_text(self._visible_text(driver)[:2500])
+        except Exception:
+            heading = ""
+        if "키워드도구" not in heading:
+            return False
+        for selector in ("textarea", 'input[placeholder*="키워드"]'):
+            for element in driver.find_elements(By.CSS_SELECTOR, selector):
                 try:
-                    driver.get(path)
-                    time.sleep(1.2)
-                    url = (driver.current_url or "").lower()
-                    if self._ads_login_required(url):
-                        return False
-                    if "keyword" in url or "planner" in url or "searchad.naver.com" in url:
-                        break
+                    if element.is_displayed():
+                        return True
                 except Exception:
                     continue
-        return (
-            "searchad.naver.com" in (driver.current_url or "").lower()
-            and not self._ads_login_required(driver.current_url or "")
-        )
+        return False
+
+    def _click_ads_menu(self, driver, label: str) -> bool:
+        want = compact_text(label)
+        candidates = []
+        for element in driver.find_elements(
+            By.CSS_SELECTOR,
+            "a, button, [role='button'], [role='menuitem'], nav span, aside span, li, p",
+        ):
+            try:
+                if not element.is_displayed():
+                    continue
+                text = compact_text(element.text)
+                if text == want:
+                    candidates.append(element)
+            except Exception:
+                continue
+        for element in candidates:
+            try:
+                driver.execute_script("arguments[0].click();", element)
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _click_keyword_tool_entry(self, driver) -> bool:
+        if self._click_ads_menu(driver, "키워드 도구"):
+            return True
+        for element in driver.find_elements(By.CSS_SELECTOR, "a[href]"):
+            try:
+                href = (element.get_attribute("href") or "").lower()
+                text = compact_text(element.text)
+                if "키워드도구" in text or (
+                    "keyword" in href and ("tool" in href or "planner" in href)
+                ):
+                    if element.is_displayed():
+                        driver.execute_script("arguments[0].click();", element)
+                        return True
+            except Exception:
+                continue
+        return False
 
     def _fetch_keywordstool_json(self, driver, keyword: str) -> dict | None:
         script = """
         const keyword = arguments[0];
         const done = arguments[1];
         const origin = location.origin;
-        const match = location.pathname.match(/customers\\/(\\d+)/);
-        const customerId = match ? match[1] : '';
+        const path = location.pathname || '';
+        const customerMatch = path.match(/customers\\/(\\d+)/);
+        const accountMatch = path.match(/ad-accounts\\/(\\d+)/);
+        const customerId = customerMatch ? customerMatch[1] : '';
+        const accountId = accountMatch ? accountMatch[1] : '';
         const token = localStorage.getItem('nccToken')
           || localStorage.getItem('token')
           || sessionStorage.getItem('nccToken')
           || '';
+        const qs = 'hintKeywords=' + encodeURIComponent(keyword) + '&showDetail=1';
         const urls = [
-          origin + '/keywordstool?hintKeywords=' + encodeURIComponent(keyword) + '&showDetail=1',
-          origin + '/ncc/keywordstool?hintKeywords=' + encodeURIComponent(keyword) + '&showDetail=1'
+          origin + '/keywordstool?' + qs,
+          origin + '/ncc/keywordstool?' + qs
         ];
         if (customerId) {
-          urls.push(origin + '/customers/' + customerId + '/keywordstool?hintKeywords=' + encodeURIComponent(keyword) + '&showDetail=1');
+          urls.push(origin + '/customers/' + customerId + '/keywordstool?' + qs);
+        }
+        if (accountId) {
+          urls.push(origin + '/manage/ad-accounts/' + accountId + '/keywordstool?' + qs);
         }
         const looksUseful = (data) => {
           if (!data || typeof data !== 'object') return false;
@@ -329,10 +453,9 @@ class SeleniumNaverSearch:
     def _scrape_keyword_tool(self, driver, keyword: str) -> int | None:
         box = None
         for selector in (
+            'textarea[placeholder*="키워드"]',
             "textarea",
             'input[placeholder*="키워드"]',
-            'input[type="text"]',
-            '[contenteditable="true"]',
         ):
             for element in driver.find_elements(By.CSS_SELECTOR, selector):
                 try:
@@ -351,8 +474,8 @@ class SeleniumNaverSearch:
         box.send_keys(keyword)
         clicked = False
         for element in driver.find_elements(By.CSS_SELECTOR, "button, a.btn, input[type='button']"):
-            label = (element.text or element.get_attribute("value") or "").replace(" ", "")
-            if "조회" in label or "검색" in label:
+            label = compact_text(element.text or element.get_attribute("value") or "")
+            if label in {"조회", "조회하기"} or label.endswith("조회하기"):
                 try:
                     if element.is_displayed():
                         element.click()

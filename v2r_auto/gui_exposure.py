@@ -91,7 +91,7 @@ class ExposureApp(AutomationApp):
         )
         ttk.Label(
             outer,
-            text="네이버 검색은 한 번만 로그인하면 됩니다. 검색량을 채우려면 검색광고 탭에도 로그인하세요. 크롬 창은 닫지 마세요.",
+            text="네이버 검색은 한 번만 로그인하면 됩니다. 검색량은 광고주센터 왼쪽 메뉴 도구 → 키워드 도구에서 읽습니다. 크롬 창은 닫지 마세요.",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
         self._entry_row(outer, 2, "노션 연결키", self.notion_token, show="*")
