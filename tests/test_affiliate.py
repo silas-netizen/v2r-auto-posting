@@ -173,6 +173,92 @@ def test_cccang_daily_disables_comments_but_revision_enables_them() -> None:
     )
 
 
+def test_affiliate_revision_uses_planned_daily_time_without_waiting(
+    tmp_path: Path,
+) -> None:
+    class PairPublisher(AffiliateApiPublisher):
+        def __init__(self):
+            super().__init__(None, logging.getLogger("test"))
+            self.created = []
+
+        def _capture_authorization(self) -> None:
+            return None
+
+        def _resolve_destination(self, job):
+            return {
+                "cafe_id": 25016228,
+                "cafe_name": "씨씨앙",
+                "menu_id": 328,
+                "menu_name": "자유 수다방",
+                "naver_login_id": job.account,
+                "target_view_count": 0,
+                "use_comment_ai": True,
+                "parent_id": None,
+            }
+
+        def _create_source(
+            self,
+            title,
+            body,
+            tags,
+            destination,
+            comments,
+            parent_source_id=None,
+            content_json=None,
+            recovery_statuses=("DONE",),
+            enable_comment=True,
+        ):
+            self.created.append(
+                {
+                    "destination": dict(destination),
+                    "parent": parent_source_id,
+                    "enable_comment": enable_comment,
+                }
+            )
+            return f"source-{len(self.created)}"
+
+        def _verify_comment_permission(self, source_id, expected):
+            return None
+
+        def _comments(self, job, start_at, cafe_id, comment_accounts=None):
+            return []
+
+        def _prepare_revision_content(self, job, destination):
+            return _content_json(job.body)
+
+        def _verify(self, source_id, job, start_at):
+            return None
+
+    job = load_affiliate_jobs(
+        write_affiliate_csv(tmp_path),
+        selected_row_number=2,
+    )[0]
+    job.cafe = "씨씨앙"
+    job.daily_post = DailyPost(2, "씨씨앙", "일상", "내용")
+    job.daily_scheduled_at = datetime(
+        2026,
+        8,
+        13,
+        9,
+        10,
+        tzinfo=timezone.utc,
+    )
+    publisher = PairPublisher()
+
+    publisher.publish(job, dry_run=False)
+
+    assert len(publisher.created) == 2
+    assert publisher.created[0]["destination"]["start_at"] == (
+        "2026-08-13T09:10:00Z"
+    )
+    assert publisher.created[0]["enable_comment"] is False
+    assert publisher.created[1]["destination"]["start_at"] == (
+        "2026-08-13T13:10:00Z"
+    )
+    assert publisher.created[1]["parent"] == "source-1"
+    assert publisher.created[1]["enable_comment"] is True
+
+
 def test_api_content_preserves_blank_lines_as_paragraphs() -> None:
     document = json.loads(_content_json("첫 줄\n\n둘째 줄"))
     paragraphs = document["document"]["components"][0]["value"]
@@ -385,7 +471,7 @@ def test_affiliate_runner_uses_single_revision_flow(tmp_path: Path) -> None:
     assert report.exists()
 
 
-def test_affiliate_runner_reserves_all_daily_posts_before_waiting_for_revisions(
+def test_affiliate_runner_processes_each_daily_revision_pair_before_next_job(
     tmp_path: Path,
 ) -> None:
     first = load_affiliate_jobs(
@@ -400,17 +486,7 @@ def test_affiliate_runner_reserves_all_daily_posts_before_waiting_for_revisions(
     second.cafe = "양평맘"
     events: list[tuple[str, str]] = []
 
-    class PreReserveBrowser(FakeAffiliateBrowser):
-        def reserve_affiliate_daily(self, job, resume=None, checkpoint=None):
-            events.append(("daily", job.cafe))
-            if checkpoint:
-                checkpoint(
-                    "DAILY_CREATED",
-                    daily_source_id=f"daily-{job.cafe}",
-                    daily_scheduled_at=job.daily_scheduled_at.isoformat(),
-                )
-            return f"https://v2r.example/daily-{job.cafe}"
-
+    class PairBrowser(FakeAffiliateBrowser):
         def publish_affiliate_revision(
             self,
             job,
@@ -420,14 +496,20 @@ def test_affiliate_runner_reserves_all_daily_posts_before_waiting_for_revisions(
             wait_control=None,
         ) -> str:
             assert not dry_run
-            assert resume.get("daily_source_id") == f"daily-{job.cafe}"
+            events.append(("daily", job.cafe))
+            if checkpoint:
+                checkpoint(
+                    "DAILY_CREATED",
+                    daily_source_id=f"daily-{job.cafe}",
+                    daily_scheduled_at=job.daily_scheduled_at.isoformat(),
+                )
             events.append(("revision", job.cafe))
             return f"https://v2r.example/revision-{job.cafe}"
 
         def update_completion_link(self, sheet_url, row_number, url):
             return None
 
-    browser = PreReserveBrowser()
+    browser = PairBrowser()
     runner = AffiliateRunner(
         browser=browser,  # type: ignore[arg-type]
         report_dir=tmp_path,
@@ -450,8 +532,8 @@ def test_affiliate_runner_reserves_all_daily_posts_before_waiting_for_revisions(
 
     assert events == [
         ("daily", "씨씨앙"),
-        ("daily", "양평맘"),
         ("revision", "씨씨앙"),
+        ("daily", "양평맘"),
         ("revision", "양평맘"),
     ]
 
@@ -466,13 +548,6 @@ def test_affiliate_runner_pause_waits_before_new_api_work(tmp_path: Path) -> Non
     events: list[str] = []
 
     class PauseBrowser(FakeAffiliateBrowser):
-        def reserve_affiliate_daily(self, job, resume=None, checkpoint=None):
-            assert not pause_event.is_set()
-            events.append("daily")
-            if checkpoint:
-                checkpoint("DAILY_CREATED", daily_source_id="daily-1")
-            return "https://v2r.example/daily-1"
-
         def publish_affiliate_revision(
             self,
             job,
@@ -481,7 +556,8 @@ def test_affiliate_runner_pause_waits_before_new_api_work(tmp_path: Path) -> Non
             checkpoint=None,
             wait_control=None,
         ) -> str:
-            events.append("revision")
+            assert not pause_event.is_set()
+            events.append("pair")
             return "https://v2r.example/revision-1"
 
         def update_completion_link(self, sheet_url, row_number, url):
@@ -507,7 +583,7 @@ def test_affiliate_runner_pause_waits_before_new_api_work(tmp_path: Path) -> Non
     )
 
     assert time.monotonic() - started >= 0.04
-    assert events == ["daily", "revision"]
+    assert events == ["pair"]
 
 
 def test_affiliate_daily_pending_keeps_reservation_for_next_run(

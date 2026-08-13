@@ -285,58 +285,6 @@ class AffiliateRunner:
             )
             for job in jobs
         }
-        if not dry_run:
-            last_daily_created: dict[str, float] = {}
-            for job in jobs:
-                if job.status != JobStatus.PENDING or job.validate():
-                    continue
-                try:
-                    wait_control()
-                except AffiliateRunStopped:
-                    break
-                remaining = 20 - (
-                    time.monotonic()
-                    - last_daily_created.get(job.cafe, 0)
-                )
-                if remaining > 0 and stop_event.wait(remaining):
-                    break
-                try:
-                    wait_control()
-                except AffiliateRunStopped:
-                    break
-                last_daily_created[job.cafe] = time.monotonic()
-                record_info = state_records.get(id(job))
-                job_key = record_info[0] if record_info else ""
-                resume = runtime_resumes[id(job)]
-
-                def daily_checkpoint(
-                    stage: str,
-                    _job_key: str = job_key,
-                    _resume: dict = resume,
-                    **values,
-                ) -> None:
-                    if self.state and _job_key:
-                        self.state.update(
-                            _job_key,
-                            stage=stage,
-                            **values,
-                        )
-                    _resume.update(values)
-                    _resume["stage"] = stage
-
-                try:
-                    self.browser.reserve_affiliate_daily(
-                        job,
-                        resume=resume,
-                        checkpoint=daily_checkpoint,
-                    )
-                except Exception as exc:
-                    self.logger.warning(
-                        "행 %s 일상 글 사전 예약 실패, 본 처리에서 재시도: %s",
-                        job.row_number,
-                        exc,
-                    )
-
         total = len(jobs)
         retry_count = 0
 

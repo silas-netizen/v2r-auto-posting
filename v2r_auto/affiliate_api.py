@@ -1258,23 +1258,11 @@ class AffiliateApiPublisher:
                     "https://v2r.daboja.im/nc/articleDetail/"
                     f"{daily_source_id}"
                 )
-            written_at = self._wait_for_written_at(
-                daily_source_id,
-                destination["cafe_id"],
-                expected_start_at=job.daily_scheduled_at,
-                wait_control=wait_control,
+            if wait_control:
+                wait_control()
+            revision_at = job.daily_scheduled_at + timedelta(
+                hours=CAFE_DELAYS[job.cafe]
             )
-            job.daily_written_at = written_at
-            if checkpoint:
-                checkpoint(
-                    "DAILY_DONE",
-                    daily_source_id=daily_source_id,
-                    daily_scheduled_at=(
-                        job.daily_scheduled_at.isoformat()
-                        .replace("+00:00", "Z")
-                    ),
-                )
-            revision_at = written_at + timedelta(hours=CAFE_DELAYS[job.cafe])
 
             revision_destination = dict(destination)
             revision_destination["start_at"] = revision_at.isoformat().replace(
