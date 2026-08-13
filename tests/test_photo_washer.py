@@ -12,8 +12,11 @@ from v2r_auto.models import ImmediateJob, JobStatus
 from v2r_auto.photo_washer import (
     camera_metadata,
     camera_metadata_changed,
+    load_saved_photo_washer_executable,
     photo_job_key,
+    preferred_photo_washer_executable,
     prepare_photo_wash_plan,
+    save_photo_washer_executable,
 )
 
 
@@ -84,6 +87,21 @@ def test_camera_metadata_uses_windows_details_camera_fields(tmp_path: Path) -> N
     assert after["Make"] == "AfterMake"
     assert camera_metadata_changed(before, after)
     assert not camera_metadata_changed(after, dict(after))
+
+
+def test_photo_washer_path_is_saved_and_reused(tmp_path: Path) -> None:
+    executable = tmp_path / "photowasher2.1" / "main.exe"
+    executable.parent.mkdir()
+    executable.write_bytes(b"exe")
+    settings = tmp_path / "settings" / "main-path.txt"
+
+    save_photo_washer_executable(executable, settings)
+
+    assert load_saved_photo_washer_executable(settings) == executable.resolve()
+    assert preferred_photo_washer_executable(settings) == executable.resolve()
+
+    executable.unlink()
+    assert load_saved_photo_washer_executable(settings) is None
 
 
 def test_batch_selects_unique_images_and_washes_once(tmp_path: Path) -> None:

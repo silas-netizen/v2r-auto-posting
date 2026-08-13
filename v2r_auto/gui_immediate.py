@@ -18,9 +18,10 @@ from .immediate_inputs import (
 )
 from .photo_washer import (
     PhotoWashPlan,
-    find_photo_washer_executable,
     needs_photo_wash,
+    preferred_photo_washer_executable,
     prepare_photo_wash_plan,
+    save_photo_washer_executable,
 )
 from .runner import ImmediateRunner
 from .state import AnotherInstanceRunningError, InstanceLock
@@ -53,7 +54,7 @@ class ImmediateAutomationApp(AutomationApp):
         self.sheet_url = tk.StringVar()
         self.test_sheet_url = tk.StringVar(value=ACCOUNT_TEST_SHEET_URL)
         self.excel_path = tk.StringVar()
-        detected = find_photo_washer_executable()
+        detected = preferred_photo_washer_executable()
         self.photo_washer_path = tk.StringVar(
             value=str(detected) if detected else ""
         )
@@ -189,6 +190,11 @@ class ImmediateAutomationApp(AutomationApp):
             filetypes=[("포토워셔", "main.exe"), ("실행 파일", "*.exe")],
         )
         if selected:
+            try:
+                save_photo_washer_executable(Path(selected))
+            except Exception as exc:
+                messagebox.showerror("포토워셔 경로 오류", str(exc))
+                return
             self.photo_washer_path.set(selected)
 
     def _open_login(self) -> None:
@@ -234,6 +240,12 @@ class ImmediateAutomationApp(AutomationApp):
 
     def _check_data(self) -> None:
         photo_washer_path = self.photo_washer_path.get().strip()
+        if photo_washer_path:
+            try:
+                save_photo_washer_executable(Path(photo_washer_path))
+            except Exception as exc:
+                messagebox.showerror("포토워셔 경로 오류", str(exc))
+                return
         self.photo_wash_plan = None
 
         def work() -> None:

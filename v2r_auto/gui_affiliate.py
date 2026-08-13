@@ -11,9 +11,10 @@ from .gui import AutomationApp
 from .images import load_sheet_brand
 from .photo_washer import (
     PhotoWashPlan,
-    find_photo_washer_executable,
     needs_photo_wash,
+    preferred_photo_washer_executable,
     prepare_photo_wash_plan,
+    save_photo_washer_executable,
 )
 from .runner import AffiliateRunner
 from .sheet import load_affiliate_jobs
@@ -57,7 +58,7 @@ class AffiliateAutomationApp(AutomationApp):
 
     def _create_variables(self) -> None:
         self.sheet_url = tk.StringVar()
-        detected = find_photo_washer_executable()
+        detected = preferred_photo_washer_executable()
         self.photo_washer_path = tk.StringVar(
             value=str(detected) if detected else ""
         )
@@ -129,6 +130,11 @@ class AffiliateAutomationApp(AutomationApp):
             filetypes=[("포토워셔", "main.exe"), ("실행 파일", "*.exe")],
         )
         if selected:
+            try:
+                save_photo_washer_executable(Path(selected))
+            except Exception as exc:
+                messagebox.showerror("포토워셔 경로 오류", str(exc))
+                return
             self.photo_washer_path.set(selected)
 
     def _open_login(self) -> None:
@@ -163,8 +169,13 @@ class AffiliateAutomationApp(AutomationApp):
             if not sheet_url:
                 raise ValueError("Google 시트 URL을 입력하세요")
             photo_washer_path = self.photo_washer_path.get().strip()
+            if photo_washer_path:
+                save_photo_washer_executable(Path(photo_washer_path))
         except ValueError as exc:
             messagebox.showerror("입력 오류", str(exc))
+            return
+        except Exception as exc:
+            messagebox.showerror("포토워셔 경로 오류", str(exc))
             return
         self.photo_wash_plan = None
 

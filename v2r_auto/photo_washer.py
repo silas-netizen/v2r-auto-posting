@@ -133,6 +133,50 @@ def find_photo_washer_executable() -> Path | None:
     return None
 
 
+def photo_washer_settings_path() -> Path:
+    if os.name == "nt":
+        root = Path(os.environ.get("LOCALAPPDATA", Path.home()))
+    else:
+        root = Path.home() / ".local" / "share"
+    return root / "V2RPhotoWasher" / "main-exe-path.txt"
+
+
+def load_saved_photo_washer_executable(
+    settings_path: Path | None = None,
+) -> Path | None:
+    path = settings_path or photo_washer_settings_path()
+    try:
+        saved = Path(path.read_text(encoding="utf-8").strip())
+    except OSError:
+        return None
+    return saved if saved.is_file() else None
+
+
+def save_photo_washer_executable(
+    executable: Path,
+    settings_path: Path | None = None,
+) -> None:
+    executable = executable.resolve()
+    if not executable.is_file() or executable.name.casefold() != "main.exe":
+        raise PhotoWashError(
+            f"올바른 포토워셔 main.exe가 아닙니다: {executable}"
+        )
+    path = settings_path or photo_washer_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(str(executable), encoding="utf-8")
+    temporary.replace(path)
+
+
+def preferred_photo_washer_executable(
+    settings_path: Path | None = None,
+) -> Path | None:
+    return (
+        load_saved_photo_washer_executable(settings_path)
+        or find_photo_washer_executable()
+    )
+
+
 class PhotoWasherController:
     def __init__(self, executable: Path, logger, timeout_seconds: int = 300):
         self.executable = executable
