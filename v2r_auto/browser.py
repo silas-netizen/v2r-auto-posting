@@ -29,6 +29,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from .content import ParsedArticle
+from .images import strip_placeholders
 from .models import AffiliateJob, JobStatus, PostJob
 
 
@@ -425,6 +426,36 @@ class V2RBrowser:
         )
         selection.click()
 
+        search_value = (
+            AFFILIATE_CAFE_SEARCH_TERMS.get(value, value)
+            if label == "카페"
+            else value
+        )
+        search_inputs = [
+            item
+            for item in selection.find_elements(By.CSS_SELECTOR, "input")
+            if item.is_displayed() and item.is_enabled()
+        ]
+        if not search_inputs:
+            search_inputs = [
+                item
+                for item in self.driver.find_elements(
+                    By.CSS_SELECTOR,
+                    ".n-base-select-menu input, .n-base-selection input",
+                )
+                if item.is_displayed() and item.is_enabled()
+            ]
+        if search_inputs:
+            try:
+                search_input = search_inputs[-1]
+                search_input.send_keys(Keys.CONTROL, "a")
+                search_input.send_keys(search_value)
+            except Exception:
+                self.logger.debug(
+                    "SE-ONE %s 검색어 입력을 사용할 수 없어 표시 목록에서 찾습니다",
+                    label,
+                )
+
         def option():
             options = [
                 item
@@ -443,10 +474,24 @@ class V2RBrowser:
             )
 
         try:
-            self.wait.until(lambda driver: option()).click()
+            selected_option = self.wait.until(lambda driver: option())
+            selected_option.click()
         except TimeoutException as exc:
+            visible_options = [
+                item.text.strip().replace("\n", " / ")
+                for item in self.driver.find_elements(
+                    By.CSS_SELECTOR,
+                    ".n-base-select-option",
+                )
+                if item.is_displayed() and item.text.strip()
+            ]
             raise AutomationError(
                 f"SE-ONE {label} 목록에서 '{value}' 항목을 찾지 못했습니다"
+                + (
+                    f" / 표시 항목: {', '.join(visible_options[:10])}"
+                    if visible_options
+                    else " / 표시된 항목 없음"
+                )
             ) from exc
 
     def _click_text(self, texts: tuple[str, ...], exact_only: bool = False) -> None:
@@ -1049,17 +1094,23 @@ class V2RBrowser:
             if component.get("@ctype") in {"image", "imageGroup", "imageStrip"}
         ]
 
-    def _upload_one_seone_image(
+    def _prepare_seone_image_editor(
         self,
         job: AffiliateJob,
         menu_name: str,
-        image_path: Path,
-    ) -> dict:
+    ) -> None:
+        """Prepare the visible SE-ONE form before using its photo toolbar."""
         assert self.driver
         self.open_se_one_writer()
         self._select_option("카페", job.cafe)
         self._select_option("계정", job.account)
         self._select_option("게시판", menu_name)
+        self._fill_input(
+            "제목",
+            job.title,
+            "input[placeholder*='제목'], textarea[placeholder*='제목']",
+        )
+        self._fill_editor(strip_placeholders(job.body))
         self.wait.until(
             lambda driver: driver.find_elements(By.CSS_SELECTOR, ".seone-container")
         )
@@ -1072,62 +1123,82 @@ class V2RBrowser:
 
         self.wait.until(editor_document_ready)
 
-        def image_inputs():
-            inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
-            return [
-                item
-                for item in inputs
-                if any(
-                    token in (item.get_attribute("accept") or "").casefold()
-                    for token in ("image", ".jpg", ".jpeg", ".png", ".gif", ".webp")
-                )
-            ]
+    def _seone_image_inputs(self):
+        assert self.driver
+        return [
+            item
+            for item in self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+            if any(
+                token in (item.get_attribute("accept") or "").casefold()
+                for token in ("image", ".jpg", ".jpeg", ".png", ".gif", ".webp")
+            )
+        ]
 
-        inputs = image_inputs()
-        if not inputs:
-            selectors = (
-                "button[aria-label*='사진']",
-                "button[aria-label*='이미지']",
-                "button[title*='사진']",
-                "button[title*='이미지']",
-                "button[data-name*='image' i]",
-                "[role='button'][data-name*='image' i]",
-            )
-            button = next(
-                (
-                    element
-                    for selector in selectors
-                    for element in self.driver.find_elements(By.CSS_SELECTOR, selector)
-                    if element.is_displayed() and element.is_enabled()
-                ),
-                None,
-            )
-            if button is None:
-                xpath = (
-                    "//*[self::button or @role='button']"
-                    "[contains(normalize-space(), '사진') or "
-                    "contains(normalize-space(), '이미지')]"
-                )
-                button = next(
-                    (
-                        element
-                        for element in self.driver.find_elements(By.XPATH, xpath)
-                        if element.is_displayed() and element.is_enabled()
-                    ),
-                    None,
-                )
-            if button is None:
-                raise AutomationError("SE-ONE 이미지 첨부 버튼을 찾지 못했습니다")
+    def _seone_photo_button(self):
+        assert self.driver
+        selectors = (
+            ".se-toolbar-item-image button",
+            "button.se-toolbar-option-image",
+            "button[aria-label*='사진']",
+            "button[aria-label*='이미지']",
+            "button[title*='사진']",
+            "button[title*='이미지']",
+            "button[data-name*='image' i]",
+            "[role='button'][data-name*='image' i]",
+        )
+        button = next(
+            (
+                element
+                for selector in selectors
+                for element in self.driver.find_elements(By.CSS_SELECTOR, selector)
+                if element.is_displayed() and element.is_enabled()
+            ),
+            None,
+        )
+        if button is not None:
+            return button
+        xpath = (
+            "//*[contains(normalize-space(), '사진') or "
+            "contains(normalize-space(), '이미지') or "
+            "contains(@aria-label, '사진') or contains(@aria-label, '이미지')]"
+            "/ancestor-or-self::*[self::button or @role='button'][1]"
+        )
+        return next(
+            (
+                element
+                for element in self.driver.find_elements(By.XPATH, xpath)
+                if element.is_displayed() and element.is_enabled()
+            ),
+            None,
+        )
+
+    def _upload_one_seone_image(
+        self,
+        job: AffiliateJob,
+        menu_name: str,
+        image_path: Path,
+    ) -> dict:
+        assert self.driver
+        self._prepare_seone_image_editor(job, menu_name)
+        existing_media_count = len(
+            self._media_components(self._get_seone_document())
+        )
+
+        button = self._seone_photo_button()
+        inputs = self._seone_image_inputs()
+        if button is not None:
             self.driver.execute_script("arguments[0].click();", button)
-            inputs = self.wait.until(lambda _driver: image_inputs())
+            inputs = self.wait.until(lambda _driver: self._seone_image_inputs())
+        elif not inputs:
+            raise AutomationError("SE-ONE 사진 첨부 버튼을 찾지 못했습니다")
 
         inputs[-1].send_keys(str(image_path.resolve()))
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             try:
                 media = self._media_components(self._get_seone_document())
-                if media:
-                    return media[0]
+                if len(media) > existing_media_count:
+                    return media[-1]
             except AutomationError:
                 pass
             time.sleep(0.5)

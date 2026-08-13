@@ -11,7 +11,8 @@ from v2r_auto.browser import (
     V2RBrowser,
 )
 from v2r_auto.history import HistoryCorruptedError, HistoryStore
-from v2r_auto.models import JobStatus, PostJob, RunResult
+from v2r_auto.content import ParsedArticle
+from v2r_auto.models import AffiliateJob, JobStatus, PostJob, RunResult
 from v2r_auto.report import write_report
 from v2r_auto.runner import AutomationRunner, RunOptions
 
@@ -57,6 +58,138 @@ def test_board_selection_requires_exact_display_name() -> None:
     assert V2RBrowser._option_text_matches(
         "게시판", "이모저모 이야기", "이모저모 이야기💘"
     )
+    assert V2RBrowser._option_text_matches("게시판", "뷰티&미용", "뷰티미용")
+
+
+def test_image_editor_is_prepared_in_visible_form_order() -> None:
+    calls: list[tuple[str, str]] = []
+
+    class FakeWait:
+        def until(self, condition):
+            return True
+
+    class FakeDriver:
+        def find_elements(self, by, selector):
+            calls.append(("wait", selector))
+            return [object()]
+
+    class ImageBrowser(V2RBrowser):
+        @property
+        def wait(self):
+            return FakeWait()
+
+        def open_se_one_writer(self) -> None:
+            calls.append(("open", ""))
+
+        def _select_option(self, label: str, value: str) -> None:
+            calls.append((label, value))
+
+        def _fill_input(
+            self,
+            label: str,
+            value: str,
+            fallback_css: str | None = None,
+        ) -> None:
+            calls.append((label, value))
+
+        def _fill_editor(self, body: str) -> None:
+            calls.append(("본문", body))
+
+        def _get_seone_document(self) -> dict:
+            return {"document": {"components": []}}
+
+    browser = object.__new__(ImageBrowser)
+    browser.driver = FakeDriver()
+    job = AffiliateJob(
+        row_number=2,
+        keyword="요즘 그릭요거트",
+        article=ParsedArticle(
+            title="그릭요거트 테스트",
+            body="첫 문장\n{키워드}\n둘째 문장\n{B/A}",
+            keyword="요즘 그릭요거트",
+            tag="요즘그릭요거트",
+            comments=[],
+        ),
+        cafe="러브인썸",
+        account="yun661021",
+        article_type="후기형",
+    )
+
+    browser._prepare_seone_image_editor(job, "뷰티&미용")
+
+    assert calls[:6] == [
+        ("open", ""),
+        ("카페", "러브인썸"),
+        ("계정", "yun661021"),
+        ("게시판", "뷰티&미용"),
+        ("제목", "그릭요거트 테스트"),
+        ("본문", "첫 문장\n\n둘째 문장\n"),
+    ]
+
+
+def test_image_upload_clicks_photo_button_then_selects_local_file(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "요즘 그릭요거트.jpg"
+    image_path.write_bytes(b"image")
+    state = {"prepared": False, "clicked": False, "selected": ""}
+    component = {"@ctype": "image", "id": "uploaded-image"}
+
+    class FakeInput:
+        def send_keys(self, value: str) -> None:
+            state["selected"] = value
+
+    image_input = FakeInput()
+
+    class FakeWait:
+        def until(self, condition):
+            return [image_input]
+
+    class FakeDriver:
+        def execute_script(self, script, button) -> None:
+            state["clicked"] = True
+
+    class ImageBrowser(V2RBrowser):
+        @property
+        def wait(self):
+            return FakeWait()
+
+        def _prepare_seone_image_editor(self, job, menu_name: str) -> None:
+            state["prepared"] = True
+
+        def _get_seone_document(self) -> dict:
+            components = [component] if state["selected"] else []
+            return {"document": {"components": components}}
+
+        def _seone_photo_button(self):
+            return object()
+
+        def _seone_image_inputs(self):
+            return [image_input]
+
+    browser = object.__new__(ImageBrowser)
+    browser.driver = FakeDriver()
+    job = AffiliateJob(
+        row_number=2,
+        keyword="요즘 그릭요거트",
+        article=ParsedArticle(
+            title="제목",
+            body="본문\n{키워드}",
+            keyword="요즘 그릭요거트",
+            tag="요즘그릭요거트",
+            comments=[],
+        ),
+        cafe="러브인썸",
+        account="yun661021",
+        article_type="후기형",
+    )
+
+    uploaded = browser._upload_one_seone_image(job, "뷰티&미용", image_path)
+
+    assert state["prepared"] is True
+    assert state["clicked"] is True
+    assert state["selected"] == str(image_path.resolve())
+    assert uploaded == component
 
 
 def test_api_capture_summarizes_payload_keys_without_values() -> None:
