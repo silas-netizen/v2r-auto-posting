@@ -169,6 +169,11 @@ def keyword_tool_query(keyword: str) -> str:
     return re.sub(r"\s+", "", strip_parenthetical(keyword or ""))
 
 
+def is_keyword_tool_placeholder(value: str) -> bool:
+    """광고주센터 키워드 도구 칸. 실제 문구는 '한줄에 하나씩 입력하세요.'이다."""
+    return "한줄에하나씩" in compact_text(value)
+
+
 def volume_from_result_cells(cells: list[str], keyword: str) -> int | None:
     want = compact_text(keyword)
     texts = [str(cell or "").strip() for cell in cells if str(cell or "").strip()]

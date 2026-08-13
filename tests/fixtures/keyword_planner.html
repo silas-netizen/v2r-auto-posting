@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <title>네이버 광고주센터</title>
+  <style>
+    body { margin: 0; font-family: sans-serif; }
+    header {
+      height: 56px; display: flex; align-items: center; padding: 0 16px;
+      border-bottom: 1px solid #ddd; background: #fff;
+    }
+    header input { width: 280px; height: 32px; }
+    aside { position: absolute; top: 56px; left: 0; width: 180px; padding: 16px; }
+    main { margin-left: 200px; padding: 24px; }
+    textarea { width: 420px; height: 96px; }
+    button:disabled { opacity: 0.45; }
+  </style>
+</head>
+<body>
+  <header>
+    <input id="header-search" type="text" placeholder="검색" />
+  </header>
+  <aside>
+    <div>도구</div>
+    <div>키워드 도구</div>
+  </aside>
+  <main>
+    <section id="hint-section">
+      <h2>연관키워드 조회 기준</h2>
+      <p>원하는 기준으로 '파워링크 캠페인'의 연관키워드를 조회하세요.(다중선택 가능)</p>
+      <label><input type="checkbox" checked /> 키워드</label>
+      <textarea id="keyword-hints" placeholder="한줄에 하나씩 입력하세요.
+(최대 5개까지)"></textarea>
+      <button id="lookup" type="button" disabled>조회하기</button>
+    </section>
+    <section>
+      <h2>연관키워드 조회 결과</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>연관키워드</th>
+            <th>월간검색수 PC</th>
+            <th>월간검색수 모바일</th>
+          </tr>
+        </thead>
+        <tbody id="result-body"></tbody>
+      </table>
+    </section>
+  </main>
+  <script>
+    const header = document.getElementById("header-search");
+    const hints = document.getElementById("keyword-hints");
+    const lookup = document.getElementById("lookup");
+    const body = document.getElementById("result-body");
+    window.__lookedUp = false;
+    function syncButton() {
+      lookup.disabled = !hints.value.trim();
+    }
+    hints.addEventListener("input", syncButton);
+    hints.addEventListener("change", syncButton);
+    lookup.addEventListener("click", function () {
+      if (lookup.disabled) return;
+      window.__lookedUp = true;
+      const keyword = hints.value.replace(/\s+/g, "");
+      body.innerHTML =
+        "<tr><td>" + keyword + "</td><td>20</td><td>110</td></tr>";
+    });
+  </script>
+</body>
+</html>

@@ -21,6 +21,103 @@ from .exposure import (
     volume_from_result_cells,
 )
 
+FIND_KEYWORD_TOOL_BOX_JS = r"""
+const compact = (s) => (s || '').replace(/\s+/g, '');
+const visible = (el) => {
+  const r = el.getBoundingClientRect();
+  const st = window.getComputedStyle(el);
+  return r.width > 40 && r.height > 18
+    && st.visibility !== 'hidden' && st.display !== 'none' && st.opacity !== '0';
+};
+const inHeader = (el) => {
+  if (el.closest && el.closest('header, nav, [role="banner"]')) return true;
+  const r = el.getBoundingClientRect();
+  return el.tagName === 'INPUT' && r.top < 90;
+};
+const hintOf = (el) => compact(
+  (el.getAttribute('placeholder') || '')
+  + (el.getAttribute('aria-placeholder') || '')
+  + (el.getAttribute('aria-label') || '')
+);
+const isHint = (el) => hintOf(el).includes('한줄에하나씩');
+const boxes = Array.from(document.querySelectorAll('textarea, input')).filter(visible);
+
+const hinted = boxes.find((el) => isHint(el) && !inHeader(el));
+if (hinted) return hinted;
+
+const lookup = Array.from(document.querySelectorAll('button, a, [role="button"]')).find((el) => {
+  return compact(el.innerText) === '조회하기' && visible(el);
+});
+if (lookup) {
+  let p = lookup.parentElement;
+  for (let i = 0; i < 10 && p; i++, p = p.parentElement) {
+    const tas = Array.from(p.querySelectorAll('textarea')).filter((el) => visible(el) && !inHeader(el));
+    const match = tas.find(isHint) || tas[0];
+    if (match) return match;
+  }
+}
+
+const sections = Array.from(document.querySelectorAll('*')).filter((el) => {
+  const t = compact(el.innerText);
+  return t.includes('연관키워드조회기준') && t.length < 1200;
+});
+sections.sort((a, b) => compact(a.innerText).length - compact(b.innerText).length);
+for (const section of sections) {
+  const tas = Array.from(section.querySelectorAll('textarea')).filter((el) => visible(el) && !inHeader(el));
+  if (tas.length) return tas[0];
+}
+
+const textareas = boxes.filter((el) => el.tagName === 'TEXTAREA' && !inHeader(el));
+textareas.sort((a, b) => (b.offsetHeight * b.offsetWidth) - (a.offsetHeight * a.offsetWidth));
+if (textareas.length) return textareas[0];
+return null;
+"""
+
+IS_HEADER_SEARCH_JS = r"""
+const el = arguments[0];
+if (!el) return true;
+if (el.closest && el.closest('header, nav, [role="banner"]')) return true;
+const ph = (el.getAttribute('placeholder') || '').replace(/\s+/g, '');
+if (ph.includes('한줄에하나씩')) return false;
+if (el.tagName === 'TEXTAREA') return false;
+const r = el.getBoundingClientRect();
+return el.tagName === 'INPUT' && r.top < 90;
+"""
+
+FILL_KEYWORD_TOOL_BOX_JS = r"""
+const el = arguments[0];
+const val = arguments[1];
+el.scrollIntoView({block: 'center'});
+el.focus();
+el.click();
+const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+const setter = desc && desc.set;
+const tracker = el._valueTracker;
+if (tracker) tracker.setValue('');
+if (setter) setter.call(el, val);
+else el.value = val;
+el.dispatchEvent(new Event('input', {bubbles: true}));
+el.dispatchEvent(new Event('change', {bubbles: true}));
+return el.value || '';
+"""
+
+CLICK_KEYWORD_LOOKUP_JS = r"""
+const compact = (s) => (s || '').replace(/\s+/g, '');
+const buttons = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+const btn = buttons.find((el) => {
+  if (compact(el.innerText) !== '조회하기') return false;
+  if (el.disabled) return false;
+  if (el.getAttribute('aria-disabled') === 'true') return false;
+  if ((el.className || '').includes('disabled')) return false;
+  const r = el.getBoundingClientRect();
+  return r.width > 0 && r.height > 0;
+});
+if (!btn) return false;
+btn.click();
+return true;
+"""
+
 SEARCH_BOX_SELECTORS = (
     "#query",
     "#nx_query",
@@ -481,12 +578,13 @@ class SeleniumNaverSearch:
             return None
         self._check_keyword_hint_box(driver)
         box = self._find_keyword_tool_box(driver)
-        if box is None:
+        if box is None or self._is_ads_header_search(driver, box):
             self.logger.warning("키워드 도구 입력칸을 찾지 못했습니다")
             return None
         self._fill_keyword_tool_box(driver, box, query)
-        if not self._click_keyword_lookup(driver):
-            box.send_keys(Keys.ENTER)
+        if not self._click_keyword_lookup(driver, retries=8):
+            if not self._is_ads_header_search(driver, box):
+                box.send_keys(Keys.ENTER)
         time.sleep(2.4)
         volume = self._volume_from_keyword_table(driver, query)
         if volume is not None:
@@ -514,75 +612,57 @@ class SeleniumNaverSearch:
             return
 
     def _find_keyword_tool_box(self, driver):
-        script = """
-        const visible = (el) => {
-          const r = el.getBoundingClientRect();
-          return r.width > 40 && r.height > 12 && el.offsetParent !== null;
-        };
-        const boxes = Array.from(document.querySelectorAll('textarea, input[type="text"]')).filter(visible);
-        const hinted = boxes.find((el) => (el.getAttribute('placeholder') || '').includes('한 줄에 하나씩'));
-        if (hinted) return hinted;
-        const section = Array.from(document.querySelectorAll('*')).find((el) => {
-          const text = (el.innerText || '').replace(/\\s+/g, '');
-          return text.includes('연관키워드조회기준') && text.length < 3500;
-        });
-        if (section) {
-          const inner = Array.from(section.querySelectorAll('textarea, input[type="text"]')).filter(visible);
-          if (inner.length) return inner[0];
-        }
-        return null;
-        """
         try:
-            box = driver.execute_script(script)
+            box = driver.execute_script(FIND_KEYWORD_TOOL_BOX_JS)
         except Exception:
             box = None
-        if box is not None:
+        if box is not None and not self._is_ads_header_search(driver, box):
             return box
         for xpath in (
+            "//textarea[contains(@placeholder, '한줄에 하나씩')]",
             "//textarea[contains(@placeholder, '한 줄에 하나씩')]",
-            "//*[contains(normalize-space(), '연관키워드 조회 기준')]/following::textarea[1]",
+            "//*[contains(normalize-space(), '연관키워드 조회 기준')]//textarea",
         ):
             found = driver.find_elements(By.XPATH, xpath)
             for element in found:
                 try:
-                    if element.is_displayed():
+                    if element.is_displayed() and not self._is_ads_header_search(driver, element):
                         return element
                 except Exception:
                     continue
         return None
 
-    def _fill_keyword_tool_box(self, driver, box, query: str) -> None:
-        script = """
-        const el = arguments[0];
-        const val = arguments[1];
-        el.focus();
-        const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-        const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-        if (desc && desc.set) desc.set.call(el, val);
-        else el.value = val;
-        el.dispatchEvent(new Event('input', {bubbles: true}));
-        el.dispatchEvent(new Event('change', {bubbles: true}));
-        """
+    def _is_ads_header_search(self, driver, box) -> bool:
         try:
-            driver.execute_script(script, box, query)
+            return bool(driver.execute_script(IS_HEADER_SEARCH_JS, box))
         except Exception:
+            return False
+
+    def _fill_keyword_tool_box(self, driver, box, query: str) -> None:
+        filled = ""
+        try:
+            filled = str(driver.execute_script(FILL_KEYWORD_TOOL_BOX_JS, box, query) or "")
+        except Exception:
+            filled = ""
+        if compact_text(filled) == compact_text(query):
+            return
+        try:
             box.click()
             box.send_keys(Keys.CONTROL, "a")
             box.send_keys(Keys.BACKSPACE)
             box.send_keys(query)
-
-    def _click_keyword_lookup(self, driver) -> bool:
-        script = """
-        const buttons = Array.from(document.querySelectorAll('button, a, [role="button"]'));
-        const btn = buttons.find((el) => (el.innerText || '').replace(/\\s+/g, '') === '조회하기');
-        if (!btn) return false;
-        btn.click();
-        return true;
-        """
-        try:
-            return bool(driver.execute_script(script))
         except Exception:
-            return False
+            return
+
+    def _click_keyword_lookup(self, driver, retries: int = 1) -> bool:
+        for _ in range(max(1, retries)):
+            try:
+                if driver.execute_script(CLICK_KEYWORD_LOOKUP_JS):
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.25)
+        return False
 
     def _volume_from_keyword_table(self, driver, keyword: str) -> int | None:
         rows = driver.find_elements(
