@@ -722,21 +722,37 @@ class V2RBrowser:
         selection_input.send_keys(value)
         self._select_first_dropdown_result(selection_input, label, value)
 
+    def _visible_seone_text_paragraphs(self):
+        assert self.driver
+        return [
+            element
+            for element in self.driver.find_elements(
+                By.CSS_SELECTOR,
+                ".se-module-text .se-text-paragraph",
+            )
+            if element.is_displayed()
+            and element.rect.get("width", 0) > 20
+            and element.rect.get("height", 0) > 10
+            and element.rect.get("x", -1) >= 0
+            and element.rect.get("y", -1) >= 0
+        ]
+
+    def _focus_seone_text_paragraph(self) -> None:
+        assert self.driver
+        try:
+            paragraphs = self.wait.until(
+                lambda driver: self._visible_seone_text_paragraphs()
+            )
+        except TimeoutException as exc:
+            raise AutomationError(
+                "사진을 넣을 본문 위치가 준비되지 않았습니다"
+            ) from exc
+        ActionChains(self.driver).move_to_element(paragraphs[-1]).click().perform()
+
     def _fill_editor(self, body: str) -> None:
         assert self.driver
         def visible_editor():
-            native_paragraphs = [
-                element
-                for element in self.driver.find_elements(
-                    By.CSS_SELECTOR,
-                    ".se-module-text .se-text-paragraph",
-                )
-                if element.is_displayed()
-                and element.rect.get("width", 0) > 20
-                and element.rect.get("height", 0) > 10
-                and element.rect.get("x", -1) >= 0
-                and element.rect.get("y", -1) >= 0
-            ]
+            native_paragraphs = self._visible_seone_text_paragraphs()
             if native_paragraphs:
                 return native_paragraphs[0]
             smart_editor_iframes = [
@@ -1363,6 +1379,7 @@ class V2RBrowser:
             self._media_components(self._get_seone_document())
         )
 
+        self._focus_seone_text_paragraph()
         button = self._seone_photo_button()
         inputs = self._seone_image_inputs()
         if button is not None:

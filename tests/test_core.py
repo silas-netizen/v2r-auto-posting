@@ -370,6 +370,7 @@ def test_multiple_images_share_one_prepared_se_one_editor(
     state = {
         "prepared": 0,
         "clicked": 0,
+        "focused": 0,
         "selected": [],
     }
 
@@ -412,6 +413,9 @@ def test_multiple_images_share_one_prepared_se_one_editor(
             ]
             return {"document": {"components": components}}
 
+        def _focus_seone_text_paragraph(self) -> None:
+            state["focused"] += 1
+
         def _seone_photo_button(self):
             return object()
 
@@ -448,6 +452,7 @@ def test_multiple_images_share_one_prepared_se_one_editor(
     assert state["prepared"] == 1
     assert state["menu_id"] == 9
     assert state["clicked"] == 2
+    assert state["focused"] == 2
     assert state["selected"] == [str(path.resolve()) for path in image_paths]
     assert [component["id"] for component in uploaded] == [
         "uploaded-image-1",
