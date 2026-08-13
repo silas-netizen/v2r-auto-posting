@@ -191,6 +191,23 @@ def test_image_editor_is_prepared_in_visible_form_order() -> None:
         ("본문", "첫 문장\n\n둘째 문장\n"),
     ]
 
+    calls.clear()
+    job.cafe = "씨씨앙"
+    affiliate_destination = {
+        "cafe_id": 25016228,
+        "cafe_name": "국내1위 다이어트 커뮤니티 씨씨앙(식단,운동,후기,헬스,체험단)",
+        "naver_login_id": "writer",
+        "menu_id": 328,
+        "menu_name": "자유 수다방",
+    }
+    browser._prepare_seone_image_editor(job, affiliate_destination)
+
+    assert calls[1:4] == [
+        ("카페", "씨씨앙"),
+        ("계정", "writer"),
+        ("게시판", "자유 수다방"),
+    ]
+
 
 def test_image_editor_retries_whole_setup_when_account_is_not_ready(
     monkeypatch,

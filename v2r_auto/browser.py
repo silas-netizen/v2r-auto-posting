@@ -1316,6 +1316,11 @@ class V2RBrowser:
         """Prepare SE-ONE with the exact destination already resolved by the API."""
         assert self.driver
         cafe_name = str(destination["cafe_name"])
+        ui_cafe_name = (
+            job.cafe
+            if job.cafe in AFFILIATE_CAFE_SEARCH_TERMS
+            else cafe_name
+        )
         account = str(destination["naver_login_id"])
         menu_name = str(destination["menu_name"])
         self.logger.info(
@@ -1328,7 +1333,7 @@ class V2RBrowser:
         for attempt in range(1, 4):
             try:
                 self.open_se_one_writer()
-                self._select_option("카페", cafe_name)
+                self._select_option("카페", ui_cafe_name)
                 self._select_option("계정", account)
                 self._select_option("게시판", menu_name)
                 self._fill_input(
