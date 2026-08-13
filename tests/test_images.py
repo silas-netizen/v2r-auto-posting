@@ -53,6 +53,21 @@ def test_drive_folder_page_parses_folders_and_images() -> None:
     ]
 
 
+def test_embedded_drive_folder_reads_more_than_fifty_files() -> None:
+    source = "".join(
+        (
+            '<a href="https://drive.google.com/file/d/'
+            f'file-id-{index:020d}/view"><div>사진 {index}.jpg</div></a>'
+        )
+        for index in range(60)
+    )
+
+    items = GoogleDriveImageResolver.parse_embedded_folder_page(source)
+
+    assert len(items) == 60
+    assert items[-1].name == "사진 59.jpg"
+
+
 def test_patsooni_keyword_matches_filename_without_spaces(tmp_path: Path) -> None:
     job = make_job("{키워드}\n{B/A}")
 
@@ -87,6 +102,35 @@ def test_patsooni_keyword_matches_filename_without_spaces(tmp_path: Path) -> Non
 
     assert [item.file_id for item in resolved] == ["right", "before-after"]
     assert [item.occurrence for item in resolved] == [0, 1]
+
+
+def test_patsooni_keyword_retries_direct_filename_search(tmp_path: Path) -> None:
+    job = make_job("{키워드}", keyword="요즘 그릭요거트")
+
+    class FakeResolver(GoogleDriveImageResolver):
+        def __init__(self):
+            super().__init__(tmp_path, logging.getLogger("test"), root_folder_id="root")
+            self.direct_searches: list[tuple[str, str]] = []
+
+        def _list_folder(self, folder_id: str):
+            return {
+                "root": [DriveItem("brand", "팥순이", True)],
+                "brand": [DriveItem("keyword", "키워드", True)],
+                "keyword": [DriveItem("other", "다른 사진.jpg", False)],
+            }[folder_id]
+
+        def _search_file(self, folder_id: str, wanted_name: str):
+            self.direct_searches.append((folder_id, wanted_name))
+            return DriveItem("greek", "요즘 그릭요거트.jpg", False)
+
+        def _download(self, item: DriveItem) -> Path:
+            return tmp_path / item.name
+
+    resolver = FakeResolver()
+    resolved = resolver.resolve(job)
+
+    assert resolver.direct_searches == [("keyword", "요즘 그릭요거트")]
+    assert [item.file_id for item in resolved] == ["greek"]
 
 
 def test_content_json_inserts_image_at_placeholder_and_keeps_blank_line() -> None:

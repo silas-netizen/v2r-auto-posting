@@ -14,6 +14,7 @@ from .models import AffiliateJob
 
 DRIVE_IMAGE_ROOT_ID = "13ouLpDi-mSJctFuw3iKCg-z4FZLPjKiK"
 DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/{folder_id}"
+DRIVE_EMBEDDED_FOLDER_URL = "https://drive.google.com/embeddedfolderview?id={folder_id}"
 DRIVE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 PLACEHOLDER_PATTERN = re.compile(r"\{([^{}\r\n]+)\}")
 SHEET_BRAND_PATTERN = re.compile(r"\(([^()]+)\)")
@@ -115,18 +116,85 @@ class GoogleDriveImageResolver:
                 items.append(DriveItem(item_id, name, is_folder))
         return items
 
-    def _list_folder(self, folder_id: str) -> list[DriveItem]:
-        if folder_id in self._folder_cache:
-            return self._folder_cache[folder_id]
+    @staticmethod
+    def parse_embedded_folder_page(source: str) -> list[DriveItem]:
+        """Read every public item from Drive's complete embedded folder view."""
+        items: list[DriveItem] = []
+        seen: set[tuple[str, str, bool]] = set()
+        anchors = re.compile(
+            r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        for match in anchors.finditer(source):
+            href = html.unescape(match.group(1))
+            text = re.sub(r"<[^>]+>", "", match.group(2))
+            name = re.sub(r"\s+", " ", html.unescape(text)).strip()
+            file_match = re.search(r"/file/d/([A-Za-z0-9_-]{20,})/view", href)
+            folder_match = re.search(
+                r"/drive/folders/([A-Za-z0-9_-]{20,})",
+                href,
+            )
+            docs_match = re.search(
+                r"https://docs\.google\.com/[^/]+/d/([A-Za-z0-9_-]{20,})/",
+                href,
+            )
+            if folder_match:
+                item = DriveItem(folder_match.group(1), name, True)
+            elif file_match:
+                item = DriveItem(file_match.group(1), name, False)
+            elif docs_match:
+                item = DriveItem(docs_match.group(1), name, False)
+            else:
+                continue
+            key = (item.item_id, item.name, item.is_folder)
+            if item.name and key not in seen:
+                seen.add(key)
+                items.append(item)
+        return items
+
+    def _fetch_complete_folder(self, folder_id: str) -> list[DriveItem]:
         request = Request(
-            DRIVE_FOLDER_URL.format(folder_id=folder_id),
+            DRIVE_EMBEDDED_FOLDER_URL.format(folder_id=folder_id),
             headers={"User-Agent": "Mozilla/5.0"},
         )
         with self.opener(request, timeout=30) as response:
             source = response.read().decode("utf-8", errors="ignore")
-        items = self.parse_folder_page(source)
+        return self.parse_embedded_folder_page(source)
+
+    def _list_folder(self, folder_id: str) -> list[DriveItem]:
+        if folder_id in self._folder_cache:
+            return self._folder_cache[folder_id]
+        try:
+            items = self._fetch_complete_folder(folder_id)
+        except Exception:
+            items = []
+        if not items:
+            request = Request(
+                DRIVE_FOLDER_URL.format(folder_id=folder_id),
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            with self.opener(request, timeout=30) as response:
+                source = response.read().decode("utf-8", errors="ignore")
+            items = self.parse_folder_page(source)
         self._folder_cache[folder_id] = items
         return items
+
+    def _search_file(self, folder_id: str, wanted_name: str) -> DriveItem | None:
+        """Retry one exact filename directly against a fresh complete listing."""
+        wanted = re.sub(r"\s+", "", wanted_name).casefold()
+        try:
+            items = self._fetch_complete_folder(folder_id)
+        except Exception as exc:
+            self.logger.warning("Google Drive 파일명 직접 검색 실패: %s", exc)
+            return None
+        return next(
+            (
+                item
+                for item in items
+                if not item.is_folder and self._file_key(item.name) == wanted
+            ),
+            None,
+        )
 
     def _folder(self, parent_id: str, name: str) -> DriveItem | None:
         wanted = self._key(name)
@@ -190,6 +258,14 @@ class GoogleDriveImageResolver:
             if keyword_match:
                 wanted = re.sub(r"\s+", "", job.keyword).casefold()
                 candidates = [item for item in files if self._file_key(item.name) == wanted]
+                if not candidates:
+                    self.logger.info(
+                        "행 %s {%s} 전체 목록에 없어 파일명으로 직접 다시 검색합니다",
+                        job.row_number,
+                        marker,
+                    )
+                    direct = self._search_file(folder.item_id, job.keyword)
+                    candidates = [direct] if direct else []
             else:
                 candidates = files
             if not candidates:

@@ -61,6 +61,61 @@ def test_board_selection_requires_exact_display_name() -> None:
     assert V2RBrowser._option_text_matches("게시판", "뷰티&미용", "뷰티미용")
 
 
+def test_se_one_board_waits_and_reopens_until_options_are_ready() -> None:
+    state = {"opened": 0, "selected": False}
+
+    class FakeSelection:
+        def click(self) -> None:
+            state["opened"] += 1
+
+        def find_elements(self, by, selector):
+            return []
+
+    class FakeOption:
+        text = "뷰티&미용"
+
+        def is_displayed(self) -> bool:
+            return True
+
+        def click(self) -> None:
+            state["selected"] = True
+
+    selection = FakeSelection()
+    option = FakeOption()
+
+    class FakeDriver:
+        def execute_script(self, script, element) -> None:
+            return None
+
+        def find_elements(self, by, selector):
+            return [option] if state["opened"] >= 2 else []
+
+    class FakeWait:
+        def until(self, condition):
+            for _ in range(5):
+                value = condition(browser.driver)
+                if value:
+                    return value
+            raise AssertionError("condition did not become ready")
+
+    class BoardBrowser(V2RBrowser):
+        @property
+        def wait(self):
+            return FakeWait()
+
+        def _visible_se_one_selections(self):
+            return [object(), object(), selection, object()]
+
+    browser = object.__new__(BoardBrowser)
+    browser.driver = FakeDriver()
+    browser.logger = __import__("logging").getLogger("test")
+
+    browser._select_se_one_option("게시판", "뷰티&미용", 2)
+
+    assert state["opened"] >= 2
+    assert state["selected"] is True
+
+
 def test_image_editor_is_prepared_in_visible_form_order() -> None:
     calls: list[tuple[str, str]] = []
 

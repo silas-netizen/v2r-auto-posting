@@ -426,6 +426,37 @@ class V2RBrowser:
         )
         selection.click()
 
+        def visible_options():
+            return [
+                item
+                for item in self.driver.find_elements(
+                    By.CSS_SELECTOR, ".n-base-select-option"
+                )
+                if item.is_displayed()
+            ]
+
+        try:
+            options = self.wait.until(
+                lambda driver: visible_options()
+                or (selection.click() and False)
+            )
+        except TimeoutException as exc:
+            raise AutomationError(
+                f"SE-ONE {label} 목록이 준비되지 않았습니다"
+            ) from exc
+
+        direct = next(
+            (
+                item
+                for item in options
+                if self._se_one_option_matches(label, value, item.text)
+            ),
+            None,
+        )
+        if direct is not None:
+            direct.click()
+            return
+
         search_value = (
             AFFILIATE_CAFE_SEARCH_TERMS.get(value, value)
             if label == "카페"
@@ -457,17 +488,10 @@ class V2RBrowser:
                 )
 
         def option():
-            options = [
-                item
-                for item in self.driver.find_elements(
-                    By.CSS_SELECTOR, ".n-base-select-option"
-                )
-                if item.is_displayed()
-            ]
             return next(
                 (
                     item
-                    for item in options
+                    for item in visible_options()
                     if self._se_one_option_matches(label, value, item.text)
                 ),
                 False,
