@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .gui import AutomationApp
@@ -14,6 +15,12 @@ from .immediate_inputs import (
     load_account_test_jobs,
     load_brand_immediate_jobs,
     load_daily_excel_jobs,
+)
+from .photo_washer import (
+    PhotoWashPlan,
+    find_photo_washer_executable,
+    needs_photo_wash,
+    prepare_photo_wash_plan,
 )
 from .runner import ImmediateRunner
 from .state import AnotherInstanceRunningError, InstanceLock
@@ -31,6 +38,7 @@ class ImmediateAutomationApp(AutomationApp):
 
     def __init__(self):
         self.pause_event = threading.Event()
+        self.photo_wash_plan: PhotoWashPlan | None = None
         super().__init__()
         self.instance_lock = InstanceLock(self.data_dir / "worker.lock")
         try:
@@ -45,6 +53,10 @@ class ImmediateAutomationApp(AutomationApp):
         self.sheet_url = tk.StringVar()
         self.test_sheet_url = tk.StringVar(value=ACCOUNT_TEST_SHEET_URL)
         self.excel_path = tk.StringVar()
+        detected = find_photo_washer_executable()
+        self.photo_washer_path = tk.StringVar(
+            value=str(detected) if detected else ""
+        )
         self.dry_run = tk.BooleanVar(value=True)
         self.progress_text = tk.StringVar(value="대기 중")
 
@@ -52,7 +64,7 @@ class ImmediateAutomationApp(AutomationApp):
         outer = ttk.Frame(self, padding=16)
         outer.pack(fill=tk.BOTH, expand=True)
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(8, weight=1)
+        outer.rowconfigure(9, weight=1)
 
         ttk.Label(outer, text=self.app_name, font=("", 18, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
@@ -97,9 +109,16 @@ class ImmediateAutomationApp(AutomationApp):
             "한줄테스트 시트",
             self.test_sheet_url,
         )
+        self._entry_row(
+            outer,
+            6,
+            "포토워셔 main.exe",
+            self.photo_washer_path,
+            button=("찾기", self._choose_photo_washer),
+        )
 
         actions = ttk.Frame(outer)
-        actions.grid(row=6, column=0, columnspan=3, sticky="ew", pady=10)
+        actions.grid(row=7, column=0, columnspan=3, sticky="ew", pady=10)
         ttk.Checkbutton(
             actions,
             text="검증 모드(실제 발행하지 않음)",
@@ -138,7 +157,7 @@ class ImmediateAutomationApp(AutomationApp):
         ).pack(side=tk.RIGHT)
 
         progress_frame = ttk.Frame(outer)
-        progress_frame.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        progress_frame.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         progress_frame.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_frame, maximum=100)
         self.progress.grid(row=0, column=0, sticky="ew")
@@ -147,7 +166,7 @@ class ImmediateAutomationApp(AutomationApp):
         )
 
         log_frame = ttk.LabelFrame(outer, text="실시간 로그", padding=8)
-        log_frame.grid(row=8, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=9, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state=tk.DISABLED)
@@ -163,6 +182,14 @@ class ImmediateAutomationApp(AutomationApp):
         )
         if selected:
             self.excel_path.set(selected)
+
+    def _choose_photo_washer(self) -> None:
+        selected = filedialog.askopenfilename(
+            title="포토워셔 main.exe 선택",
+            filetypes=[("포토워셔", "main.exe"), ("실행 파일", "*.exe")],
+        )
+        if selected:
+            self.photo_washer_path.set(selected)
 
     def _open_login(self) -> None:
         mode = self.input_mode.get()
@@ -206,18 +233,41 @@ class ImmediateAutomationApp(AutomationApp):
         )
 
     def _check_data(self) -> None:
+        photo_washer_path = self.photo_washer_path.get().strip()
+        self.photo_wash_plan = None
+
         def work() -> None:
             jobs, _sheet_url = self._load_immediate_jobs()
+            self.photo_wash_plan = prepare_photo_wash_plan(
+                jobs,
+                download_dir=self.download_dir,
+                executable=(
+                    Path(photo_washer_path)
+                    if photo_washer_path
+                    else None
+                ),
+                logger=self.logger,
+            )
             errors = sum(bool(job.validate()) for job in jobs)
             self.logger.info(
-                "즉시 발행 데이터 확인: %s건 / 형식 오류 %s건",
+                "즉시 발행 데이터 확인: %s건 / 형식 오류 %s건 / "
+                "사진 선택 %s개 / 세탁 성공 %s개",
                 len(jobs),
                 errors,
+                self.photo_wash_plan.selected_count,
+                self.photo_wash_plan.washed_count,
             )
             self.ui_queue.put(
                 (
                     "info",
-                    ("데이터 확인", f"처리 대상 {len(jobs)}건\n형식 오류 {errors}건"),
+                    (
+                        "데이터 확인",
+                        f"처리 대상 {len(jobs)}건\n"
+                        f"형식 오류 {errors}건\n"
+                        f"사진 선택 {self.photo_wash_plan.selected_count}개\n"
+                        f"세탁 성공 {self.photo_wash_plan.washed_count}개\n"
+                        f"사진 실패 원고 {len(self.photo_wash_plan.failures)}건",
+                    ),
                 )
             )
 
@@ -243,6 +293,13 @@ class ImmediateAutomationApp(AutomationApp):
         def work() -> None:
             try:
                 jobs, sheet_url = self._load_immediate_jobs()
+                if self.photo_wash_plan is not None:
+                    self.photo_wash_plan.apply(jobs)
+                elif any(needs_photo_wash(job) for job in jobs):
+                    raise ValueError(
+                        "사진 세탁 준비가 없습니다. "
+                        "2. 데이터 확인을 먼저 실행하세요"
+                    )
                 runner = ImmediateRunner(
                     browser=self.browser,
                     history_path=self.data_dir / "immediate-history.json",

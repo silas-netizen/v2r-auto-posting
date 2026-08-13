@@ -3,11 +3,18 @@ from __future__ import annotations
 import queue
 import tkinter as tk
 import time
-from tkinter import messagebox, ttk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 
 from .daily_posts import load_daily_posts
 from .gui import AutomationApp
 from .images import load_sheet_brand
+from .photo_washer import (
+    PhotoWashPlan,
+    find_photo_washer_executable,
+    needs_photo_wash,
+    prepare_photo_wash_plan,
+)
 from .runner import AffiliateRunner
 from .sheet import load_affiliate_jobs
 from .state import AnotherInstanceRunningError, InstanceLock
@@ -26,6 +33,7 @@ class AffiliateAutomationApp(AutomationApp):
     data_folder_name = "V2RAffiliatePosting"
 
     def __init__(self):
+        self.photo_wash_plan: PhotoWashPlan | None = None
         super().__init__()
         self._cleanup_old_files()
         self.instance_lock = InstanceLock(self.data_dir / "data" / "worker.lock")
@@ -49,6 +57,10 @@ class AffiliateAutomationApp(AutomationApp):
 
     def _create_variables(self) -> None:
         self.sheet_url = tk.StringVar()
+        detected = find_photo_washer_executable()
+        self.photo_washer_path = tk.StringVar(
+            value=str(detected) if detected else ""
+        )
         self.dry_run = tk.BooleanVar(value=True)
         self.progress_text = tk.StringVar(value="대기 중")
 
@@ -56,7 +68,7 @@ class AffiliateAutomationApp(AutomationApp):
         outer = ttk.Frame(self, padding=16)
         outer.pack(fill=tk.BOTH, expand=True)
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(5, weight=1)
+        outer.rowconfigure(6, weight=1)
 
         ttk.Label(outer, text=self.app_name, font=("", 18, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
@@ -66,9 +78,16 @@ class AffiliateAutomationApp(AutomationApp):
             text="일상 글 작성 → 수정 글 예약 → 시트 원고·댓글 입력 → 등록",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
         self._entry_row(outer, 2, "Google 시트 URL", self.sheet_url)
+        self._entry_row(
+            outer,
+            3,
+            "포토워셔 main.exe",
+            self.photo_washer_path,
+            button=("찾기", self._choose_photo_washer),
+        )
 
         actions = ttk.Frame(outer)
-        actions.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 10))
+        actions.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 10))
         ttk.Checkbutton(
             actions,
             text="검증 모드(글을 절대 등록하지 않음)",
@@ -86,7 +105,7 @@ class AffiliateAutomationApp(AutomationApp):
         self.stop_button.pack(side=tk.LEFT, padx=6)
 
         progress_frame = ttk.Frame(outer)
-        progress_frame.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        progress_frame.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         progress_frame.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_frame, maximum=100)
         self.progress.grid(row=0, column=0, sticky="ew")
@@ -95,7 +114,7 @@ class AffiliateAutomationApp(AutomationApp):
         )
 
         log_frame = ttk.LabelFrame(outer, text="실시간 로그", padding=8)
-        log_frame.grid(row=5, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=6, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state=tk.DISABLED)
@@ -103,6 +122,14 @@ class AffiliateAutomationApp(AutomationApp):
         scrollbar = ttk.Scrollbar(log_frame, command=self.log_text.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=scrollbar.set)
+
+    def _choose_photo_washer(self) -> None:
+        selected = filedialog.askopenfilename(
+            title="포토워셔 main.exe 선택",
+            filetypes=[("포토워셔", "main.exe"), ("실행 파일", "*.exe")],
+        )
+        if selected:
+            self.photo_washer_path.set(selected)
 
     def _open_login(self) -> None:
         sheet_url = self.sheet_url.get().strip()
@@ -135,16 +162,31 @@ class AffiliateAutomationApp(AutomationApp):
             sheet_url = self.sheet_url.get().strip()
             if not sheet_url:
                 raise ValueError("Google 시트 URL을 입력하세요")
+            photo_washer_path = self.photo_washer_path.get().strip()
         except ValueError as exc:
             messagebox.showerror("입력 오류", str(exc))
             return
+        self.photo_wash_plan = None
 
         def work() -> None:
             jobs, daily_posts = self._load_affiliate_jobs(sheet_url)
+            self.photo_wash_plan = prepare_photo_wash_plan(
+                jobs,
+                download_dir=self.download_dir,
+                executable=(
+                    Path(photo_washer_path)
+                    if photo_washer_path
+                    else None
+                ),
+                logger=self.logger,
+            )
             self.logger.info(
-                "처리 대상 확인 완료: 원고 %s건 / 일상 글 %s건",
+                "처리 대상 확인 완료: 원고 %s건 / 일상 글 %s건 / "
+                "사진 선택 %s개 / 세탁 성공 %s개",
                 len(jobs),
                 len(daily_posts),
+                self.photo_wash_plan.selected_count,
+                self.photo_wash_plan.washed_count,
             )
             self.ui_queue.put(
                 (
@@ -152,7 +194,10 @@ class AffiliateAutomationApp(AutomationApp):
                     (
                         "처리 대상 확인",
                         f"A~E열이 모두 채워진 원고 {len(jobs)}건\n"
-                        f"제휴 일상 글 {len(daily_posts)}건",
+                        f"제휴 일상 글 {len(daily_posts)}건\n"
+                        f"사진 선택 {self.photo_wash_plan.selected_count}개\n"
+                        f"세탁 성공 {self.photo_wash_plan.washed_count}개\n"
+                        f"사진 실패 원고 {len(self.photo_wash_plan.failures)}건",
                     ),
                 )
             )
@@ -195,6 +240,13 @@ class AffiliateAutomationApp(AutomationApp):
         def work() -> None:
             try:
                 jobs, daily_posts = self._load_affiliate_jobs(sheet_url)
+                if self.photo_wash_plan is not None:
+                    self.photo_wash_plan.apply(jobs)
+                elif any(needs_photo_wash(job) for job in jobs):
+                    raise ValueError(
+                        "사진 세탁 준비가 없습니다. "
+                        "2. 대상 확인을 먼저 실행하세요"
+                    )
                 runner = AffiliateRunner(
                     browser=self.browser,
                     report_dir=self.report_dir,

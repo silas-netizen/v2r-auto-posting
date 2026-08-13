@@ -21,6 +21,7 @@ from .models import (
     PostJob,
     RunResult,
 )
+from .photo_washer import needs_photo_wash
 from .report import write_report
 from .state import JobStateStore
 
@@ -170,6 +171,13 @@ class AffiliateRunner:
         status: Callable[[dict[str, int]], None] | None = None,
     ) -> tuple[RunResult, Path]:
         started_at = datetime.now()
+        for job in jobs:
+            if needs_photo_wash(job) and not job.photo_wash_prepared:
+                job.status = JobStatus.FAILED
+                job.message = (
+                    "포토워셔 세탁 준비가 없습니다. "
+                    "2. 데이터 확인부터 다시 실행하세요"
+                )
         state_records: dict[int, tuple[str, dict]] = {}
         if self.state and not dry_run:
             for job in jobs:
@@ -451,6 +459,13 @@ class ImmediateRunner:
     ) -> tuple[RunResult, Path]:
         started_at = datetime.now()
         pause_event = pause_event or threading.Event()
+        for job in jobs:
+            if needs_photo_wash(job) and not job.photo_wash_prepared:
+                job.status = JobStatus.FAILED
+                job.message = (
+                    "포토워셔 세탁 준비가 없습니다. "
+                    "2. 데이터 확인부터 다시 실행하세요"
+                )
         self.browser.ensure_v2r_login("", "")
         self.browser.prepare_immediate_jobs(jobs)
         removed_failures = self.history.remove_urls(
