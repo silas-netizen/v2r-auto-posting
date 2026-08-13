@@ -11,6 +11,7 @@ from .affiliate_api import (
     AffiliateApiError,
     AffiliateApiPublisher,
     _content_json,
+    _image_resource_ready,
     _walk_dicts,
 )
 from .cafe_catalog import (
@@ -634,6 +635,20 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         expected_comments = 12 if job.comments else 0
         if len(comments) != expected_comments:
             raise AffiliateApiError("등록 후 댓글 개수 검증에 실패했습니다")
+        media_components = [
+            component
+            for component in document["document"]["components"]
+            if component.get("@ctype") in {"image", "imageGroup", "imageStrip"}
+        ]
+        if job.prepared_image_count and len(media_components) < job.prepared_image_count:
+            raise AffiliateApiError("등록 후 본문 이미지 개수 검증에 실패했습니다")
+        if job.prepared_image_count and not all(
+            _image_resource_ready(component)
+            for component in media_components
+        ):
+            raise AffiliateApiError(
+                "등록 후 본문 사진 주소 또는 파일 정보 검증에 실패했습니다"
+            )
         if job.scheduled_at and comments and any(
             datetime.fromisoformat(str(comment["start_at"]).replace("Z", "+00:00"))
             < job.scheduled_at

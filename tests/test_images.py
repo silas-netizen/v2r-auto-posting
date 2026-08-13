@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from v2r_auto.affiliate_api import AffiliateApiError, AffiliateApiPublisher, _content_json
+from v2r_auto.affiliate_api import (
+    AffiliateApiError,
+    AffiliateApiPublisher,
+    _content_json,
+    _image_resource_ready,
+)
 from v2r_auto.images import (
     DriveItem,
     GoogleDriveImageResolver,
@@ -146,6 +151,22 @@ def test_content_json_inserts_image_at_placeholder_and_keeps_blank_line() -> Non
         "",
         "둘째 줄",
     ]
+
+
+def test_saved_image_resource_requires_nonempty_url_and_file_metadata() -> None:
+    complete = {
+        "@ctype": "image",
+        "src": "https://example.test/photo.jpg",
+        "path": "/photo.jpg",
+        "fileName": "photo.jpg",
+        "fileSize": 1024,
+    }
+
+    assert _image_resource_ready(complete)
+    assert not _image_resource_ready({**complete, "src": ""})
+    assert not _image_resource_ready({**complete, "path": None})
+    assert not _image_resource_ready({**complete, "fileName": None})
+    assert not _image_resource_ready({**complete, "fileSize": 0})
 
 
 def test_drive_failure_falls_back_to_clean_text() -> None:

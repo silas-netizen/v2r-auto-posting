@@ -65,6 +65,32 @@ def _normalized(value: str) -> str:
     return re.sub(r"[^0-9a-z가-힣]+", "", value or "", flags=re.IGNORECASE).casefold()
 
 
+def _image_resource_ready(component: dict[str, Any]) -> bool:
+    images: list[dict[str, Any]] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            if value.get("@ctype") == "image":
+                images.append(value)
+            for child in value.values():
+                collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+
+    collect(component)
+    return bool(images) and all(
+        isinstance(image.get("src"), str)
+        and bool(image["src"].strip())
+        and isinstance(image.get("path"), str)
+        and bool(image["path"].strip())
+        and isinstance(image.get("fileName"), str)
+        and bool(image["fileName"].strip())
+        and int(image.get("fileSize") or 0) > 0
+        for image in images
+    )
+
+
 def _paragraph(line: str) -> dict[str, Any]:
     return {
         "id": f"SE-{uuid.uuid4()}",
@@ -986,12 +1012,21 @@ class AffiliateApiPublisher:
             raise AffiliateApiError("등록 후 본문 문단 검증에 실패했습니다")
         if any(PLACEHOLDER_PATTERN.search(line) for line in body_lines):
             raise AffiliateApiError("등록 후 본문에 중괄호 표시가 남아 있습니다")
-        media_count = sum(
-            component.get("@ctype") in {"image", "imageGroup", "imageStrip"}
+        media_components = [
+            component
             for component in document["document"]["components"]
-        )
+            if component.get("@ctype") in {"image", "imageGroup", "imageStrip"}
+        ]
+        media_count = len(media_components)
         if job.prepared_image_count and media_count < job.prepared_image_count:
             raise AffiliateApiError("등록 후 본문 이미지 개수 검증에 실패했습니다")
+        if job.prepared_image_count and not all(
+            _image_resource_ready(component)
+            for component in media_components
+        ):
+            raise AffiliateApiError(
+                "등록 후 본문 사진 주소 또는 파일 정보 검증에 실패했습니다"
+            )
         if datetime.fromisoformat(destination["start_at"].replace("Z", "+00:00")) != start_at:
             raise AffiliateApiError("등록 후 수정 예약 시간 검증에 실패했습니다")
         if not 80 <= int(destination["target_view_count"]) <= 100:
