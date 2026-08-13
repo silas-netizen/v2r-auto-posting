@@ -374,14 +374,21 @@ def test_multiple_images_share_one_prepared_se_one_editor(
     }
 
     class FakeInput:
+        def __init__(self, input_id: str):
+            self.id = input_id
+
         def send_keys(self, value: str) -> None:
             state["selected"].append(value)
 
-    image_input = FakeInput()
+    base_input = FakeInput("base-input")
+    generated_inputs = [
+        FakeInput("generated-input-1"),
+        FakeInput("generated-input-2"),
+    ]
 
     class FakeWait:
         def until(self, condition):
-            return [image_input]
+            return condition(None)
 
     class FakeDriver:
         def execute_script(self, script, button) -> None:
@@ -407,7 +414,7 @@ def test_multiple_images_share_one_prepared_se_one_editor(
             return object()
 
         def _seone_image_inputs(self):
-            return [image_input]
+            return [base_input] + generated_inputs[: state["clicked"]]
 
     browser = object.__new__(ImageBrowser)
     browser.driver = FakeDriver()
