@@ -152,6 +152,23 @@ class PhotoWasherController:
                     f"포토워셔 필수 파일이 없습니다: {companion}"
                 )
 
+    @staticmethod
+    def _wait_for_window_text(window, text: str, timeout: int) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                texts = [
+                    item.window_text()
+                    for item in window.descendants()
+                    if item.window_text()
+                ]
+                if any(text in value for value in texts):
+                    return
+            except Exception:
+                pass
+            time.sleep(0.25)
+        raise PhotoWashError(f"포토워셔 화면 문구를 찾지 못했습니다: {text}")
+
     def wash(self, batch_dir: Path, image_paths: list[Path]) -> None:
         self._validate_installation()
         if not image_paths:
@@ -166,9 +183,10 @@ class PhotoWasherController:
 
         app = None
         explorer_process = None
+        explorer_window = None
         try:
             app = Application(backend="uia").start(
-                str(self.executable),
+                f'"{self.executable}"',
                 work_dir=str(self.executable.parent),
             )
             window = Desktop(backend="uia").window(
@@ -182,16 +200,30 @@ class PhotoWasherController:
                     f"/select,{batch_dir}",
                 ]
             )
-            explorer_window = Desktop(backend="uia").window(
-                class_name="CabinetWClass",
-                found_index=0,
-            )
-            explorer_window.wait("visible ready", timeout=30)
-            folder_item = explorer_window.child_window(
-                title=batch_dir.name,
-                control_type="ListItem",
-            )
-            folder_item.wait("visible enabled", timeout=30)
+            desktop = Desktop(backend="uia")
+            folder_item = None
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                for candidate in reversed(
+                    desktop.windows(class_name="CabinetWClass")
+                ):
+                    item = candidate.child_window(
+                        title=batch_dir.name,
+                        control_type="ListItem",
+                    )
+                    if item.exists(timeout=0):
+                        explorer_window = candidate
+                        folder_item = item
+                        break
+                if folder_item is not None:
+                    break
+                time.sleep(0.25)
+            if folder_item is None or explorer_window is None:
+                raise PhotoWashError(
+                    "포토워셔로 드래그할 배치 폴더를 탐색기에서 찾지 못했습니다"
+                )
+            folder_item.wait("visible enabled", timeout=10)
+            folder_item.click_input()
             drop_text = window.child_window(
                 title="파일 또는 폴더를 여기에 드래그하세요",
             )
@@ -211,10 +243,10 @@ class PhotoWasherController:
             mouse.move(coords=target, duration=1.5)
             mouse.release(button="left", coords=target)
 
-            loaded_pattern = rf".*{len(image_paths)}개 로딩이 완료되었습니다.*"
-            window.child_window(title_re=loaded_pattern).wait(
-                "visible",
-                timeout=60,
+            self._wait_for_window_text(
+                window,
+                f"{len(image_paths)}개 로딩이 완료되었습니다",
+                60,
             )
             window.child_window(
                 title="전체 사진 세척",
@@ -223,18 +255,17 @@ class PhotoWasherController:
             completed = Desktop(backend="uia").window(title="완료")
             completed.wait("visible ready", timeout=self.timeout_seconds)
             completed.child_window(
-                title="Ok",
+                title_re=r"(?i)^ok$",
                 control_type="Button",
             ).click_input()
-            status_pattern = rf".*세척 완료: 총 {len(image_paths)}개 이미지.*"
-            window.child_window(title_re=status_pattern).wait(
-                "visible",
-                timeout=30,
-            )
             self.logger.info(
                 "포토워셔 전체 사진 세척 완료: %s개",
                 len(image_paths),
             )
+            try:
+                window.close()
+            except Exception:
+                pass
         except Exception as exc:
             raise PhotoWashError(f"포토워셔 화면 자동화 실패: {exc}") from exc
         finally:
@@ -245,7 +276,8 @@ class PhotoWasherController:
                     pass
             if explorer_process is not None:
                 try:
-                    explorer_process.terminate()
+                    if explorer_window is not None:
+                        explorer_window.close()
                 except Exception:
                     pass
 
