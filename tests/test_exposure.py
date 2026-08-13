@@ -291,3 +291,27 @@ def test_notion_store_reads_and_patches_status() -> None:
     assert rows[0].keyword == "김희선 다이어트"
     store.update_status(rows[0], "노출완")
     assert any(method == "PATCH" for method, _url in calls)
+
+
+def test_naver_login_detected_from_cookies() -> None:
+    from v2r_auto.exposure_naver import is_naver_logged_in_cookies
+
+    assert is_naver_logged_in_cookies([{"name": "NID_SES", "value": "1"}])
+    assert is_naver_logged_in_cookies([{"name": "NID_AUT", "value": "1"}])
+    assert not is_naver_logged_in_cookies([{"name": "NNB", "value": "1"}])
+    assert not is_naver_logged_in_cookies([])
+
+
+def test_naver_tab_is_home_or_search_only() -> None:
+    from v2r_auto.exposure_naver import SeleniumNaverSearch
+
+    search = SeleniumNaverSearch(
+        type("Browser", (), {"driver": None})(),
+        __import__("logging").getLogger("test"),
+    )
+    assert search._is_naver_search_or_home("https://www.naver.com/")
+    assert search._is_naver_search_or_home(
+        "https://search.naver.com/search.naver?query=test"
+    )
+    assert not search._is_naver_search_or_home("https://cafe.naver.com/ccang/1")
+    assert not search._is_naver_search_or_home("https://nid.naver.com/nidlogin.login")

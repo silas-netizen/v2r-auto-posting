@@ -84,7 +84,7 @@ class ExposureApp(AutomationApp):
         )
         ttk.Label(
             outer,
-            text="노션 키워드를 네이버 통합검색에서만 확인하고, 우리 카페 글만 열어 노출상태를 바꿉니다",
+            text="네이버는 한 번만 로그인하면 됩니다. 프로그램을 끄기 전까지 유지됩니다. 크롬 창은 닫지 마세요.",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
         self._entry_row(outer, 2, "노션 연결키", self.notion_token, show="*")
@@ -147,13 +147,7 @@ class ExposureApp(AutomationApp):
         self._save_settings()
 
         def work() -> None:
-            self.browser.start()
-            if not self.browser.driver:
-                raise RuntimeError("Chrome이 시작되지 않았습니다")
-            self.browser.driver.get("https://www.naver.com/")
-            self.logger.info(
-                "네이버 창을 열었습니다. 로그인된 상태로 검사해야 결과가 맞습니다"
-            )
+            self._naver().prepare_login()
 
         self._run_background(work)
 
@@ -222,9 +216,11 @@ class ExposureApp(AutomationApp):
         def work() -> None:
             try:
                 rows = store.load_rows()
+                naver = self._naver()
+                naver.require_login()
                 checker = ExposureChecker(
                     store,
-                    SeleniumNaverSearch(self.browser, self.logger),
+                    naver,
                     self.logger,
                     brands=brands,
                     cafe_names=cafes,
@@ -257,6 +253,12 @@ class ExposureApp(AutomationApp):
         if hasattr(self, "instance_lock"):
             self.instance_lock.__exit__(None, None, None)
         super()._on_close()
+
+    def _naver(self) -> SeleniumNaverSearch:
+        existing = getattr(self, "naver_search", None)
+        if existing is None:
+            self.naver_search = SeleniumNaverSearch(self.browser, self.logger)
+        return self.naver_search
 
 
 def main() -> None:
