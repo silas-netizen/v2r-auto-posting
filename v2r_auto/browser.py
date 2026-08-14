@@ -211,16 +211,92 @@ class V2RBrowser:
         )
 
     @staticmethod
+    def _clipboard_windows_bytes(text: str) -> bytes:
+        """UTF-16LE without BOM.
+
+        `text.encode("utf-16")` starts with FF FE. Windows `clip` then pastes
+        U+FEFF into the first cell of every chunk (rows 2, 402, 802, ...).
+        """
+        return text.encode("utf-16le")
+
+    @staticmethod
+    def _set_clipboard_windows(text: str) -> None:
+        """Put Unicode text on the Windows clipboard without a leading BOM."""
+        import ctypes
+        from ctypes import wintypes
+
+        cf_unicodetext = 13
+        gmem_moveable = 0x0002
+        payload = V2RBrowser._clipboard_windows_bytes(text) + b"\x00\x00"
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+        kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+        kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+        user32.OpenClipboard.argtypes = [wintypes.HWND]
+        user32.OpenClipboard.restype = wintypes.BOOL
+        user32.EmptyClipboard.restype = wintypes.BOOL
+        user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+        user32.SetClipboardData.restype = wintypes.HANDLE
+        user32.CloseClipboard.restype = wintypes.BOOL
+
+        opened = False
+        for _ in range(10):
+            if user32.OpenClipboard(None):
+                opened = True
+                break
+            time.sleep(0.05)
+        if not opened:
+            raise OSError("OpenClipboard failed")
+        try:
+            user32.EmptyClipboard()
+            handle = kernel32.GlobalAlloc(gmem_moveable, len(payload))
+            if not handle:
+                raise OSError("GlobalAlloc failed")
+            locked = kernel32.GlobalLock(handle)
+            if not locked:
+                kernel32.GlobalFree(handle)
+                raise OSError("GlobalLock failed")
+            ctypes.memmove(locked, payload, len(payload))
+            kernel32.GlobalUnlock(handle)
+            if not user32.SetClipboardData(cf_unicodetext, handle):
+                kernel32.GlobalFree(handle)
+                raise OSError("SetClipboardData failed")
+        finally:
+            user32.CloseClipboard()
+
+    @staticmethod
+    def _set_clipboard_windows_powershell(text: str) -> None:
+        import base64
+
+        escaped = text.replace("'", "''")
+        script = f"Set-Clipboard -Value '{escaped}'"
+        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        subprocess.run(
+            ["powershell", "-NoProfile", "-EncodedCommand", encoded],
+            check=True,
+        )
+
+    @staticmethod
     def _set_clipboard_text(text: str) -> None:
         """Put TSV on the OS clipboard so Sheets can paste a whole range at once."""
         encoded = text.encode("utf-8")
         if sys.platform == "win32":
-            subprocess.run(
-                ["clip"],
-                input=text.encode("utf-16"),
-                check=True,
-            )
-            return
+            try:
+                V2RBrowser._set_clipboard_windows(text)
+                return
+            except OSError:
+                pass
+            try:
+                V2RBrowser._set_clipboard_windows_powershell(text)
+                return
+            except (FileNotFoundError, OSError, subprocess.CalledProcessError):
+                pass
+            raise AutomationError("클립보드에 값을 넣지 못했습니다")
         for command in (
             ["xclip", "-selection", "clipboard"],
             ["xsel", "--clipboard", "--input"],

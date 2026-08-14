@@ -7,6 +7,7 @@ from v2r_auto.join_marker import (
     MARK_VALUE,
     JoinMarkerError,
     build_plan,
+    clean_cell,
     column_letter,
     extract_joined_ids,
     load_account_rows,
@@ -174,3 +175,60 @@ def test_sheet_range_url_starts_at_requested_cell() -> None:
     )
     assert url.endswith("#gid=9&range=L2")
     assert "abc_123" in url
+
+
+def test_clean_cell_treats_bom_as_empty() -> None:
+    assert clean_cell("\ufeff") == ""
+    assert clean_cell("\ufeff가입") == "가입"
+    assert clean_cell("  가입  ") == "가입"
+    assert clean_cell(None) == ""
+
+
+def test_load_account_rows_strips_cell_bom(tmp_path: Path) -> None:
+    path = write_csv(
+        tmp_path,
+        "번호,ID,김천kb보험,씨씨앙,양평맘\n"
+        "1,dmmgit530,노출,\ufeff,\n",
+    )
+    _headers, rows = load_account_rows(path)
+    assert rows[0]["씨씨앙"] == ""
+    assert rows[0]["ID"] == "dmmgit530"
+
+
+def test_plan_matches_sheet_ignores_bom_in_empty_cells() -> None:
+    plan = build_plan(
+        ["ID", "씨씨앙", "양평맘"],
+        [{"__row": "2", "ID": "dmmgit530", "씨씨앙": "", "양평맘": ""}],
+        {"씨씨앙": set(), "양평맘": set()},
+    )
+    errors = plan_matches_sheet(
+        ["ID", "씨씨앙", "양평맘"],
+        [{"ID": "dmmgit530", "씨씨앙": "\ufeff", "양평맘": "\ufeff"}],
+        plan,
+    )
+
+    assert errors == []
+
+
+def test_plan_matches_sheet_accepts_bom_prefix_on_mark() -> None:
+    plan = build_plan(
+        ["ID", "씨씨앙", "양평맘"],
+        [{"__row": "2", "ID": "quilliant", "씨씨앙": "", "양평맘": ""}],
+        {"씨씨앙": {"quilliant"}, "양평맘": set()},
+    )
+    errors = plan_matches_sheet(
+        ["ID", "씨씨앙", "양평맘"],
+        [{"ID": "quilliant", "씨씨앙": "\ufeff가입", "양평맘": ""}],
+        plan,
+    )
+
+    assert errors == []
+
+
+def test_windows_clipboard_bytes_have_no_bom() -> None:
+    text = "가입\t\n\t\n"
+    payload = V2RBrowser._clipboard_windows_bytes(text)
+    assert not payload.startswith(b"\xff\xfe")
+    assert payload == text.encode("utf-16le")
+    assert text.encode("utf-16").startswith(b"\xff\xfe")
+    assert "가입".encode("utf-16le") in payload

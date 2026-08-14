@@ -29,6 +29,11 @@ def normalize_header(value: str) -> str:
     return re.sub(r"[\s_\-()]+", "", value or "").strip().casefold()
 
 
+def clean_cell(value: str | None) -> str:
+    """Treat BOM-only and whitespace-only cells as empty."""
+    return (value or "").replace("\ufeff", "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
 def column_letter(index: int) -> str:
     """Convert a 0-based column index to A, B, ..., Z, AA."""
     if index < 0:
@@ -91,7 +96,12 @@ def load_account_rows(path: str | Path) -> tuple[list[str], list[dict[str, str]]
             raise JoinMarkerError("첫 행에서 열 이름을 찾지 못했습니다")
         rows = []
         for index, row in enumerate(reader, start=2):
-            rows.append({"__row": str(index), **{header: (row.get(header) or "") for header in headers}})
+            rows.append(
+                {
+                    "__row": str(index),
+                    **{header: clean_cell(row.get(header)) for header in headers},
+                }
+            )
     return headers, rows
 
 
@@ -192,7 +202,7 @@ def build_plan(
 
     planned: list[dict[str, str]] = []
     for row in rows:
-        account = (row.get(id_header) or "").strip()
+        account = clean_cell(row.get(id_header))
         key = account.casefold()
         updated = dict(row)
         for label, header in cafe_headers.items():
@@ -222,10 +232,10 @@ def plan_matches_sheet(
     for expected, actual in zip(plan.rows, rows, strict=False):
         row_number = expected.get("__row", "?")
         for header in plan.cafe_headers.values():
-            if (actual.get(header) or "") != (expected.get(header) or ""):
+            if clean_cell(actual.get(header)) != clean_cell(expected.get(header)):
                 errors.append(
-                    f"{row_number}행 {header}: 기대 '{expected.get(header) or ''}' / "
-                    f"실제 '{actual.get(header) or ''}'"
+                    f"{row_number}행 {header}: 기대 '{clean_cell(expected.get(header))}' / "
+                    f"실제 '{clean_cell(actual.get(header))}'"
                 )
                 if len(errors) >= 8:
                     return errors
