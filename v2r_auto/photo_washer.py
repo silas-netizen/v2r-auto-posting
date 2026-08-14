@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from PIL import ExifTags, Image
+from PIL import ExifTags, Image, ImageChops
 
 from .images import GoogleDriveImageResolver, ResolvedImage, placeholders
 from .models import JobStatus
@@ -220,6 +220,7 @@ class PhotoWasherController:
         try:
             from pywinauto import Desktop, mouse
             from pywinauto.application import Application
+            from win32api import GetSystemMetrics
         except Exception as exc:
             raise PhotoWashError(
                 "Windows 화면 자동화 모듈을 시작하지 못했습니다"
@@ -295,6 +296,33 @@ class PhotoWasherController:
                 raise PhotoWashError(
                     "포토워셔로 드래그할 배치 폴더를 탐색기에서 찾지 못했습니다"
                 )
+            main_window = window.wrapper_object()
+            screen_width = GetSystemMetrics(0)
+            screen_height = GetSystemMetrics(1)
+            main_rect = main_window.rectangle()
+            main_width = min(
+                main_rect.width(),
+                max(500, screen_width // 2 - 30),
+            )
+            main_height = min(
+                main_rect.height(),
+                max(500, screen_height - 80),
+            )
+            main_window.move_window(
+                screen_width - main_width - 10,
+                10,
+                main_width,
+                main_height,
+                repaint=True,
+            )
+            explorer_window.move_window(
+                10,
+                10,
+                max(500, screen_width // 2 - 30),
+                max(500, screen_height - 80),
+                repaint=True,
+            )
+            time.sleep(1)
             if not folder_item.is_visible() or not folder_item.is_enabled():
                 raise PhotoWashError(
                     "포토워셔로 드래그할 배치 폴더가 화면에서 활성화되지 않았습니다"
@@ -315,7 +343,7 @@ class PhotoWasherController:
                     (target_rect.top + target_rect.bottom) // 2,
                 )
             else:
-                window_rect = window.rectangle()
+                window_rect = main_window.rectangle()
                 target = (
                     (window_rect.left + window_rect.right) // 2,
                     window_rect.top
@@ -330,6 +358,7 @@ class PhotoWasherController:
                 source,
                 target,
             )
+            before_drop = main_window.capture_as_image().convert("RGB")
             mouse.move(coords=source)
             mouse.press(button="left", coords=source)
             for step in range(1, 16):
@@ -342,6 +371,29 @@ class PhotoWasherController:
                 mouse.move(coords=point)
                 time.sleep(0.1)
             mouse.release(button="left", coords=target)
+            time.sleep(2)
+            after_drop = main_window.capture_as_image().convert("RGB")
+            if before_drop.size == after_drop.size:
+                difference = ImageChops.difference(
+                    before_drop,
+                    after_drop,
+                ).convert("L")
+                histogram = difference.histogram()
+                changed_pixels = sum(histogram[1:])
+                total_pixels = before_drop.width * before_drop.height
+                changed_ratio = (
+                    changed_pixels / total_pixels
+                    if total_pixels
+                    else 0.0
+                )
+                self.logger.info(
+                    "포토워셔 드래그 후 화면 변화율: %.4f",
+                    changed_ratio,
+                )
+                if changed_ratio < 0.003:
+                    raise PhotoWashError(
+                        "배치 폴더가 포토워셔에 드롭되지 않았습니다"
+                    )
 
             try:
                 self._wait_for_window_text(
@@ -361,7 +413,7 @@ class PhotoWasherController:
             if wash_button.exists(timeout=2):
                 wash_button.click_input()
             else:
-                window_rect = window.rectangle()
+                window_rect = main_window.rectangle()
                 mouse.click(
                     button="left",
                     coords=(

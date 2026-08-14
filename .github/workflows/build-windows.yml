@@ -29,7 +29,7 @@ jobs:
         run: python -m pytest
 
       - name: Verify PhotoWasher UI with row 18 images
-        if: github.event_name == 'workflow_dispatch'
+        if: github.ref_name == 'cursor/fix-seone-image-upload-3901'
         run: python scripts/verify_photowasher_windows.py
 
       - name: Build EXE
@@ -48,11 +48,15 @@ jobs:
           Copy-Item dist/V2R-Immediate-Posting.exe publish-executables/downloads/V2R-Immediate-Posting.exe -Force
           Compress-Archive -Path dist/V2R-Affiliate-Revision.exe -DestinationPath publish-executables/downloads/V2R-Affiliate-Revision.zip -CompressionLevel Optimal -Force
           Compress-Archive -Path dist/V2R-Immediate-Posting.exe -DestinationPath publish-executables/downloads/V2R-Immediate-Posting.zip -CompressionLevel Optimal -Force
+          if (Test-Path dist/PhotoWasher-Verification) {
+            New-Item -ItemType Directory -Path publish-executables/downloads/verification-row18 -Force | Out-Null
+            Copy-Item dist/PhotoWasher-Verification/*.jpg publish-executables/downloads/verification-row18/ -Force
+          }
           Push-Location publish-executables
           git checkout -B cursor/image-upload-downloads-3901
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add downloads/V2R-Affiliate-Revision.exe downloads/V2R-Immediate-Posting.exe downloads/V2R-Affiliate-Revision.zip downloads/V2R-Immediate-Posting.zip
+          git add downloads/V2R-Affiliate-Revision.exe downloads/V2R-Immediate-Posting.exe downloads/V2R-Affiliate-Revision.zip downloads/V2R-Immediate-Posting.zip downloads/verification-row18
           if (git diff --cached --quiet) {
             Write-Host "Executable downloads are already current."
           } else {

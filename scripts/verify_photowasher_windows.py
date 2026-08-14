@@ -72,6 +72,10 @@ def main() -> None:
             "PhotoWasher camera metadata did not change: "
             + ", ".join(failures)
         )
+    output_dir = Path.cwd() / "dist" / "PhotoWasher-Verification"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for path in image_paths:
+        shutil.copy2(path, output_dir / path.name)
     logger.info("PhotoWasher UI verification succeeded for row 18 images")
 
 
