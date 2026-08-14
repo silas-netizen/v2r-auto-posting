@@ -246,11 +246,26 @@ class FakeImmediatePublisher(ImmediateApiPublisher):
         if path == "/naver_cafes/naver_join_cafe":
             return {
                 "naver_join_cafe": [
-                    {"login_id": "writer-a"},
-                    {"login_id": "writer-b"},
-                    {"login_id": "writer-alias"},
-                    *[{"login_id": account} for account in MANAGER_ACCOUNTS],
-                    *[{"login_id": account} for account in SELF_COMMENT_ACCOUNTS],
+                    {"login_id": "writer-a", "member_key": "member-writer-a"},
+                    {"login_id": "writer-b", "member_key": "member-writer-b"},
+                    {
+                        "login_id": "writer-alias",
+                        "member_key": "member-writer-alias",
+                    },
+                    *[
+                        {
+                            "login_id": account,
+                            "member_key": f"member-{account}",
+                        }
+                        for account in MANAGER_ACCOUNTS
+                    ],
+                    *[
+                        {
+                            "login_id": account,
+                            "member_key": f"member-{account}",
+                        }
+                        for account in SELF_COMMENT_ACCOUNTS
+                    ],
                 ]
             }
         if path == "/naver_cafes/board_histories" or path == "/naver_cafe_articles/board_histories":
@@ -369,6 +384,25 @@ def test_prepare_jobs_matches_live_ids_and_rotates_all_writers(tmp_path: Path) -
     assert all(job.cafe_id == 14567700 for job in jobs)
     assert all(job.menu_id == 34 for job in jobs)
     assert all(job.status == JobStatus.PENDING for job in jobs)
+
+
+def test_prepare_jobs_replaces_fixed_account_without_join_model(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "daily.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["카페명", "게시판명", "각색제목", "각색본문"])
+    sheet.append(["고요한아침", "가입인사", "제목", "본문"])
+    workbook.save(path)
+    job = load_daily_excel_jobs(path)[0]
+    job.account = "missing-join-account"
+    publisher = FakeImmediatePublisher(None, logging.getLogger("test"))
+
+    publisher.prepare_jobs([job])
+
+    assert job.status == JobStatus.PENDING
+    assert job.account == "writer-a"
 
 
 def test_writer_rotation_does_not_restart_for_each_board(tmp_path: Path) -> None:

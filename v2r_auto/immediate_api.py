@@ -150,6 +150,10 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         eligible = [
             account
             for account in joined
+            if (
+                joined[account].get("member_key")
+                or joined[account].get("memberKey")
+            )
             if account not in ALL_COMMENT_ACCOUNTS
             and account not in MANAGER_ACCOUNTS
             and account not in restricted
@@ -440,12 +444,25 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                 menu_pool = self.menu_pools.get((job.cafe_id, job.menu_id), [])
                 if job.account:
                     if job.account not in menu_pool:
-                        job.status = JobStatus.FAILED
-                        job.message = (
-                            f"지정 작성계정으로 해당 게시판을 사용할 수 없습니다: "
-                            f"{job.account}"
+                        previous = job.account
+                        self.blocked_accounts.add(previous)
+                        job.account = ""
+                        replacement = self.pick_account(job)
+                        if not replacement:
+                            job.status = JobStatus.FAILED
+                            job.message = (
+                                "가입 연결정보와 게시판 권한이 있는 "
+                                f"대체 작성계정이 없습니다: {previous}"
+                            )
+                            continue
+                        job.account = replacement
+                        self.logger.warning(
+                            "행 %s 가입 또는 게시판 권한이 없는 지정계정 "
+                            "자동 교체: %s → %s",
+                            job.row_number,
+                            previous,
+                            replacement,
                         )
-                        continue
                 else:
                     job.account = self.pick_account(job)
                     if not job.account:

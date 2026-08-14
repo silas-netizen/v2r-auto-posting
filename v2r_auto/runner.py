@@ -306,9 +306,6 @@ class AffiliateRunner:
 
         emit_status()
         last_cafe_started: dict[str, float] = {}
-        last_failure_reason = ""
-        consecutive_failures = 0
-        circuit_open = False
         for index, job in enumerate(jobs, start=1):
             progress(index - 1, total)
             try:
@@ -316,10 +313,6 @@ class AffiliateRunner:
             except AffiliateRunStopped:
                 job.status = JobStatus.SKIPPED
                 job.message = "사용자가 중지함"
-                continue
-            if circuit_open:
-                job.status = JobStatus.SKIPPED
-                job.message = "동일 오류 5회 연속 발생으로 전체 작업 일시정지"
                 continue
             if stop_event.is_set():
                 job.status = JobStatus.SKIPPED
@@ -393,8 +386,6 @@ class AffiliateRunner:
                         wait_control=wait_control if not dry_run else None,
                     )
                     job.status = JobStatus.SUCCESS
-                    last_failure_reason = ""
-                    consecutive_failures = 0
                     job.message = (
                         "전체 흐름 검증 완료" if dry_run else "수정 발행 완료"
                     )
@@ -432,15 +423,6 @@ class AffiliateRunner:
                     break
                 except Exception as exc:
                     reason, retryable = self.browser.classify_affiliate_failure(exc)
-                    if reason == last_failure_reason:
-                        consecutive_failures += 1
-                    else:
-                        last_failure_reason = reason
-                        consecutive_failures = 1
-                    if consecutive_failures >= 5:
-                        retryable = False
-                        circuit_open = True
-                        reason = f"{reason} (동일 오류 5회 연속, 전체 일시정지)"
                     failed_account = job.account
                     self.logger.error(
                         "행 %s 계정 %s 실패: %s",

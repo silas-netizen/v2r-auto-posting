@@ -457,6 +457,7 @@ class AffiliateApiPublisher:
                 str(item["login_id"]): item
                 for item in _walk_dicts(status_data)
                 if item.get("login_id")
+                and self._field(item, "member_key", "memberKey")
                 and not item.get("force_drop")
                 and not item.get("stop_cafe_member")
             }
@@ -497,6 +498,30 @@ class AffiliateApiPublisher:
             job.account for job in jobs if job.account and job.status == JobStatus.PENDING
         )
         assigned: list[AffiliateJob] = []
+        for job in target_jobs:
+            if not job.account:
+                continue
+            pool = pools.get((job.cafe, job.account_type), [])
+            if job.account in pool:
+                continue
+            previous = job.account
+            self.blocked_accounts.add(previous)
+            replacement = self._pick_account(job.cafe, job.account_type)
+            if not replacement:
+                job.status = JobStatus.SKIPPED
+                job.message = (
+                    f"{job.cafe}에 가입 연결정보가 있는 "
+                    f"{job.account_type} 작성계정이 없음"
+                )
+                continue
+            job.account = replacement
+            assigned.append(job)
+            self.logger.warning(
+                "행 %s 가입 연결정보가 없는 지정계정 자동 교체: %s → %s",
+                job.row_number,
+                previous,
+                replacement,
+            )
         for job in pending:
             pool = pools.get((job.cafe, job.account_type), [])
             if not pool:
@@ -551,6 +576,8 @@ class AffiliateApiPublisher:
     @staticmethod
     def classify_failure(error: Exception) -> tuple[str, bool]:
         text = str(error)
+        if "NOT_FOUND_MODEL" in text and "NaverJoinCafeAccoun" in text:
+            return "실패: 카페 가입 연결정보 없음", True
         if "33007" in text or "등급" in text:
             return "실패: 등급 미달", True
         if "NOT_LOGIN" in text or "session not found" in text:

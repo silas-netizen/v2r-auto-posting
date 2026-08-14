@@ -173,6 +173,18 @@ def test_cccang_daily_disables_comments_but_revision_enables_them() -> None:
     )
 
 
+def test_missing_join_model_is_retryable_account_failure() -> None:
+    reason, retryable = AffiliateApiPublisher.classify_failure(
+        RuntimeError(
+            'code=81 reason=NOT_FOUND_MODEL '
+            'extra={"model":"NaverJoinCafeAccount"}'
+        )
+    )
+
+    assert reason == "실패: 카페 가입 연결정보 없음"
+    assert retryable is True
+
+
 def test_affiliate_revision_uses_planned_daily_time_without_waiting(
     tmp_path: Path,
 ) -> None:
@@ -339,8 +351,16 @@ def test_api_assignment_uses_actual_real_name_type(tmp_path: Path) -> None:
             if path == "/naver_cafes/naver_join_cafe":
                 return {
                     "naver_accounts": [
-                        {"login_id": "real-id", "force_drop": False},
-                        {"login_id": "alias-id", "force_drop": False},
+                        {
+                            "login_id": "real-id",
+                            "member_key": "member-real",
+                            "force_drop": False,
+                        },
+                        {
+                            "login_id": "alias-id",
+                            "member_key": "member-alias",
+                            "force_drop": False,
+                        },
                     ]
                 }
             if path == "/naver_cafe_articles/board_histories":
@@ -628,6 +648,64 @@ def test_affiliate_daily_pending_keeps_reservation_for_next_run(
 
     assert result.reserved == 1
     assert job.status == JobStatus.RESERVED
+
+
+def test_affiliate_repeated_errors_do_not_pause_other_rows(
+    tmp_path: Path,
+) -> None:
+    jobs = [
+        load_affiliate_jobs(
+            write_affiliate_csv(tmp_path),
+            selected_row_number=2,
+        )[0]
+        for _ in range(6)
+    ]
+
+    class RepeatedFailureBrowser(FakeAffiliateBrowser):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def publish_affiliate_revision(
+            self,
+            job,
+            dry_run: bool,
+            resume=None,
+            checkpoint=None,
+            wait_control=None,
+        ) -> str:
+            self.calls += 1
+            raise RuntimeError("same failure")
+
+        def classify_affiliate_failure(self, error):
+            return ("실패: 동일 테스트 오류", False)
+
+    browser = RepeatedFailureBrowser()
+    runner = AffiliateRunner(
+        browser=browser,  # type: ignore[arg-type]
+        report_dir=tmp_path,
+        logger=logging.getLogger("test"),
+    )
+    result, _report = runner.run(
+        jobs=jobs,
+        email="",
+        password="",
+        dry_run=True,
+        stop_event=threading.Event(),
+        progress=lambda current, total: None,
+        daily_posts=[
+            DailyPost(index, "양평맘", f"일상 {index}", "내용")
+            for index in range(6)
+        ],
+        source_sheet_url="https://sheet.example",
+    )
+
+    assert browser.calls == 6
+    assert result.failed == 6
+    assert all(
+        "전체 일시정지" not in job.message
+        for job in jobs
+    )
 
 
 def test_affiliate_runner_retries_with_replacement_account(tmp_path: Path) -> None:
