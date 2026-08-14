@@ -295,7 +295,10 @@ class PhotoWasherController:
                 raise PhotoWashError(
                     "포토워셔로 드래그할 배치 폴더를 탐색기에서 찾지 못했습니다"
                 )
-            folder_item.wait("visible enabled", timeout=10)
+            if not folder_item.is_visible() or not folder_item.is_enabled():
+                raise PhotoWashError(
+                    "포토워셔로 드래그할 배치 폴더가 화면에서 활성화되지 않았습니다"
+                )
             folder_item.click_input()
             drop_text = window.child_window(
                 title="파일 또는 폴더를 여기에 드래그하세요",
