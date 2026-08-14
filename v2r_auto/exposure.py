@@ -25,7 +25,7 @@ DEFAULT_CAFE_NAMES = (
     "마이웨딩드림",
     "우아한갱년기",
 )
-KEYWORD_HEADERS = ("키워드",)
+KEYWORD_HEADERS = ("키워드", "검색어", "검색 키워드")
 STATUS_HEADERS = ("노출상태", "노출 상태")
 SEARCH_URL_HEADERS = ("통합검색", "통합 검색")
 POST_URL_HEADERS = ("작성 글", "작성글", "작성 글 링크", "작성글링크")

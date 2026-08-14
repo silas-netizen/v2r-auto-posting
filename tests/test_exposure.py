@@ -90,6 +90,14 @@ def test_database_id_from_notion_url() -> None:
     assert parse_database_id(url) == "2260ab12-cdff-80c3-a4c0-d2f0ab1e9c44"
 
 
+def test_database_id_from_app_notion_page_url_ignores_view() -> None:
+    url = (
+        "https://app.notion.com/p/11c5fa27b895819a8880c7be0c891084"
+        "?v=11c5fa27b89581a2978b000cc2fc1e89"
+    )
+    assert parse_database_id(url) == "11c5fa27-b895-819a-8880-c7be0c891084"
+
+
 def test_strip_parenthetical_keeps_search_keyword() -> None:
     assert (
         strip_parenthetical("모로오렌지 추출물 (모로오렌지 효능으로 노출)")
@@ -530,6 +538,124 @@ def test_notion_cafe_select_uses_name_only_option() -> None:
     store.update_check_result(row, status="노출완", cafe_name="줌마")
     payload = bodies[-1]["properties"]
     assert payload["카페/ID"]["select"]["name"] == "줌마"
+
+
+def _keyword_page(page_id: str, keyword: str, title: str = "") -> dict:
+    return {
+        "object": "page",
+        "id": page_id,
+        "properties": {
+            "키워드": {
+                "type": "rich_text",
+                "rich_text": [{"plain_text": keyword}] if keyword else [],
+            },
+            "이름": {
+                "type": "title",
+                "title": [{"plain_text": title or keyword}],
+            },
+            "노출상태": {"type": "status", "status": {"name": "밀려남"}},
+        },
+    }
+
+
+def test_notion_reads_every_linked_data_source() -> None:
+    calls = []
+
+    def opener(request, timeout=30):
+        calls.append((request.get_method(), request.full_url))
+        url = request.full_url
+        if url.endswith("/databases/11c5fa27-b895-819a-8880-c7be0c891084"):
+            return FakeResponse(
+                {
+                    "data_sources": [
+                        {"id": "source-small", "name": "요약"},
+                        {"id": "source-full", "name": "뉴더미스"},
+                    ]
+                }
+            )
+        if url.endswith("/data_sources/source-small"):
+            return FakeResponse(
+                {
+                    "properties": {
+                        "이름": {"type": "title"},
+                        "키워드": {"type": "rich_text"},
+                        "노출상태": {"type": "status"},
+                    }
+                }
+            )
+        if url.endswith("/data_sources/source-full"):
+            return FakeResponse(
+                {
+                    "properties": {
+                        "이름": {"type": "title"},
+                        "키워드": {"type": "rich_text"},
+                        "노출상태": {"type": "status"},
+                    }
+                }
+            )
+        if url.endswith("/data_sources/source-small/query"):
+            return FakeResponse(
+                {
+                    "results": [_keyword_page("p-small", "좌욕 방법")],
+                    "has_more": False,
+                }
+            )
+        if url.endswith("/data_sources/source-full/query"):
+            return FakeResponse(
+                {
+                    "results": [
+                        _keyword_page("p-1", "항문 주변 가려움"),
+                        _keyword_page("p-2", "치열 치료"),
+                        _keyword_page("p-small", "좌욕 방법"),
+                    ],
+                    "has_more": False,
+                }
+            )
+        return FakeResponse({"results": [], "has_more": False})
+
+    store = NotionExposureStore(
+        "secret",
+        "https://app.notion.com/p/11c5fa27b895819a8880c7be0c891084"
+        "?v=11c5fa27b89581a2978b000cc2fc1e89",
+        __import__("logging").getLogger("test"),
+        opener=opener,
+    )
+    rows = store.load_rows()
+    keywords = {row.keyword for row in rows}
+    assert keywords == {"좌욕 방법", "항문 주변 가려움", "치열 치료"}
+    assert len(rows) == 3
+    assert any(url.endswith("/data_sources/source-full/query") for _method, url in calls)
+
+
+def test_notion_uses_title_when_keyword_cell_is_empty() -> None:
+    def opener(request, timeout=30):
+        if request.full_url.endswith("/databases/2260ab12-cdff-80c3-a4c0-d2f0ab1e9c44"):
+            return FakeResponse(
+                {
+                    "properties": {
+                        "이름": {"type": "title"},
+                        "키워드": {"type": "rich_text"},
+                        "노출상태": {"type": "status"},
+                    }
+                }
+            )
+        if request.full_url.endswith("/query"):
+            return FakeResponse(
+                {
+                    "results": [_keyword_page("page-empty", "", title="치질연고")],
+                    "has_more": False,
+                }
+            )
+        return FakeResponse({})
+
+    store = NotionExposureStore(
+        "secret",
+        "https://www.notion.so/2260ab12cdff80c3a4c0d2f0ab1e9c44",
+        __import__("logging").getLogger("test"),
+        opener=opener,
+    )
+    rows = store.load_rows()
+    assert rows[0].keyword == "치질연고"
 
 
 def test_naver_login_detected_from_cookies() -> None:
