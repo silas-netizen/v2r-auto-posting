@@ -221,6 +221,8 @@ class PhotoWasherController:
             from pywinauto import Desktop, mouse
             from pywinauto.application import Application
             from win32api import GetSystemMetrics
+            from win32con import HWND_TOP, SWP_SHOWWINDOW
+            from win32gui import SetWindowPos
         except Exception as exc:
             raise PhotoWashError(
                 "Windows 화면 자동화 모듈을 시작하지 못했습니다"
@@ -308,19 +310,23 @@ class PhotoWasherController:
                 main_rect.height(),
                 max(500, screen_height - 80),
             )
-            main_window.move_window(
+            SetWindowPos(
+                main_window.handle,
+                HWND_TOP,
                 screen_width - main_width - 10,
                 10,
                 main_width,
                 main_height,
-                repaint=True,
+                SWP_SHOWWINDOW,
             )
-            explorer_window.move_window(
+            SetWindowPos(
+                explorer_window.handle,
+                HWND_TOP,
                 10,
                 10,
                 max(500, screen_width // 2 - 30),
                 max(500, screen_height - 80),
-                repaint=True,
+                SWP_SHOWWINDOW,
             )
             time.sleep(1)
             if not folder_item.is_visible() or not folder_item.is_enabled():
