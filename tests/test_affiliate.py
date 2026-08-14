@@ -17,6 +17,7 @@ from v2r_auto.daily_posts import assign_daily_posts, load_daily_posts
 from v2r_auto.models import DailyPost, JobStatus
 from v2r_auto.runner import AffiliateRunner, assign_next_affiliate_daily_schedule
 from v2r_auto.sheet import load_affiliate_jobs
+from v2r_auto.state import JobStateStore
 
 
 def write_affiliate_csv(tmp_path: Path, completion_url: str = "") -> Path:
@@ -106,6 +107,7 @@ def test_daily_posts_are_matched_to_cafe_without_reuse(tmp_path: Path) -> None:
         encoding="utf-8-sig",
     )
     jobs = [
+        load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0],
         load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0],
         load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0],
     ]
@@ -325,6 +327,8 @@ def test_api_assignment_uses_actual_real_name_type(tmp_path: Path) -> None:
     jobs[0].account_type = "실명"
     jobs[1].account = ""
     jobs[1].account_type = "비실명"
+    jobs[2].account = "real-id"
+    jobs[2].account_type = "비실명"
 
     class FakeAllocator(AffiliateApiPublisher):
         def _capture_authorization(self) -> None:
@@ -373,6 +377,8 @@ def test_api_assignment_uses_actual_real_name_type(tmp_path: Path) -> None:
     assigned = allocator.assign_accounts(jobs)
 
     assert [job.account for job in assigned] == ["real-id", "alias-id"]
+    assert jobs[2].account == "real-id"
+    assert jobs[2].account_type == "실명"
 
 
 def test_comment_time_collision_moves_one_minute() -> None:
@@ -558,6 +564,61 @@ def test_affiliate_runner_processes_each_daily_revision_pair_before_next_job(
         ("daily", "양평맘"),
         ("revision", "양평맘"),
     ]
+
+
+def test_affiliate_runner_recalculates_past_schedule_without_source(
+    tmp_path: Path,
+) -> None:
+    job = load_affiliate_jobs(
+        write_affiliate_csv(tmp_path),
+        selected_row_number=2,
+    )[0]
+    sheet_url = "https://sheet.example"
+    state_path = tmp_path / "jobs.db"
+    store = JobStateStore(state_path)
+    record = store.load_or_create(sheet_url, job)
+    store.update(
+        record["job_key"],
+        daily_scheduled_at="2026-08-01T00:00:00Z",
+    )
+    store.close()
+    observed: list[datetime] = []
+
+    class ScheduleBrowser(FakeAffiliateBrowser):
+        def publish_affiliate_revision(
+            self,
+            job,
+            dry_run: bool,
+            resume=None,
+            checkpoint=None,
+            wait_control=None,
+        ) -> str:
+            observed.append(job.daily_scheduled_at)
+            return "https://v2r.example/revision"
+
+        def update_completion_link(self, sheet_url, row_number, url):
+            return None
+
+    runner = AffiliateRunner(
+        browser=ScheduleBrowser(),  # type: ignore[arg-type]
+        report_dir=tmp_path,
+        logger=logging.getLogger("test"),
+        state_path=state_path,
+    )
+    before = datetime.now(timezone.utc)
+    runner.run(
+        jobs=[job],
+        email="",
+        password="",
+        dry_run=False,
+        stop_event=threading.Event(),
+        progress=lambda current, total: None,
+        daily_posts=[DailyPost(2, "양평맘", "일상", "내용")],
+        source_sheet_url=sheet_url,
+    )
+
+    assert len(observed) == 1
+    assert observed[0] >= before + timedelta(minutes=5)
 
 
 def test_affiliate_runner_pause_waits_before_new_api_work(tmp_path: Path) -> None:

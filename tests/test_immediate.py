@@ -405,6 +405,27 @@ def test_prepare_jobs_replaces_fixed_account_without_join_model(
     assert job.account == "writer-a"
 
 
+def test_fixed_account_ignores_sheet_account_type_when_membership_is_valid(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "brand.csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,"
+        "말머리,계정유형,이미지 없음,게시판명\n"
+        '"키워드","제목 : 제목\n본문 : 본문",고요한아침,'
+        "writer-a,후기형,,,비실명,,가입인사\n",
+        encoding="utf-8-sig",
+    )
+    job = load_brand_immediate_jobs(path, brand="브랜드")[0]
+    publisher = FakeImmediatePublisher(None, logging.getLogger("test"))
+
+    publisher.prepare_jobs([job])
+
+    assert job.status == JobStatus.PENDING
+    assert job.account == "writer-a"
+    assert job.account_type == "실명"
+
+
 def test_writer_rotation_does_not_restart_for_each_board(tmp_path: Path) -> None:
     path = tmp_path / "daily.xlsx"
     workbook = Workbook()

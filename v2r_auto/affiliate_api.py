@@ -404,7 +404,10 @@ class AffiliateApiPublisher:
             job
             for job in jobs
             if job.status == JobStatus.PENDING
-            and job.account_type in {"실명", "비실명"}
+            and (
+                bool(job.account)
+                or job.account_type in {"실명", "비실명"}
+            )
         ]
         if not target_jobs:
             return []
@@ -418,6 +421,17 @@ class AffiliateApiPublisher:
         }
         fixed = set(COMMENT_ACCOUNTS)
         pools: dict[tuple[str, str], list[str]] = {}
+        eligible_any_by_cafe: dict[str, set[str]] = {}
+        actual_type_by_account = {
+            account: (
+                "실명"
+                if ((data.get("my_info_v2") or {}).get("is_real_name") is True)
+                else "비실명"
+                if ((data.get("my_info_v2") or {}).get("is_real_name") is False)
+                else ""
+            )
+            for account, data in global_accounts.items()
+        }
 
         for cafe_name in {job.cafe for job in target_jobs}:
             cafe = next(
@@ -462,6 +476,7 @@ class AffiliateApiPublisher:
                 and not item.get("stop_cafe_member")
             }
             last_used = self._last_used(cafe_id)
+            eligible_any: set[str] = set()
 
             for account_type, real_name in (("실명", True), ("비실명", False)):
                 eligible: list[str] = []
@@ -477,6 +492,7 @@ class AffiliateApiPublisher:
                     ):
                         continue
                     eligible.append(account)
+                    eligible_any.add(account)
                 pools[(cafe_name, account_type)] = sorted(
                     eligible,
                     key=lambda account: (
@@ -491,6 +507,7 @@ class AffiliateApiPublisher:
                     account_type,
                     len(eligible),
                 )
+            eligible_any_by_cafe[cafe_name] = eligible_any
 
         self.account_pools = pools
         self.account_indexes = {key: 0 for key in pools}
@@ -501,17 +518,26 @@ class AffiliateApiPublisher:
         for job in target_jobs:
             if not job.account:
                 continue
-            pool = pools.get((job.cafe, job.account_type), [])
-            if job.account in pool:
-                continue
             previous = job.account
+            effective_type = (
+                actual_type_by_account.get(previous)
+                or job.account_type
+            )
+            if effective_type in {"실명", "비실명"}:
+                job.account_type = effective_type
+            if previous in eligible_any_by_cafe.get(job.cafe, set()):
+                continue
             self.blocked_accounts.add(previous)
-            replacement = self._pick_account(job.cafe, job.account_type)
+            replacement = (
+                self._pick_account(job.cafe, effective_type)
+                if effective_type in {"실명", "비실명"}
+                else ""
+            )
             if not replacement:
                 job.status = JobStatus.SKIPPED
                 job.message = (
                     f"{job.cafe}에 가입 연결정보가 있는 "
-                    f"{job.account_type} 작성계정이 없음"
+                    f"{effective_type or '동일 유형'} 작성계정이 없음"
                 )
                 continue
             job.account = replacement

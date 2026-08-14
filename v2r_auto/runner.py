@@ -254,28 +254,53 @@ class AffiliateRunner:
         assign_daily_posts(jobs, daily_posts)
 
         last_daily_scheduled: dict[str, datetime] = {}
-        for job in jobs:
-            if job.daily_scheduled_at:
-                previous = last_daily_scheduled.get(job.cafe)
-                if previous is None or job.daily_scheduled_at > previous:
-                    last_daily_scheduled[job.cafe] = job.daily_scheduled_at
+        schedule_now = datetime.now(timezone.utc)
         for job in jobs:
             if job.status != JobStatus.PENDING:
                 continue
-            if job.daily_scheduled_at is None:
+            record_info = state_records.get(id(job))
+            has_daily_source = bool(
+                record_info
+                and record_info[1].get("daily_source_id")
+            )
+            schedule_is_usable = bool(
+                job.daily_scheduled_at
+                and (
+                    has_daily_source
+                    or job.daily_scheduled_at
+                    >= schedule_now + timedelta(minutes=2)
+                )
+            )
+            if not schedule_is_usable:
+                if job.daily_scheduled_at is not None:
+                    self.logger.warning(
+                        "행 %s source 없는 지난 일상 예약시간을 다시 계산합니다: %s",
+                        job.row_number,
+                        job.daily_scheduled_at.isoformat(),
+                    )
+                job.daily_scheduled_at = None
                 assign_next_affiliate_daily_schedule(
                     job,
                     last_daily_scheduled,
+                    now=schedule_now,
                 )
-                record_info = state_records.get(id(job))
                 if self.state and record_info:
+                    serialized = (
+                        job.daily_scheduled_at.isoformat()
+                        .replace("+00:00", "Z")
+                    )
                     self.state.update(
                         record_info[0],
-                        daily_scheduled_at=(
-                            job.daily_scheduled_at.isoformat()
-                            .replace("+00:00", "Z")
-                        ),
+                        daily_scheduled_at=serialized,
                     )
+                    record_info[1]["daily_scheduled_at"] = serialized
+            else:
+                previous = last_daily_scheduled.get(job.cafe)
+                if (
+                    previous is None
+                    or job.daily_scheduled_at > previous
+                ):
+                    last_daily_scheduled[job.cafe] = job.daily_scheduled_at
 
         runtime_resumes: dict[int, dict] = {
             id(job): (
@@ -422,6 +447,46 @@ class AffiliateRunner:
                     job.message = "사용자가 중지함"
                     break
                 except Exception as exc:
+                    if "NOT_START_AT_PAST_TIME" in str(exc):
+                        previous_schedule = job.daily_scheduled_at
+                        assign_next_affiliate_daily_schedule(
+                            job,
+                            last_daily_scheduled,
+                            now=datetime.now(timezone.utc),
+                        )
+                        serialized = (
+                            job.daily_scheduled_at.isoformat()
+                            .replace("+00:00", "Z")
+                        )
+                        resume.clear()
+                        resume.update(
+                            {
+                                "stage": "ACCOUNT_ASSIGNED",
+                                "account": job.account,
+                                "daily_source_id": "",
+                                "daily_scheduled_at": serialized,
+                                "revision_source_id": "",
+                            }
+                        )
+                        if self.state and job_key:
+                            self.state.reset_sources(
+                                job_key,
+                                job.account,
+                                "예약시간이 지나 미래 시간으로 다시 계산",
+                            )
+                            self.state.update(
+                                job_key,
+                                daily_scheduled_at=serialized,
+                            )
+                        retry_count += 1
+                        emit_status()
+                        self.logger.warning(
+                            "행 %s 지난 예약시간 자동 재계산 후 재시도: %s → %s",
+                            job.row_number,
+                            previous_schedule,
+                            job.daily_scheduled_at,
+                        )
+                        continue
                     reason, retryable = self.browser.classify_affiliate_failure(exc)
                     failed_account = job.account
                     self.logger.error(

@@ -443,6 +443,14 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                 job.canonical_board_name = menu.name
                 menu_pool = self.menu_pools.get((job.cafe_id, job.menu_id), [])
                 if job.account:
+                    account_info = self.global_accounts.get(job.account) or {}
+                    actual_real_name = (
+                        account_info.get("my_info_v2") or {}
+                    ).get("is_real_name")
+                    if actual_real_name is True:
+                        job.account_type = "실명"
+                    elif actual_real_name is False:
+                        job.account_type = "비실명"
                     if job.account not in menu_pool:
                         previous = job.account
                         self.blocked_accounts.add(previous)
