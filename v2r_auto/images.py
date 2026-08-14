@@ -249,7 +249,21 @@ class GoogleDriveImageResolver:
         resolved: list[ResolvedImage] = []
         for occurrence, marker in enumerate(markers):
             folder_name = marker
-            keyword_match = job.brand == "팥순이" and marker == "키워드"
+            normalized_marker = re.sub(r"\s+", "", marker).casefold()
+            normalized_keyword = re.sub(
+                r"\s+",
+                "",
+                job.keyword,
+            ).casefold()
+            keyword_match = job.brand == "팥순이" and (
+                marker == "키워드"
+                or (
+                    bool(normalized_keyword)
+                    and normalized_marker == normalized_keyword
+                )
+            )
+            if keyword_match:
+                folder_name = "키워드"
             if job.brand == "팥순이" and marker == "B/A":
                 folder_name = "BA"
             folder = self._folder(brand_folder.item_id, folder_name)

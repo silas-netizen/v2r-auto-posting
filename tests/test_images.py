@@ -109,6 +109,48 @@ def test_patsooni_keyword_matches_filename_without_spaces(tmp_path: Path) -> Non
     assert [item.occurrence for item in resolved] == [0, 1]
 
 
+def test_patsooni_actual_keyword_placeholder_uses_keyword_folder(
+    tmp_path: Path,
+) -> None:
+    job = make_job(
+        "{골드카무트효소}",
+        keyword="골드 카무트 효소",
+    )
+
+    class FakeResolver(GoogleDriveImageResolver):
+        def __init__(self):
+            super().__init__(
+                tmp_path,
+                logging.getLogger("test"),
+                root_folder_id="root",
+            )
+            self.visited: list[str] = []
+
+        def _list_folder(self, folder_id: str):
+            self.visited.append(folder_id)
+            return {
+                "root": [DriveItem("brand", "팥순이", True)],
+                "brand": [DriveItem("keyword", "키워드", True)],
+                "keyword": [
+                    DriveItem(
+                        "matched",
+                        "골드카무트효소.jpg",
+                        False,
+                    )
+                ],
+            }[folder_id]
+
+        def _download(self, item: DriveItem) -> Path:
+            return tmp_path / item.name
+
+    resolver = FakeResolver()
+    resolved = resolver.resolve(job)
+
+    assert "keyword" in resolver.visited
+    assert [item.file_id for item in resolved] == ["matched"]
+    assert resolved[0].marker == "골드카무트효소"
+
+
 def test_patsooni_keyword_retries_direct_filename_search(tmp_path: Path) -> None:
     job = make_job("{키워드}", keyword="요즘 그릭요거트")
 
