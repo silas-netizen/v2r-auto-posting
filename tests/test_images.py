@@ -1,6 +1,7 @@
 import logging
 import random
 from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 
@@ -254,6 +255,88 @@ def test_patsooni_keyword_retries_direct_filename_search(tmp_path: Path) -> None
 
     assert resolver.direct_searches == [("keyword", "요즘 그릭요거트")]
     assert [item.file_id for item in resolved] == ["greek"]
+
+
+def test_drive_download_retries_temporary_503(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    attempts = 0
+
+    class Response:
+        headers = {"Content-Type": "image/jpeg"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def read(self):
+            return b"jpeg-data"
+
+    def opener(request, timeout):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise HTTPError(
+                request.full_url,
+                503,
+                "Service Unavailable",
+                {},
+                None,
+            )
+        return Response()
+
+    monkeypatch.setattr("v2r_auto.images.time.sleep", lambda _delay: None)
+    resolver = GoogleDriveImageResolver(
+        tmp_path,
+        logging.getLogger("test"),
+        opener=opener,
+    )
+
+    path = resolver._download(DriveItem("image-id", "photo.jpg", False))
+
+    assert attempts == 3
+    assert path.read_bytes() == b"jpeg-data"
+
+
+def test_random_folder_uses_next_candidate_after_download_failure(
+    tmp_path: Path,
+) -> None:
+    job = make_job("{키워드}", brand="장으뜸")
+
+    class OrderedRandom:
+        def sample(self, values, count):
+            return list(values)
+
+    class FakeResolver(GoogleDriveImageResolver):
+        def __init__(self):
+            super().__init__(
+                tmp_path,
+                logging.getLogger("test"),
+                root_folder_id="root",
+                rng=OrderedRandom(),
+            )
+
+        def _list_folder(self, folder_id: str):
+            return {
+                "root": [DriveItem("brand", "장으뜸", True)],
+                "brand": [DriveItem("keyword", "키워드", True)],
+                "keyword": [
+                    DriveItem("broken", "broken.jpg", False),
+                    DriveItem("working", "working.jpg", False),
+                ],
+            }[folder_id]
+
+        def _download(self, item: DriveItem) -> Path:
+            if item.item_id == "broken":
+                raise HTTPError("", 503, "Unavailable", {}, None)
+            return tmp_path / item.name
+
+    resolved = FakeResolver().resolve(job)
+
+    assert [item.file_id for item in resolved] == ["working"]
 
 
 def test_content_json_inserts_image_at_placeholder_and_keeps_blank_line() -> None:

@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -247,9 +248,45 @@ class GoogleDriveImageResolver:
             f"{DRIVE_DOWNLOAD_URL}?{query}",
             headers={"User-Agent": "Mozilla/5.0"},
         )
-        with self.opener(request, timeout=60) as response:
-            data = response.read()
-            content_type = str(response.headers.get("Content-Type") or "")
+        data = b""
+        content_type = ""
+        delays = (2, 5, 10, 20)
+        for attempt in range(5):
+            try:
+                with self.opener(request, timeout=60) as response:
+                    data = response.read()
+                    content_type = str(
+                        response.headers.get("Content-Type") or ""
+                    )
+                break
+            except HTTPError as exc:
+                if (
+                    exc.code not in {429, 500, 502, 503, 504}
+                    or attempt == 4
+                ):
+                    raise
+                delay = delays[attempt]
+                self.logger.warning(
+                    "Google Drive 사진 다운로드 일시 오류 %s: "
+                    "%s초 후 재시도 (%s/5) - %s",
+                    exc.code,
+                    delay,
+                    attempt + 2,
+                    item.name,
+                )
+                time.sleep(delay)
+            except (URLError, TimeoutError) as exc:
+                if attempt == 4:
+                    raise
+                delay = delays[attempt]
+                self.logger.warning(
+                    "Google Drive 사진 네트워크 오류: "
+                    "%s초 후 재시도 (%s/5) - %s",
+                    delay,
+                    attempt + 2,
+                    item.name,
+                )
+                time.sleep(delay)
         if not data or not content_type.casefold().startswith("image/"):
             raise ValueError(f"Google Drive 파일이 이미지가 아닙니다: {item.name}")
         target.write_bytes(data)
@@ -340,15 +377,27 @@ class GoogleDriveImageResolver:
                     marker,
                 )
                 continue
-            item = self.rng.choice(candidates)
-            try:
-                local_path = self._download(item)
-            except Exception as exc:
+            item = None
+            local_path = None
+            for candidate in self.rng.sample(candidates, len(candidates)):
+                try:
+                    local_path = self._download(candidate)
+                    item = candidate
+                    break
+                except Exception as exc:
+                    self.logger.warning(
+                        "행 %s {%s} 사진 후보 다운로드 실패, "
+                        "다른 미사용 사진으로 교체: %s - %s",
+                        job.row_number,
+                        marker,
+                        candidate.name,
+                        exc,
+                    )
+            if item is None or local_path is None:
                 self.logger.warning(
-                    "행 %s {%s} 이미지 다운로드 실패로 생략: %s",
+                    "행 %s {%s} 모든 사진 후보 다운로드 실패로 생략",
                     job.row_number,
                     marker,
-                    exc,
                 )
                 continue
             resolved.append(
