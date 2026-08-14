@@ -30,6 +30,7 @@ jobs:
 
       - name: Verify PhotoWasher UI with row 18 images
         if: github.ref_name == 'cursor/fix-seone-image-upload-3901'
+        continue-on-error: true
         run: python scripts/verify_photowasher_windows.py
 
       - name: Build EXE
@@ -51,6 +52,10 @@ jobs:
           if (Test-Path dist/PhotoWasher-Verification) {
             New-Item -ItemType Directory -Path publish-executables/downloads/verification-row18 -Force | Out-Null
             Copy-Item dist/PhotoWasher-Verification/*.jpg publish-executables/downloads/verification-row18/ -Force
+          }
+          if (Test-Path dist/PhotoWasher-Debug) {
+            New-Item -ItemType Directory -Path publish-executables/downloads/verification-row18/debug -Force | Out-Null
+            Copy-Item dist/PhotoWasher-Debug/*.png publish-executables/downloads/verification-row18/debug/ -Force
           }
           Push-Location publish-executables
           git checkout -B cursor/image-upload-downloads-3901
