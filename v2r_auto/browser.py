@@ -35,7 +35,7 @@ from .models import AffiliateJob, JobStatus, PostJob
 
 V2R_LIST_URL = "https://v2r.daboja.im/nc/board?view=list"
 V2R_SE_ONE_URL = "https://v2r.daboja.im/nc/seone"
-AFFILIATE_CAFE_DELAYS = {"씨씨앙": 4, "양평맘": 10}
+AFFILIATE_CAFE_DELAYS = {"씨씨앙": 4, "양평맘": 20}
 AFFILIATE_CAFE_BOARDS = {"씨씨앙": "자유 수다방", "양평맘": "이모저모 이야기"}
 AFFILIATE_CAFE_SEARCH_TERMS = {"씨씨앙": "씨씨앙", "양평맘": "양평"}
 SE_ONE_SELECTION_INDEX = {"카페": 0, "계정": 1, "게시판": 2, "말머리": 3}

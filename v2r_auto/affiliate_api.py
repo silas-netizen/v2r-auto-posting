@@ -30,7 +30,7 @@ COMMENT_ACCOUNTS = (
     "chenallo",
     "colpith",
 )
-CAFE_DELAYS = {"씨씨앙": 4, "양평맘": 10}
+CAFE_DELAYS = {"씨씨앙": 4, "양평맘": 20}
 CAFE_DESTINATIONS = {
     "씨씨앙": {
         "cafe_id": 25016228,

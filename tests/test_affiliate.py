@@ -9,6 +9,7 @@ from pathlib import Path
 from v2r_auto.affiliate_api import (
     AffiliateApiPublisher,
     AffiliateDailyPending,
+    CAFE_DELAYS,
     _content_json,
 )
 from v2r_auto.content import parse_article
@@ -149,6 +150,7 @@ def test_affiliate_daily_schedules_are_random_and_independent_per_cafe(
 
 
 def test_cccang_daily_disables_comments_but_revision_enables_them() -> None:
+    assert CAFE_DELAYS == {"씨씨앙": 4, "양평맘": 20}
     assert (
         AffiliateApiPublisher._write_options(enable_comment=False)[
             "enableComment"
