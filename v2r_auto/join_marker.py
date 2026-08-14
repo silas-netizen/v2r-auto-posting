@@ -128,11 +128,25 @@ class JoinMarkPlan:
     def column_values(self, header: str) -> list[str]:
         return [(row.get(header) or "") for row in self.rows]
 
-    def tsv_for_headers(self, headers: list[str]) -> str:
+    def tsv_for_headers(self, headers: list[str], rows: list[dict[str, str]] | None = None) -> str:
         lines = []
-        for row in self.rows:
+        for row in rows if rows is not None else self.rows:
             lines.append("\t".join((row.get(header) or "") for header in headers))
         return "\n".join(lines) + ("\n" if lines else "")
+
+    def paste_chunks(
+        self,
+        headers: list[str],
+        chunk_size: int = 400,
+    ) -> list[tuple[int, str]]:
+        """Split a column paste into start-row + TSV chunks."""
+        if chunk_size < 1:
+            raise JoinMarkerError("붙여넣기 묶음 크기가 올바르지 않습니다")
+        chunks: list[tuple[int, str]] = []
+        for start in range(0, len(self.rows), chunk_size):
+            piece = self.rows[start : start + chunk_size]
+            chunks.append((2 + start, self.tsv_for_headers(headers, piece)))
+        return chunks
 
     def contiguous_cafe_groups(self) -> list[list[str]]:
         ordered = sorted(
@@ -210,7 +224,8 @@ def plan_matches_sheet(
         for header in plan.cafe_headers.values():
             if (actual.get(header) or "") != (expected.get(header) or ""):
                 errors.append(
-                    f"{row_number}행 {header} 값이 다릅니다"
+                    f"{row_number}행 {header}: 기대 '{expected.get(header) or ''}' / "
+                    f"실제 '{actual.get(header) or ''}'"
                 )
                 if len(errors) >= 8:
                     return errors

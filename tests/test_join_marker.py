@@ -145,6 +145,25 @@ def test_plan_matches_sheet_reports_wrong_empty_id_mark() -> None:
 
     assert errors
     assert "씨씨앙" in errors[0]
+    assert "기대" in errors[0]
+    assert "실제" in errors[0]
+
+
+def test_paste_chunks_keep_sheet_row_numbers() -> None:
+    rows = [
+        {"__row": str(index), "ID": f"id{index}", "씨씨앙": "", "양평맘": ""}
+        for index in range(2, 8)
+    ]
+    plan = build_plan(
+        ["ID", "씨씨앙", "양평맘"],
+        rows,
+        {"씨씨앙": {"id4", "id7"}, "양평맘": set()},
+    )
+
+    chunks = plan.paste_chunks(["씨씨앙", "양평맘"], chunk_size=3)
+    assert [start for start, _ in chunks] == [2, 5]
+    assert chunks[0][1] == "\t\n\t\n가입\t\n"
+    assert chunks[1][1] == "\t\n\t\n가입\t\n"
 
 
 def test_sheet_range_url_starts_at_requested_cell() -> None:

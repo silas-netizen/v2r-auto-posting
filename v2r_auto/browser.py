@@ -217,7 +217,7 @@ class V2RBrowser:
         if sys.platform == "win32":
             subprocess.run(
                 ["clip"],
-                input=text.encode("utf-16le"),
+                input=text.encode("utf-16"),
                 check=True,
             )
             return
@@ -233,6 +233,28 @@ class V2RBrowser:
                 continue
         raise AutomationError("클립보드에 값을 넣지 못했습니다")
 
+    def _select_sheet_cell(self, column: str, row_number: int) -> None:
+        """Select a grid cell without opening the formula editor."""
+        assert self.driver
+        ActionChains(self.driver).send_keys(Keys.ESCAPE).send_keys(Keys.ESCAPE).perform()
+        time.sleep(0.2)
+        name_boxes = [
+            element
+            for element in self.driver.find_elements(
+                By.CSS_SELECTOR,
+                "#t-name-box, input#t-name-box, .docs-sheet-name-box",
+            )
+            if element.is_displayed()
+        ]
+        if name_boxes:
+            box = name_boxes[0]
+            box.click()
+            box.send_keys(Keys.CONTROL, "a")
+            box.send_keys(f"{column}{row_number}")
+            box.send_keys(Keys.ENTER)
+            time.sleep(0.2)
+        ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+
     def paste_sheet_columns(
         self,
         sheet_url: str,
@@ -240,7 +262,7 @@ class V2RBrowser:
         start_row: int,
         tsv: str,
     ) -> None:
-        """Paste a TSV block into Sheets in one action. Do not type cell by cell."""
+        """Paste a TSV block into the grid. Do not click the cell editor."""
         self.start()
         assert self.driver
         start_column = start_column.upper()
@@ -252,19 +274,14 @@ class V2RBrowser:
         )
         self.wait.until(EC.presence_of_element_located((By.ID, "waffle-rich-text-editor")))
         self.driver.execute_script("window.focus();")
+        # The formula editor must stay closed. Clicking it pastes all rows
+        # into one cell, so 433행 같은 칸은 비어 있게 됩니다.
+        self._select_sheet_cell(start_column, start_row)
         self._set_clipboard_text(tsv)
-        editors = [
-            element
-            for element in self.driver.find_elements(By.ID, "waffle-rich-text-editor")
-            if element.is_displayed() and element.is_enabled()
-        ]
-        if editors:
-            editor = editors[0]
-            editor.click()
-            editor.send_keys(Keys.CONTROL, "v")
-        else:
-            ActionChains(self.driver).send_keys(Keys.CONTROL, "v").perform()
-        time.sleep(1.5)
+        ActionChains(self.driver).key_down(Keys.CONTROL).send_keys("v").key_up(
+            Keys.CONTROL
+        ).perform()
+        time.sleep(2)
         self.logger.info(
             "시트 %s%s에 %s줄을 한 번에 붙여넣었습니다",
             start_column,
@@ -283,21 +300,26 @@ class V2RBrowser:
         from .join_marker import plan_matches_sheet, load_account_rows
 
         for group in plan.contiguous_cafe_groups():
-            start_column, start_row = plan.start_cell(group[0])
-            self.paste_sheet_columns(
-                sheet_url,
-                start_column,
-                start_row,
-                plan.tsv_for_headers(group),
+            start_column, _ = plan.start_cell(group[0])
+            for start_row, tsv in plan.paste_chunks(group):
+                self.paste_sheet_columns(sheet_url, start_column, start_row, tsv)
+        last_errors: list[str] = []
+        for attempt in range(1, 7):
+            time.sleep(1.5)
+            path = self.download_sheet(sheet_url)
+            headers, rows = load_account_rows(path)
+            last_errors = plan_matches_sheet(headers, rows, plan)
+            if not last_errors:
+                self.logger.info("시트 가입 표시를 확인했습니다")
+                return
+            self.logger.warning(
+                "시트 확인 재시도 (%s/6): %s",
+                attempt,
+                last_errors[0],
             )
-        path = self.download_sheet(sheet_url)
-        headers, rows = load_account_rows(path)
-        errors = plan_matches_sheet(headers, rows, plan)
-        if errors:
-            raise AutomationError(
-                "시트 표시를 확인하지 못했습니다: " + "; ".join(errors[:5])
-            )
-        self.logger.info("시트 가입 표시를 확인했습니다")
+        raise AutomationError(
+            "시트 표시를 확인하지 못했습니다: " + "; ".join(last_errors[:5])
+        )
 
     def update_completion_link(
         self,
