@@ -324,6 +324,12 @@ class PhotoWasherController:
                 self.logger.info(
                     "포토워셔 드롭 문구 대신 창 내부 상대 위치를 사용합니다"
                 )
+            self.logger.info(
+                "포토워셔 드래그 준비: 탐색기 항목 %s / 시작 %s / 대상 %s",
+                type(folder_item).__name__,
+                source,
+                target,
+            )
             mouse.move(coords=source)
             mouse.press(button="left", coords=source)
             for step in range(1, 16):

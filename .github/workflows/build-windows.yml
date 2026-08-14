@@ -29,7 +29,7 @@ jobs:
         run: python -m pytest
 
       - name: Verify PhotoWasher UI with row 18 images
-        if: github.ref_name == 'cursor/fix-seone-image-upload-3901'
+        if: github.event_name == 'workflow_dispatch'
         run: python scripts/verify_photowasher_windows.py
 
       - name: Build EXE
