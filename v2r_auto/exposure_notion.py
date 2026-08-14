@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
 from .exposure import (
@@ -23,6 +24,7 @@ from .exposure import (
 
 NOTION_VERSION = "2022-06-28"
 NOTION_VERSION_DATA_SOURCES = "2025-09-03"
+NOTION_VERSION_VIEWS = "2026-03-11"
 NOTION_API = "https://api.notion.com/v1"
 
 
@@ -50,6 +52,14 @@ def parse_database_id(value: str) -> str:
         if match:
             return _dashed_id(match.group(1))
     raise NotionError("노션 데이터베이스 주소를 확인하세요")
+
+
+def parse_view_id(value: str) -> str:
+    raw = (parse_qs(urlparse((value or "").strip()).query).get("v") or [""])[0]
+    compact = raw.replace("-", "").lower()
+    if not re.fullmatch(r"[0-9a-f]{32}", compact):
+        return ""
+    return _dashed_id(compact)
 
 
 def _plain_text(property_value: dict[str, Any] | None) -> str:
@@ -166,6 +176,7 @@ class _SourceBind:
     exposed_volume_name: str = ""
     exposed_volume_type: str = ""
     source_id: str = ""
+    filter: dict[str, Any] | None = None
 
 
 class NotionExposureStore:
@@ -178,10 +189,13 @@ class NotionExposureStore:
     ):
         self.token = token.strip()
         self.database_id = parse_database_id(database_url)
+        self.view_id = parse_view_id(database_url)
         self.logger = logger
         self.opener = opener
         self._schema: dict[str, Any] | None = None
         self._sources: list[_SourceBind] = []
+        self._scoped_to_view = False
+        self._view_name = ""
         self._keyword_name = ""
         self._status_name = ""
         self._status_type = ""
@@ -298,7 +312,97 @@ class NotionExposureStore:
             source_id=source_id,
         )
 
+    def _bind_data_source(
+        self, source_id: str, view_filter: dict[str, Any] | None = None
+    ) -> _SourceBind | None:
+        data_source = self._try_request(
+            "GET",
+            f"/data_sources/{source_id}",
+            version=NOTION_VERSION_DATA_SOURCES,
+        )
+        if not data_source:
+            return None
+        bind = self._bind_schema(
+            data_source.get("properties") or {},
+            f"/data_sources/{source_id}/query",
+            NOTION_VERSION_DATA_SOURCES,
+            source_id=source_id,
+        )
+        if bind and view_filter:
+            bind.filter = view_filter
+        return bind
+
+    def _widget_view_ids(self, view: dict[str, Any]) -> list[str]:
+        ids: list[str] = []
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                child_id = str(node.get("view_id") or "").strip()
+                if child_id:
+                    ids.append(child_id)
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(view.get("configuration") or {})
+        return ids
+
+    def _binds_from_view(self, view: dict[str, Any]) -> list[_SourceBind]:
+        view_type = str(view.get("type") or "")
+        if view_type == "dashboard":
+            binds: list[_SourceBind] = []
+            seen: set[str] = set()
+            for widget_id in self._widget_view_ids(view):
+                compact = widget_id.replace("-", "").lower()
+                if compact in seen:
+                    continue
+                seen.add(compact)
+                try:
+                    dashed = _dashed_id(compact)
+                except NotionError:
+                    continue
+                child = self._try_request(
+                    "GET",
+                    f"/views/{dashed}",
+                    version=NOTION_VERSION_VIEWS,
+                )
+                if child:
+                    binds.extend(self._binds_from_view(child))
+            return binds
+        source_id = str(view.get("data_source_id") or "").strip()
+        if not source_id:
+            return []
+        bind = self._bind_data_source(source_id, view.get("filter") or None)
+        if not bind:
+            return []
+        self._view_name = str(view.get("name") or "").strip()
+        return [bind]
+
+    def _sources_from_url_view(self) -> list[_SourceBind]:
+        if not self.view_id:
+            return []
+        view = self._try_request(
+            "GET",
+            f"/views/{self.view_id}",
+            version=NOTION_VERSION_VIEWS,
+        ) or self._try_request(
+            "GET",
+            f"/views/{self.view_id}",
+            version=NOTION_VERSION_DATA_SOURCES,
+        )
+        if not view:
+            return []
+        binds = self._binds_from_view(view)
+        if binds:
+            self._scoped_to_view = True
+        return binds
+
     def _discover_sources(self) -> list[_SourceBind]:
+        view_sources = self._sources_from_url_view()
+        if view_sources:
+            return view_sources
         sources: list[_SourceBind] = []
         seen_queries: set[str] = set()
 
@@ -452,26 +556,15 @@ class NotionExposureStore:
         while pending:
             source = pending.pop(0)
             pages, nested_ids = self._query_pages(source)
-            for source_id in nested_ids:
-                query_path = f"/data_sources/{source_id}/query"
-                if query_path in seen_queries:
-                    continue
-                data_source = self._try_request(
-                    "GET",
-                    f"/data_sources/{source_id}",
-                    version=NOTION_VERSION_DATA_SOURCES,
-                )
-                if not data_source:
-                    continue
-                bind = self._bind_schema(
-                    data_source.get("properties") or {},
-                    query_path,
-                    NOTION_VERSION_DATA_SOURCES,
-                    source_id=source_id,
-                )
-                if bind:
-                    seen_queries.add(query_path)
-                    pending.append(bind)
+            if not self._scoped_to_view:
+                for source_id in nested_ids:
+                    query_path = f"/data_sources/{source_id}/query"
+                    if query_path in seen_queries:
+                        continue
+                    bind = self._bind_data_source(source_id)
+                    if bind:
+                        seen_queries.add(query_path)
+                        pending.append(bind)
             for page in pages:
                 page_id = str(page.get("id") or "")
                 if not page_id or page_id in seen_pages:
@@ -520,14 +613,16 @@ class NotionExposureStore:
                 )
         if not rows:
             raise NotionError("키워드가 있는 노션 행이 없습니다")
+        view_label = f" 보기 '{self._view_name}'" if self._view_name else ""
         if skipped:
             self.logger.info(
-                "노션 키워드 %s건을 읽었습니다. 키워드가 비어 건너뛴 행 %s건",
+                "노션%s 키워드 %s건을 읽었습니다. 키워드가 비어 건너뛴 행 %s건",
+                view_label,
                 len(rows),
                 skipped,
             )
         else:
-            self.logger.info("노션 키워드 %s건을 읽었습니다", len(rows))
+            self.logger.info("노션%s 키워드 %s건을 읽었습니다", view_label, len(rows))
         return rows
 
     def _query_pages(self, source: _SourceBind) -> tuple[list[dict[str, Any]], list[str]]:
@@ -538,6 +633,8 @@ class NotionExposureStore:
             payload: dict[str, Any] = {"page_size": 100}
             if cursor:
                 payload["start_cursor"] = cursor
+            if source.filter:
+                payload["filter"] = source.filter
             data = self._request(
                 "POST", source.query_path, payload, version=source.version
             )

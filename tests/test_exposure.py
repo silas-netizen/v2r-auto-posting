@@ -26,7 +26,7 @@ from v2r_auto.exposure import (
     strip_parenthetical,
     volume_from_result_cells,
 )
-from v2r_auto.exposure_notion import NotionExposureStore, parse_database_id
+from v2r_auto.exposure_notion import NotionExposureStore, parse_database_id, parse_view_id
 
 
 class FakeResponse:
@@ -96,6 +96,20 @@ def test_database_id_from_app_notion_page_url_ignores_view() -> None:
         "?v=11c5fa27b89581a2978b000cc2fc1e89"
     )
     assert parse_database_id(url) == "11c5fa27-b895-819a-8880-c7be0c891084"
+
+
+def test_view_id_from_copied_notion_links() -> None:
+    newdermis = (
+        "https://app.notion.com/p/11c5fa27b895819a8880c7be0c891084"
+        "?v=11c5fa27b89581a2978b000cc2fc1e89&source=copy_link"
+    )
+    jangeutteum = (
+        "https://app.notion.com/p/1b95fa27b8958064b6c5deda2d6675c4"
+        "?v=1b95fa27b8958111949e000c49629234&source=copy_link"
+    )
+    assert parse_view_id(newdermis) == "11c5fa27-b895-81a2-978b-000cc2fc1e89"
+    assert parse_view_id(jangeutteum) == "1b95fa27-b895-8111-949e-000c49629234"
+    assert parse_view_id("https://www.notion.so/2260ab12cdff80c3a4c0d2f0ab1e9c44") == ""
 
 
 def test_strip_parenthetical_keeps_search_keyword() -> None:
@@ -625,6 +639,111 @@ def test_notion_reads_every_linked_data_source() -> None:
     assert keywords == {"좌욕 방법", "항문 주변 가려움", "치열 치료"}
     assert len(rows) == 3
     assert any(url.endswith("/data_sources/source-full/query") for _method, url in calls)
+
+
+def _keyword_schema() -> dict:
+    return {
+        "이름": {"type": "title"},
+        "키워드": {"type": "rich_text"},
+        "노출상태": {"type": "status"},
+    }
+
+
+def test_notion_reads_only_the_copied_view() -> None:
+    query_bodies = []
+
+    def opener(request, timeout=30):
+        url = request.full_url
+        if url.endswith("/views/11c5fa27-b895-81a2-978b-000cc2fc1e89"):
+            return FakeResponse(
+                {
+                    "object": "view",
+                    "id": "11c5fa27-b895-81a2-978b-000cc2fc1e89",
+                    "name": "뉴더미스",
+                    "type": "table",
+                    "data_source_id": "source-newdermis",
+                    "filter": {
+                        "property": "브랜드",
+                        "select": {"equals": "뉴더미스"},
+                    },
+                }
+            )
+        if url.endswith("/data_sources/source-newdermis"):
+            return FakeResponse({"properties": _keyword_schema()})
+        if url.endswith("/data_sources/source-newdermis/query"):
+            query_bodies.append(json.loads(request.data.decode("utf-8")))
+            return FakeResponse(
+                {
+                    "results": [
+                        _keyword_page(f"p-{index}", f"키워드{index}")
+                        for index in range(1, 335)
+                    ],
+                    "has_more": False,
+                }
+            )
+        if url.endswith("/databases/11c5fa27-b895-819a-8880-c7be0c891084"):
+            return FakeResponse(
+                {
+                    "data_sources": [{"id": "source-small", "name": "요약"}],
+                    "properties": _keyword_schema(),
+                }
+            )
+        if url.endswith("/data_sources/source-small") or url.endswith(
+            "/data_sources/source-small/query"
+        ):
+            raise AssertionError("copied view must not fall back to the 23-row table")
+        return FakeResponse({"results": [], "has_more": False})
+
+    store = NotionExposureStore(
+        "secret",
+        "https://app.notion.com/p/11c5fa27b895819a8880c7be0c891084"
+        "?v=11c5fa27b89581a2978b000cc2fc1e89&source=copy_link",
+        __import__("logging").getLogger("test"),
+        opener=opener,
+    )
+    rows = store.load_rows()
+    assert len(rows) == 334
+    assert query_bodies[0]["filter"]["select"]["equals"] == "뉴더미스"
+
+
+def test_notion_reads_jangeutteum_view_not_the_small_table() -> None:
+    def opener(request, timeout=30):
+        url = request.full_url
+        if url.endswith("/views/1b95fa27-b895-8111-949e-000c49629234"):
+            return FakeResponse(
+                {
+                    "object": "view",
+                    "id": "1b95fa27-b895-8111-949e-000c49629234",
+                    "name": "장으뜸",
+                    "type": "table",
+                    "data_source_id": "source-jangeutteum",
+                }
+            )
+        if url.endswith("/data_sources/source-jangeutteum"):
+            return FakeResponse({"properties": _keyword_schema()})
+        if url.endswith("/data_sources/source-jangeutteum/query"):
+            return FakeResponse(
+                {
+                    "results": [
+                        _keyword_page("p-1", "장어즙"),
+                        _keyword_page("p-2", "장어 효능"),
+                    ],
+                    "has_more": False,
+                }
+            )
+        if "source-small" in url:
+            raise AssertionError("장으뜸 view must not read the small default table")
+        return FakeResponse({"results": [], "has_more": False})
+
+    store = NotionExposureStore(
+        "secret",
+        "https://app.notion.com/p/1b95fa27b8958064b6c5deda2d6675c4"
+        "?v=1b95fa27b8958111949e000c49629234&source=copy_link",
+        __import__("logging").getLogger("test"),
+        opener=opener,
+    )
+    rows = store.load_rows()
+    assert [row.keyword for row in rows] == ["장어즙", "장어 효능"]
 
 
 def test_notion_uses_title_when_keyword_cell_is_empty() -> None:
