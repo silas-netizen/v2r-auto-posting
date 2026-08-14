@@ -6,6 +6,8 @@ import json
 import logging
 import random
 import re
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -143,17 +145,38 @@ class V2RBrowser:
             self.driver.get(url)
 
     @staticmethod
-    def _sheet_export_url(sheet_url: str) -> str:
+    def _sheet_id_and_gid(sheet_url: str) -> tuple[str, str]:
         match = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", sheet_url)
         if not match:
             raise AutomationError("올바른 Google Sheets 주소가 아닙니다")
         parsed = urlparse(sheet_url)
         gid = parse_qs(parsed.query).get("gid", ["0"])[0]
         if parsed.fragment.startswith("gid="):
-            gid = parsed.fragment.split("=", 1)[1]
+            gid = parsed.fragment.split("=", 1)[1].split("&", 1)[0]
+        return match.group(1), gid
+
+    @staticmethod
+    def _sheet_export_url(sheet_url: str) -> str:
+        sheet_id, gid = V2RBrowser._sheet_id_and_gid(sheet_url)
         return (
-            f"https://docs.google.com/spreadsheets/d/{match.group(1)}"
+            f"https://docs.google.com/spreadsheets/d/{sheet_id}"
             f"/export?format=csv&gid={gid}"
+        )
+
+    @staticmethod
+    def _sheet_range_url(sheet_url: str, column: str, row_number: int) -> str:
+        column = column.upper()
+        if not re.fullmatch(r"[A-Z]+", column):
+            raise AutomationError(f"올바르지 않은 시트 열입니다: {column}")
+        if row_number < 1:
+            raise AutomationError(f"올바르지 않은 시트 행입니다: {row_number}")
+        parsed = urlparse(sheet_url)
+        _, gid = V2RBrowser._sheet_id_and_gid(sheet_url)
+        query = parsed.query
+        return (
+            f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            f"{'?' + query if query else ''}"
+            f"#gid={gid}&range={column}{row_number}"
         )
 
     def download_sheet(self, sheet_url: str) -> Path:
@@ -186,6 +209,95 @@ class V2RBrowser:
         raise AutomationError(
             "시트를 내려받지 못했습니다. 공유 권한 또는 Google 로그인을 확인하세요"
         )
+
+    @staticmethod
+    def _set_clipboard_text(text: str) -> None:
+        """Put TSV on the OS clipboard so Sheets can paste a whole range at once."""
+        encoded = text.encode("utf-8")
+        if sys.platform == "win32":
+            subprocess.run(
+                ["clip"],
+                input=text.encode("utf-16le"),
+                check=True,
+            )
+            return
+        for command in (
+            ["xclip", "-selection", "clipboard"],
+            ["xsel", "--clipboard", "--input"],
+            ["pbcopy"],
+        ):
+            try:
+                subprocess.run(command, input=encoded, check=True)
+                return
+            except (FileNotFoundError, subprocess.CalledProcessError):
+                continue
+        raise AutomationError("클립보드에 값을 넣지 못했습니다")
+
+    def paste_sheet_columns(
+        self,
+        sheet_url: str,
+        start_column: str,
+        start_row: int,
+        tsv: str,
+    ) -> None:
+        """Paste a TSV block into Sheets in one action. Do not type cell by cell."""
+        self.start()
+        assert self.driver
+        start_column = start_column.upper()
+        target = self._sheet_range_url(sheet_url, start_column, start_row)
+        self._navigate(target, self.google_handle)
+        self.google_handle = self.driver.current_window_handle
+        self.wait.until(
+            lambda driver: driver.execute_script("return document.readyState") == "complete"
+        )
+        self.wait.until(EC.presence_of_element_located((By.ID, "waffle-rich-text-editor")))
+        self.driver.execute_script("window.focus();")
+        self._set_clipboard_text(tsv)
+        editors = [
+            element
+            for element in self.driver.find_elements(By.ID, "waffle-rich-text-editor")
+            if element.is_displayed() and element.is_enabled()
+        ]
+        if editors:
+            editor = editors[0]
+            editor.click()
+            editor.send_keys(Keys.CONTROL, "v")
+        else:
+            ActionChains(self.driver).send_keys(Keys.CONTROL, "v").perform()
+        time.sleep(1.5)
+        self.logger.info(
+            "시트 %s%s에 %s줄을 한 번에 붙여넣었습니다",
+            start_column,
+            start_row,
+            tsv.count("\n") or (1 if tsv else 0),
+        )
+
+    def load_join_membership(self) -> dict[str, set[str]]:
+        from .join_marker import fetch_membership
+
+        publisher = self._get_affiliate_publisher()
+        publisher._capture_authorization()
+        return fetch_membership(publisher._request)
+
+    def write_join_marks(self, sheet_url: str, plan) -> None:
+        from .join_marker import plan_matches_sheet, load_account_rows
+
+        for group in plan.contiguous_cafe_groups():
+            start_column, start_row = plan.start_cell(group[0])
+            self.paste_sheet_columns(
+                sheet_url,
+                start_column,
+                start_row,
+                plan.tsv_for_headers(group),
+            )
+        path = self.download_sheet(sheet_url)
+        headers, rows = load_account_rows(path)
+        errors = plan_matches_sheet(headers, rows, plan)
+        if errors:
+            raise AutomationError(
+                "시트 표시를 확인하지 못했습니다: " + "; ".join(errors[:5])
+            )
+        self.logger.info("시트 가입 표시를 확인했습니다")
 
     def update_completion_link(
         self,
