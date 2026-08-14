@@ -422,6 +422,13 @@ class PhotoWasherController:
                 title="전체 사진 세척",
                 control_type="Button",
             )
+            before_wash_stats = {
+                path: (
+                    path.stat().st_mtime_ns,
+                    path.stat().st_size,
+                )
+                for path in image_paths
+            }
             if wash_button.exists(timeout=2):
                 wash_button.click_input()
             else:
@@ -438,16 +445,46 @@ class PhotoWasherController:
                     button="left",
                     coords=button_point,
                 )
+                time.sleep(0.25)
+                mouse.click(
+                    button="left",
+                    coords=button_point,
+                )
                 self.logger.info(
                     "전체 사진 세척 버튼의 창 내부 상대 위치를 사용합니다: %s",
                     button_point,
                 )
             completed = Desktop(backend="uia").window(title="완료")
-            completed.wait("visible ready", timeout=self.timeout_seconds)
-            completed.child_window(
-                title_re=r"(?i)^ok$",
-                control_type="Button",
-            ).click_input()
+            deadline = time.monotonic() + self.timeout_seconds
+            popup_found = False
+            files_changed = False
+            while time.monotonic() < deadline:
+                popup_found = completed.exists(timeout=0)
+                files_changed = all(
+                    path.exists()
+                    and (
+                        path.stat().st_mtime_ns,
+                        path.stat().st_size,
+                    )
+                    != before_wash_stats[path]
+                    for path in image_paths
+                )
+                if popup_found or files_changed:
+                    break
+                time.sleep(0.25)
+            if not popup_found and not files_changed:
+                raise PhotoWashError(
+                    "전체 사진 세척 실행 후 파일 변경과 완료 팝업을 확인하지 못했습니다"
+                )
+            if popup_found:
+                completed.child_window(
+                    title_re=r"(?i)^ok$",
+                    control_type="Button",
+                ).click_input()
+            else:
+                self.logger.warning(
+                    "완료 팝업을 읽지 못했지만 전체 사진 파일 덮어쓰기를 확인했습니다"
+                )
             self.logger.info(
                 "포토워셔 전체 사진 세척 완료: %s개",
                 len(image_paths),
