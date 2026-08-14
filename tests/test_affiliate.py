@@ -109,7 +109,6 @@ def test_daily_posts_are_matched_to_cafe_without_reuse(tmp_path: Path) -> None:
     jobs = [
         load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0],
         load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0],
-        load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0],
     ]
 
     assign_daily_posts(jobs, load_daily_posts(path), random.Random(1))
@@ -320,6 +319,7 @@ def test_api_comments_keep_five_roots_and_seven_replies(tmp_path: Path) -> None:
 
 def test_api_assignment_uses_actual_real_name_type(tmp_path: Path) -> None:
     jobs = [
+        load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0],
         load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0],
         load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0],
     ]
