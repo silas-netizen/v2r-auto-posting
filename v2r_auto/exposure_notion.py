@@ -20,6 +20,7 @@ from .exposure import (
     STATUS_HEADERS,
     VOLUME_HEADERS,
     cafe_name_option,
+    status_option,
 )
 
 NOTION_VERSION = "2022-06-28"
@@ -101,11 +102,31 @@ def _norm_header(name: str) -> str:
     return (name or "").replace(" ", "").replace("#", "")
 
 
-def _find_property(schema: dict[str, Any], names: tuple[str, ...]) -> tuple[str, str]:
+_KEYWORD_TYPE_PRIORITY = {
+    "title": 0,
+    "rich_text": 1,
+    "formula": 2,
+    "select": 3,
+    "url": 4,
+    "multi_select": 5,
+}
+
+
+def _matching_properties(
+    schema: dict[str, Any], names: tuple[str, ...]
+) -> list[tuple[str, str]]:
     wanted = {_norm_header(name) for name in names}
+    found: list[tuple[str, str]] = []
     for name, spec in schema.items():
         if _norm_header(name) in wanted:
-            return name, str(spec.get("type") or "")
+            found.append((name, str((spec or {}).get("type") or "")))
+    return found
+
+
+def _find_property(schema: dict[str, Any], names: tuple[str, ...]) -> tuple[str, str]:
+    found = _matching_properties(schema, names)
+    if found:
+        return found[0]
     raise NotionError("노션에서 열을 찾지 못했습니다: " + ", ".join(names))
 
 
@@ -117,13 +138,14 @@ def _title_property_name(schema: dict[str, Any]) -> str:
 
 
 def _find_keyword_property(schema: dict[str, Any]) -> tuple[str, str]:
-    try:
-        return _find_property(schema, KEYWORD_HEADERS)
-    except NotionError:
-        title_name = _title_property_name(schema)
-        if title_name:
-            return title_name, "title"
-        raise
+    found = _matching_properties(schema, KEYWORD_HEADERS)
+    if found:
+        found.sort(key=lambda item: _KEYWORD_TYPE_PRIORITY.get(item[1], 99))
+        return found[0]
+    title_name = _title_property_name(schema)
+    if title_name:
+        return title_name, "title"
+    raise NotionError("노션에서 열을 찾지 못했습니다: " + ", ".join(KEYWORD_HEADERS))
 
 
 def _optional_property(schema: dict[str, Any], names: tuple[str, ...]) -> tuple[str, str]:
@@ -150,11 +172,19 @@ def _property_option_names(schema: dict[str, Any], prop_name: str) -> list[str]:
 def _keyword_text(
     properties: dict[str, Any], keyword_name: str, title_name: str
 ) -> str:
-    text = _plain_text(properties.get(keyword_name)).strip()
-    if text:
-        return text
-    if title_name and title_name != keyword_name:
-        return _plain_text(properties.get(title_name)).strip()
+    names: list[str] = []
+    if keyword_name:
+        names.append(keyword_name)
+    wanted = {_norm_header(name) for name in KEYWORD_HEADERS}
+    for name in properties:
+        if name not in names and _norm_header(name) in wanted:
+            names.append(name)
+    if title_name and title_name not in names:
+        names.append(title_name)
+    for name in names:
+        text = _plain_text(properties.get(name)).strip()
+        if text:
+            return text
     return ""
 
 
@@ -208,6 +238,7 @@ class NotionExposureStore:
         self._exposed_volume_name = ""
         self._exposed_volume_type = ""
         self._cafe_options: list[str] = []
+        self._status_options: list[str] = []
 
     def _request(
         self,
@@ -276,6 +307,14 @@ class NotionExposureStore:
                         seen.add(name)
                         options.append(name)
             self._cafe_options = options
+            status_options: list[str] = []
+            seen_status: set[str] = set()
+            for source in self._sources:
+                for name in _property_option_names(source.schema, source.status_name):
+                    if name not in seen_status:
+                        seen_status.add(name)
+                        status_options.append(name)
+            self._status_options = status_options
         return self._schema
 
     def _bind_schema(self, schema: dict[str, Any], query_path: str, version: str, source_id: str = "") -> _SourceBind | None:
@@ -656,10 +695,11 @@ class NotionExposureStore:
 
     def update_status(self, row: ExposureRow, status: str) -> None:
         key = "status" if row.status_type == "status" else "select"
+        written_status = status_option(status, self._status_options)
         self._request(
             "PATCH",
             f"/pages/{row.page_id}",
-            {"properties": {row.status_property: {key: {"name": status}}}},
+            {"properties": {row.status_property: {key: {"name": written_status}}}},
         )
 
     def update_check_result(
@@ -672,7 +712,10 @@ class NotionExposureStore:
         volume_found: bool = False,
     ) -> None:
         key = "status" if row.status_type == "status" else "select"
-        properties: dict[str, Any] = {row.status_property: {key: {"name": status}}}
+        written_status = status_option(status, self._status_options)
+        properties: dict[str, Any] = {
+            row.status_property: {key: {"name": written_status}}
+        }
         if row.cafe_property and cafe_name is not None:
             chosen = cafe_name
             if row.cafe_type in {"select", "multi_select"}:

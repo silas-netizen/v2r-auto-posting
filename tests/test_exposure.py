@@ -10,6 +10,7 @@ from v2r_auto.exposure import (
     brand_found,
     cafe_id_for_check,
     cafe_name_option,
+    status_option,
     collect_our_cafe_hits,
     is_cafe_article_url,
     is_clustered_sub_result,
@@ -110,6 +111,11 @@ def test_view_id_from_copied_notion_links() -> None:
     assert parse_view_id(newdermis) == "11c5fa27-b895-81a2-978b-000cc2fc1e89"
     assert parse_view_id(jangeutteum) == "1b95fa27-b895-8111-949e-000c49629234"
     assert parse_view_id("https://www.notion.so/2260ab12cdff80c3a4c0d2f0ab1e9c44") == ""
+
+
+def test_status_option_matches_spaced_exposed_label() -> None:
+    assert status_option("노출완", ["밀려남", "노출 완", "작성예정(통합)"]) == "노출 완"
+    assert status_option("노출완", ["밀려남", "노출완"]) == "노출완"
 
 
 def test_strip_parenthetical_keeps_search_keyword() -> None:
@@ -554,6 +560,59 @@ def test_notion_cafe_select_uses_name_only_option() -> None:
     assert payload["카페/ID"]["select"]["name"] == "줌마"
 
 
+def test_notion_writes_spaced_exposed_status_option() -> None:
+    bodies = []
+
+    def opener(request, timeout=30):
+        if request.data:
+            bodies.append(json.loads(request.data.decode("utf-8")))
+        if request.full_url.endswith("/databases/11c5fa27-b895-819a-8880-c7be0c891084"):
+            return FakeResponse(
+                {
+                    "properties": {
+                        "키워드 ": {"type": "rich_text"},
+                        "노출 상태": {
+                            "type": "select",
+                            "select": {
+                                "options": [
+                                    {"name": "밀려남"},
+                                    {"name": "노출 완"},
+                                ]
+                            },
+                        },
+                        "검색량": {"type": "number"},
+                    }
+                }
+            )
+        if request.full_url.endswith("/query"):
+            return FakeResponse({"results": [], "has_more": False})
+        return FakeResponse({})
+
+    store = NotionExposureStore(
+        "secret",
+        "https://app.notion.com/p/11c5fa27b895819a8880c7be0c891084",
+        __import__("logging").getLogger("test"),
+        opener=opener,
+    )
+    store.load_schema()
+    assert store._volume_name == "검색량"
+    row = ExposureRow(
+        "page-1",
+        "치질",
+        "",
+        "",
+        "밀려남",
+        "노출 상태",
+        "select",
+        volume_property="검색량",
+        volume_type="number",
+    )
+    store.update_check_result(row, status="노출완", search_volume=21000, volume_found=True)
+    payload = bodies[-1]["properties"]
+    assert payload["노출 상태"]["select"]["name"] == "노출 완"
+    assert payload["검색량"]["number"] == 21000
+
+
 def _keyword_page(page_id: str, keyword: str, title: str = "") -> dict:
     return {
         "object": "page",
@@ -744,6 +803,83 @@ def test_notion_reads_jangeutteum_view_not_the_small_table() -> None:
     )
     rows = store.load_rows()
     assert [row.keyword for row in rows] == ["장어즙", "장어 효능"]
+
+
+def test_notion_prefers_keyword_text_over_empty_tag_column() -> None:
+    def opener(request, timeout=30):
+        url = request.full_url
+        if url.endswith("/databases/11c5fa27-b895-819a-8880-c7be0c891084"):
+            return FakeResponse(
+                {
+                    "properties": {
+                        "글 제목": {"type": "title"},
+                        "키워드": {"type": "multi_select"},
+                        "키워드 ": {"type": "rich_text"},
+                        "노출상태": {"type": "status"},
+                    }
+                }
+            )
+        if url.endswith("/query"):
+            return FakeResponse(
+                {
+                    "results": [
+                        {
+                            "object": "page",
+                            "id": "p-1",
+                            "properties": {
+                                "키워드": {
+                                    "type": "multi_select",
+                                    "multi_select": [],
+                                },
+                                "키워드 ": {
+                                    "type": "rich_text",
+                                    "rich_text": [{"plain_text": "치질"}],
+                                },
+                                "글 제목": {"type": "title", "title": []},
+                                "노출상태": {
+                                    "type": "status",
+                                    "status": {"name": "밀려남"},
+                                },
+                            },
+                        },
+                        {
+                            "object": "page",
+                            "id": "p-2",
+                            "properties": {
+                                "키워드": {
+                                    "type": "multi_select",
+                                    "multi_select": [{"name": "자연방패"}],
+                                },
+                                "키워드 ": {
+                                    "type": "rich_text",
+                                    "rich_text": [
+                                        {"plain_text": "내치핵(내치핵자연치료 글로 노출됨)"}
+                                    ],
+                                },
+                                "글 제목": {"type": "title", "title": []},
+                                "노출상태": {
+                                    "type": "status",
+                                    "status": {"name": "밀려남"},
+                                },
+                            },
+                        },
+                    ],
+                    "has_more": False,
+                }
+            )
+        return FakeResponse({})
+
+    store = NotionExposureStore(
+        "secret",
+        "https://app.notion.com/p/11c5fa27b895819a8880c7be0c891084",
+        __import__("logging").getLogger("test"),
+        opener=opener,
+    )
+    rows = store.load_rows()
+    assert [row.keyword for row in rows] == [
+        "치질",
+        "내치핵(내치핵자연치료 글로 노출됨)",
+    ]
 
 
 def test_notion_uses_title_when_keyword_cell_is_empty() -> None:

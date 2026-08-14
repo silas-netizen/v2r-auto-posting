@@ -27,10 +27,10 @@ DEFAULT_CAFE_NAMES = (
 )
 KEYWORD_HEADERS = ("키워드", "검색어", "검색 키워드")
 STATUS_HEADERS = ("노출상태", "노출 상태")
-SEARCH_URL_HEADERS = ("통합검색", "통합 검색")
+SEARCH_URL_HEADERS = ("통합검색", "통합 검색", "네이버 통합검색", "네이버통합검색")
 POST_URL_HEADERS = ("작성 글", "작성글", "작성 글 링크", "작성글링크")
 CAFE_HEADERS = ("카페/ID", "카페 / ID", "카페ID")
-VOLUME_HEADERS = ("키워드 검색량", "#키워드검색량", "# 키워드 검색량")
+VOLUME_HEADERS = ("키워드 검색량", "#키워드검색량", "# 키워드 검색량", "검색량")
 EXPOSED_VOLUME_HEADERS = ("노출된 검색량", "#노출된검색량", "# 노출된 검색량", "노출 검색량")
 _ANCHOR_RE = re.compile(
     r'(?is)<a\b[^>]*\bhref=["\']([^"\']+)["\'][^>]*>(.*?)</a>'
@@ -126,6 +126,17 @@ def cafe_name_only(value: str) -> str:
     if "/" in text:
         text = text.split("/", 1)[0].strip()
     return text
+
+
+def status_option(status: str, options: list[str] | tuple[str, ...] = ()) -> str:
+    wanted = compact_text(status)
+    if not wanted:
+        return status
+    for name in options:
+        text = str(name or "").strip()
+        if text and compact_text(text) == wanted:
+            return text
+    return status
 
 
 def cafe_name_option(cafe_name: str, options: list[str] | tuple[str, ...] = ()) -> str:
