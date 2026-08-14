@@ -303,31 +303,63 @@ class PhotoWasherController:
             drop_text = window.child_window(
                 title="파일 또는 폴더를 여기에 드래그하세요",
             )
-            drop_text.wait("visible", timeout=30)
             source_rect = folder_item.rectangle()
-            target_rect = drop_text.rectangle()
             source = (
                 (source_rect.left + source_rect.right) // 2,
                 (source_rect.top + source_rect.bottom) // 2,
             )
-            target = (
-                (target_rect.left + target_rect.right) // 2,
-                (target_rect.top + target_rect.bottom) // 2,
-            )
+            if drop_text.exists(timeout=2):
+                target_rect = drop_text.rectangle()
+                target = (
+                    (target_rect.left + target_rect.right) // 2,
+                    (target_rect.top + target_rect.bottom) // 2,
+                )
+            else:
+                window_rect = window.rectangle()
+                target = (
+                    (window_rect.left + window_rect.right) // 2,
+                    window_rect.top
+                    + int(window_rect.height() * 0.38),
+                )
+                self.logger.info(
+                    "포토워셔 드롭 문구 대신 창 내부 상대 위치를 사용합니다"
+                )
             mouse.move(coords=source)
             mouse.press(button="left", coords=source)
             mouse.move(coords=target, duration=1.5)
             mouse.release(button="left", coords=target)
 
-            self._wait_for_window_text(
-                window,
-                f"{len(image_paths)}개 로딩이 완료되었습니다",
-                60,
-            )
-            window.child_window(
+            try:
+                self._wait_for_window_text(
+                    window,
+                    f"{len(image_paths)}개 로딩이 완료되었습니다",
+                    20,
+                )
+            except PhotoWashError:
+                self.logger.warning(
+                    "포토워셔 로딩 문구를 읽지 못해 화면 상태를 기준으로 계속합니다"
+                )
+                time.sleep(2)
+            wash_button = window.child_window(
                 title="전체 사진 세척",
                 control_type="Button",
-            ).click_input()
+            )
+            if wash_button.exists(timeout=2):
+                wash_button.click_input()
+            else:
+                window_rect = window.rectangle()
+                mouse.click(
+                    button="left",
+                    coords=(
+                        window_rect.left
+                        + int(window_rect.width() * 0.30),
+                        window_rect.bottom
+                        - int(window_rect.height() * 0.10),
+                    ),
+                )
+                self.logger.info(
+                    "전체 사진 세척 버튼의 창 내부 상대 위치를 사용합니다"
+                )
             completed = Desktop(backend="uia").window(title="완료")
             completed.wait("visible ready", timeout=self.timeout_seconds)
             completed.child_window(
