@@ -49,9 +49,9 @@ jobs:
           Copy-Item dist/V2R-Immediate-Posting.exe publish-executables/downloads/V2R-Immediate-Posting.exe -Force
           Compress-Archive -Path dist/V2R-Affiliate-Revision.exe -DestinationPath publish-executables/downloads/V2R-Affiliate-Revision.zip -CompressionLevel Optimal -Force
           Compress-Archive -Path dist/V2R-Immediate-Posting.exe -DestinationPath publish-executables/downloads/V2R-Immediate-Posting.zip -CompressionLevel Optimal -Force
-          if (Test-Path dist/PhotoWasher-Verification) {
+          if (Test-Path photowasher-verification-output) {
             New-Item -ItemType Directory -Path publish-executables/downloads/verification-row18 -Force | Out-Null
-            Copy-Item dist/PhotoWasher-Verification/*.jpg publish-executables/downloads/verification-row18/ -Force
+            Copy-Item photowasher-verification-output/*.jpg publish-executables/downloads/verification-row18/ -Force
           }
           if (Test-Path dist/PhotoWasher-Debug) {
             New-Item -ItemType Directory -Path publish-executables/downloads/verification-row18/debug -Force | Out-Null
