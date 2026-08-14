@@ -251,13 +251,33 @@ class PhotoWasherController:
                 for candidate in reversed(
                     desktop.windows(class_name="CabinetWClass")
                 ):
-                    item = candidate.child_window(
-                        title=batch_dir.name,
-                        control_type="ListItem",
-                    )
-                    if item.exists(timeout=0):
-                        explorer_window = candidate
-                        folder_item = item
+                    for control_type in (
+                        "ListItem",
+                        "DataItem",
+                        "TreeItem",
+                    ):
+                        item = candidate.child_window(
+                            title=batch_dir.name,
+                            control_type=control_type,
+                        )
+                        if item.exists(timeout=0):
+                            explorer_window = candidate
+                            folder_item = item
+                            break
+                    if folder_item is None:
+                        try:
+                            for item in candidate.descendants():
+                                if (
+                                    item.window_text() == batch_dir.name
+                                    and item.rectangle().width() > 0
+                                    and item.rectangle().height() > 0
+                                ):
+                                    explorer_window = candidate
+                                    folder_item = item
+                                    break
+                        except Exception:
+                            pass
+                    if folder_item is not None:
                         break
                 if folder_item is not None:
                     break
@@ -436,6 +456,7 @@ def prepare_photo_wash_plan(
         )
     except Exception as exc:
         message = f"포토워셔 세탁 실패로 발행하지 않습니다: {exc}"
+        logger.error(message)
         for key in selected_by_job:
             plan.failures[key] = message
         return plan
@@ -449,10 +470,12 @@ def prepare_photo_wash_plan(
             plan.failures[owner_by_file_id[item.file_id]] = str(exc)
             continue
         if not camera_metadata_changed(before[item.file_id], after):
-            plan.failures[owner_by_file_id[item.file_id]] = (
+            message = (
                 f"카메라 정보가 변경되지 않아 세탁 실패로 처리합니다: "
                 f"{washed.local_path.name}"
             )
+            logger.error(message)
+            plan.failures[owner_by_file_id[item.file_id]] = message
             continue
         successful_ids.add(item.file_id)
 
