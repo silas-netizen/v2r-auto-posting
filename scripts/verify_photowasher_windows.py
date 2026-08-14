@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import shutil
@@ -58,9 +59,17 @@ def main() -> None:
     controller = PhotoWasherController(
         root / "photowasher2.1" / "main.exe",
         logger,
-        timeout_seconds=300,
+        timeout_seconds=30,
     )
-    controller.wash(batch_dir, image_paths)
+    debug_dir = root / "debug"
+    os.environ["V2R_PHOTOWASHER_DEBUG_DIR"] = str(debug_dir)
+    try:
+        controller.wash(batch_dir, image_paths)
+    except Exception:
+        for screenshot in sorted(debug_dir.glob("*.png")):
+            encoded = base64.b64encode(screenshot.read_bytes()).decode("ascii")
+            print(f"PHOTOWASHER_SCREENSHOT_{screenshot.stem}={encoded}")
+        raise
     after = {path: camera_metadata(path) for path in image_paths}
     failures = [
         path.name

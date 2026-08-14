@@ -379,6 +379,12 @@ class PhotoWasherController:
             mouse.release(button="left", coords=target)
             time.sleep(2)
             after_drop = main_window.capture_as_image().convert("RGB")
+            debug_dir = os.environ.get("V2R_PHOTOWASHER_DEBUG_DIR", "").strip()
+            if debug_dir:
+                debug_path = Path(debug_dir)
+                debug_path.mkdir(parents=True, exist_ok=True)
+                before_drop.save(debug_path / "before-drop.png")
+                after_drop.save(debug_path / "after-drop.png")
             if before_drop.size == after_drop.size:
                 difference = ImageChops.difference(
                     before_drop,
@@ -430,7 +436,13 @@ class PhotoWasherController:
                     ),
                 )
                 self.logger.info(
-                    "전체 사진 세척 버튼의 창 내부 상대 위치를 사용합니다"
+                    "전체 사진 세척 버튼의 창 내부 상대 위치를 사용합니다: %s",
+                    (
+                        window_rect.left
+                        + int(window_rect.width() * 0.30),
+                        window_rect.bottom
+                        - int(window_rect.height() * 0.10),
+                    ),
                 )
             completed = Desktop(backend="uia").window(title="완료")
             completed.wait("visible ready", timeout=self.timeout_seconds)
