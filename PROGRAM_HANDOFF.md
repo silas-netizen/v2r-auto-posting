@@ -13,6 +13,7 @@
 5. 실제 수정 전 관련 테스트를 추가하고 전체 테스트와 Windows 빌드를 실행한다.
 6. 네이버/V2R/Google 비밀번호·쿠키·토큰을 코드·로그·문서에 저장하지 않는다.
 7. 이 프로젝트에는 일상 글 수집·각색 생성 프로그램이 포함되지 않는다.
+8. 키워드 노출 관리(`V2R-Exposure-Checker.exe`)는 제휴·자사 발행과 별개다. 발행 기능을 건드리지 않는다.
 
 ---
 
@@ -377,6 +378,7 @@ V2R 방식:
 python -m pytest
 python -m PyInstaller --noconfirm --clean v2r-auto-affiliate.spec
 python -m PyInstaller --noconfirm --clean v2r-immediate-posting.spec
+python -m PyInstaller --noconfirm --clean v2r-exposure-checker.spec
 ```
 
 Windows CI:
