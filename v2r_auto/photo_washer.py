@@ -326,7 +326,15 @@ class PhotoWasherController:
                 )
             mouse.move(coords=source)
             mouse.press(button="left", coords=source)
-            mouse.move(coords=target, duration=1.5)
+            for step in range(1, 16):
+                point = (
+                    source[0]
+                    + (target[0] - source[0]) * step // 15,
+                    source[1]
+                    + (target[1] - source[1]) * step // 15,
+                )
+                mouse.move(coords=point)
+                time.sleep(0.1)
             mouse.release(button="left", coords=target)
 
             try:
