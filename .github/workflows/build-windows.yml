@@ -28,6 +28,10 @@ jobs:
       - name: Run tests
         run: python -m pytest
 
+      - name: Verify PhotoWasher UI with row 18 images
+        if: github.ref_name == 'cursor/fix-seone-image-upload-3901'
+        run: python scripts/verify_photowasher_windows.py
+
       - name: Build EXE
         run: |
           python -m PyInstaller --noconfirm --clean v2r-auto-posting.spec
