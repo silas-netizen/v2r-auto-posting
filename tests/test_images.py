@@ -175,6 +175,58 @@ def test_patsooni_actual_keyword_placeholder_uses_keyword_folder(
     assert resolved[0].marker == "골드카무트효소"
 
 
+@pytest.mark.parametrize(
+    ("brand", "marker"),
+    [
+        ("장으뜸", "키워드"),
+        ("장으뜸", "실제 키워드"),
+        ("뉴더미스", "키워드"),
+        ("뉴더미스", "실제 키워드"),
+    ],
+)
+def test_other_brands_accept_fixed_or_actual_keyword_placeholder(
+    tmp_path: Path,
+    brand: str,
+    marker: str,
+) -> None:
+    job = make_job(
+        f"{{{marker}}}",
+        brand=brand,
+        keyword="실제 키워드",
+    )
+
+    class FakeResolver(GoogleDriveImageResolver):
+        def __init__(self):
+            super().__init__(
+                tmp_path,
+                logging.getLogger("test"),
+                root_folder_id="root",
+                rng=random.Random(1),
+            )
+            self.visited: list[str] = []
+
+        def _list_folder(self, folder_id: str):
+            self.visited.append(folder_id)
+            return {
+                "root": [DriveItem("brand", brand, True)],
+                "brand": [DriveItem("keyword", "키워드", True)],
+                "keyword": [
+                    DriveItem("first", "무작위1.jpg", False),
+                    DriveItem("second", "무작위2.jpg", False),
+                ],
+            }[folder_id]
+
+        def _download(self, item: DriveItem) -> Path:
+            return tmp_path / item.name
+
+    resolver = FakeResolver()
+    resolved = resolver.resolve(job)
+
+    assert "keyword" in resolver.visited
+    assert len(resolved) == 1
+    assert resolved[0].file_id in {"first", "second"}
+
+
 def test_patsooni_keyword_retries_direct_filename_search(tmp_path: Path) -> None:
     job = make_job("{키워드}", keyword="요즘 그릭요거트")
 

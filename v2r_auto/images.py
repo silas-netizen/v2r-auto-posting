@@ -283,6 +283,15 @@ class GoogleDriveImageResolver:
                 "",
                 job.keyword,
             ).casefold()
+            keyword_placeholder = marker == "키워드" or (
+                bool(normalized_keyword)
+                and normalized_marker == normalized_keyword
+            )
+            shared_keyword_folder = job.brand in {
+                "팥순이",
+                "장으뜸",
+                "뉴더미스",
+            } and keyword_placeholder
             keyword_match = job.brand == "팥순이" and (
                 marker == "키워드"
                 or (
@@ -290,7 +299,7 @@ class GoogleDriveImageResolver:
                     and normalized_marker == normalized_keyword
                 )
             )
-            if keyword_match:
+            if shared_keyword_folder:
                 folder_name = "키워드"
             if job.brand == "팥순이" and marker == "B/A":
                 folder_name = "BA"
