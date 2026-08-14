@@ -222,7 +222,7 @@ class PhotoWasherController:
             from pywinauto.application import Application
             from win32api import GetSystemMetrics
             from win32con import HWND_TOP, SWP_SHOWWINDOW
-            from win32gui import SetWindowPos
+            from win32gui import SetForegroundWindow, SetWindowPos
         except Exception as exc:
             raise PhotoWashError(
                 "Windows 화면 자동화 모듈을 시작하지 못했습니다"
@@ -426,23 +426,21 @@ class PhotoWasherController:
                 wash_button.click_input()
             else:
                 window_rect = main_window.rectangle()
+                SetForegroundWindow(main_window.handle)
+                time.sleep(0.5)
+                button_point = (
+                    window_rect.left
+                    + int(window_rect.width() * 0.44),
+                    window_rect.top
+                    + int(window_rect.height() * 0.88),
+                )
                 mouse.click(
                     button="left",
-                    coords=(
-                        window_rect.left
-                        + int(window_rect.width() * 0.30),
-                        window_rect.bottom
-                        - int(window_rect.height() * 0.10),
-                    ),
+                    coords=button_point,
                 )
                 self.logger.info(
                     "전체 사진 세척 버튼의 창 내부 상대 위치를 사용합니다: %s",
-                    (
-                        window_rect.left
-                        + int(window_rect.width() * 0.30),
-                        window_rect.bottom
-                        - int(window_rect.height() * 0.10),
-                    ),
+                    button_point,
                 )
             completed = Desktop(backend="uia").window(title="완료")
             completed.wait("visible ready", timeout=self.timeout_seconds)
