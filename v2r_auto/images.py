@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import random
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -152,9 +153,17 @@ class GoogleDriveImageResolver:
                 items.append(item)
         return items
 
-    def _fetch_complete_folder(self, folder_id: str) -> list[DriveItem]:
+    def _fetch_complete_folder(
+        self,
+        folder_id: str,
+        *,
+        refresh: bool = False,
+    ) -> list[DriveItem]:
+        url = DRIVE_EMBEDDED_FOLDER_URL.format(folder_id=folder_id)
+        if refresh:
+            url += f"&cache={time.time_ns()}"
         request = Request(
-            DRIVE_EMBEDDED_FOLDER_URL.format(folder_id=folder_id),
+            url,
             headers={"User-Agent": "Mozilla/5.0"},
         )
         with self.opener(request, timeout=30) as response:
@@ -165,7 +174,7 @@ class GoogleDriveImageResolver:
         if folder_id in self._folder_cache:
             return self._folder_cache[folder_id]
         try:
-            items = self._fetch_complete_folder(folder_id)
+            items = self._fetch_complete_folder(folder_id, refresh=True)
         except Exception:
             items = []
         if not items:
@@ -183,7 +192,7 @@ class GoogleDriveImageResolver:
         """Retry one exact filename directly against a fresh complete listing."""
         wanted = re.sub(r"\s+", "", wanted_name).casefold()
         try:
-            items = self._fetch_complete_folder(folder_id)
+            items = self._fetch_complete_folder(folder_id, refresh=True)
         except Exception as exc:
             self.logger.warning("Google Drive 파일명 직접 검색 실패: %s", exc)
             return None
@@ -198,10 +207,29 @@ class GoogleDriveImageResolver:
 
     def _folder(self, parent_id: str, name: str) -> DriveItem | None:
         wanted = self._key(name)
-        return next(
+        found = next(
             (
                 item
                 for item in self._list_folder(parent_id)
+                if item.is_folder and self._key(item.name) == wanted
+            ),
+            None,
+        )
+        if found is not None:
+            return found
+        try:
+            refreshed = self._fetch_complete_folder(
+                parent_id,
+                refresh=True,
+            )
+        except Exception:
+            return None
+        if refreshed:
+            self._folder_cache[parent_id] = refreshed
+        return next(
+            (
+                item
+                for item in refreshed
                 if item.is_folder and self._key(item.name) == wanted
             ),
             None,

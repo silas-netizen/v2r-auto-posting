@@ -563,11 +563,18 @@ def prepare_photo_wash_plan(
             excluded_file_ids=used_file_ids,
         )
         if len(resolved) != len(markers):
-            plan.failures[key] = (
+            message = (
                 "중복되지 않는 세탁 대상 사진을 모두 찾지 못해 발행하지 않습니다"
             )
+            logger.error("행 %s %s", job.row_number, message)
+            plan.failures[key] = message
             continue
         selected_by_job[key] = resolved
+        logger.info(
+            "행 %s 세탁 사진 선택 완료: %s",
+            job.row_number,
+            ", ".join(item.file_name for item in resolved),
+        )
         for item in resolved:
             used_file_ids.add(item.file_id)
             owner_by_file_id[item.file_id] = key
@@ -612,6 +619,11 @@ def prepare_photo_wash_plan(
         before[item.file_id] = camera_metadata(destination)
 
     controller = controller or PhotoWasherController(executable, logger)
+    logger.info(
+        "포토워셔 일괄 세탁 시작: 원고 %s건 / 사진 %s개",
+        len(selected_by_job),
+        len(all_selected),
+    )
     try:
         controller.wash(
             batch_dir,
@@ -641,6 +653,10 @@ def prepare_photo_wash_plan(
             plan.failures[owner_by_file_id[item.file_id]] = message
             continue
         successful_ids.add(item.file_id)
+        logger.info(
+            "포토워셔 세탁 확인 성공: %s",
+            washed.local_path.name,
+        )
 
     for key, items in selected_by_job.items():
         if key in plan.failures:

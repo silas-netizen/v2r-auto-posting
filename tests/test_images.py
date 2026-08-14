@@ -73,6 +73,30 @@ def test_embedded_drive_folder_reads_more_than_fifty_files() -> None:
     assert items[-1].name == "사진 59.jpg"
 
 
+def test_missing_drive_folder_is_refreshed_before_failure(tmp_path: Path) -> None:
+    class RefreshResolver(GoogleDriveImageResolver):
+        def __init__(self):
+            super().__init__(
+                tmp_path,
+                logging.getLogger("test"),
+                root_folder_id="root",
+            )
+            self.calls = 0
+
+        def _fetch_complete_folder(self, folder_id: str, *, refresh=False):
+            self.calls += 1
+            if self.calls == 1:
+                return [DriveItem("other", "다른폴더", True)]
+            return [DriveItem("keyword", "키워드", True)]
+
+    resolver = RefreshResolver()
+
+    folder = resolver._folder("brand", "키워드")
+
+    assert folder == DriveItem("keyword", "키워드", True)
+    assert resolver.calls == 2
+
+
 def test_patsooni_keyword_matches_filename_without_spaces(tmp_path: Path) -> None:
     job = make_job("{키워드}\n{B/A}")
 
