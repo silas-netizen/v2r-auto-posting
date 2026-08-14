@@ -256,13 +256,22 @@ class PhotoWasherController:
                         "DataItem",
                         "TreeItem",
                     ):
-                        item = candidate.child_window(
-                            title=batch_dir.name,
-                            control_type=control_type,
+                        try:
+                            items = candidate.descendants(
+                                control_type=control_type
+                            )
+                        except Exception:
+                            items = []
+                        folder_item = next(
+                            (
+                                item
+                                for item in items
+                                if item.window_text() == batch_dir.name
+                            ),
+                            None,
                         )
-                        if item.exists(timeout=0):
+                        if folder_item is not None:
                             explorer_window = candidate
-                            folder_item = item
                             break
                     if folder_item is None:
                         try:
