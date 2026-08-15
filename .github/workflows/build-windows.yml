@@ -28,17 +28,17 @@ jobs:
 
       - name: Build EXE
         run: |
-          python -m PyInstaller --noconfirm --clean v2r-join-marker.spec
-          python -c "import zipfile; zipfile.ZipFile('dist/V2R-Join-Marker.zip','w',zipfile.ZIP_DEFLATED).write('dist/V2R-Join-Marker.exe','V2R-Join-Marker.exe')"
+          python -m PyInstaller --noconfirm --clean v2r-comment-watch.spec
+          python -c "import zipfile; zipfile.ZipFile('dist/V2R-Comment-Watch.zip','w',zipfile.ZIP_DEFLATED).write('dist/V2R-Comment-Watch.exe','V2R-Comment-Watch.exe')"
 
       - name: Upload Windows programs
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: V2R-Join-Marker-Windows
+          name: V2R-Comment-Watch-Windows
           path: |
-            dist/V2R-Join-Marker.exe
-            dist/V2R-Join-Marker.zip
+            dist/V2R-Comment-Watch.exe
+            dist/V2R-Comment-Watch.zip
           if-no-files-found: error
           retention-days: 1
 
@@ -47,8 +47,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >
           gh release create "ci-exe-${{ github.run_id }}"
-          dist/V2R-Join-Marker.exe
-          dist/V2R-Join-Marker.zip
+          dist/V2R-Comment-Watch.exe
+          dist/V2R-Comment-Watch.zip
           --title "Windows EXE ${{ github.sha }}"
           --notes "CI build from ${{ github.ref_name }}"
           --target "${{ github.sha }}"

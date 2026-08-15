@@ -372,6 +372,39 @@ class V2RBrowser:
         publisher._capture_authorization()
         return fetch_membership(publisher._request)
 
+    def fetch_v2r_article(self, source_id: str) -> dict:
+        publisher = self._get_affiliate_publisher()
+        publisher._capture_authorization()
+        return publisher._request(
+            "GET",
+            "/naver_cafe_articles/article",
+            query={"source_id": source_id},
+        )
+
+    def write_comment_marks(self, sheet_url: str, plan) -> None:
+        from .comment_watch import load_watch_rows, plan_matches_sheet
+
+        start_column, _ = plan.start_cell()
+        for start_row, tsv in plan.paste_chunks():
+            self.paste_sheet_columns(sheet_url, start_column, start_row, tsv)
+        last_errors: list[str] = []
+        for attempt in range(1, 7):
+            time.sleep(1.5)
+            path = self.download_sheet(sheet_url)
+            headers, rows = load_watch_rows(path)
+            last_errors = plan_matches_sheet(headers, rows, plan)
+            if not last_errors:
+                self.logger.info("시트 댓글 표시를 확인했습니다")
+                return
+            self.logger.warning(
+                "시트 확인 재시도 (%s/6): %s",
+                attempt,
+                last_errors[0],
+            )
+        raise AutomationError(
+            "시트 표시를 확인하지 못했습니다: " + "; ".join(last_errors[:5])
+        )
+
     def write_join_marks(self, sheet_url: str, plan) -> None:
         from .join_marker import plan_matches_sheet, load_account_rows
 
