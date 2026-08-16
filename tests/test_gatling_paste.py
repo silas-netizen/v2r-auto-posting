@@ -347,7 +347,7 @@ def test_recognize_gatling_by_master_headers(tmp_path: Path) -> None:
     assert info.kind == "xlsx"
     assert info.last_data_row == 8
     assert info.next_row == 9
-    assert "이어 넣습니다" in info.message
+    assert "9행" in info.message
 
 
 def test_recognize_headers_even_if_shifted_or_not_on_row_six(tmp_path: Path) -> None:
@@ -412,24 +412,58 @@ def test_paste_appends_after_existing_master_rows(tmp_path: Path) -> None:
     assert sheet.cell(15, 4).value == "더 깊은 답글"
 
 
-def test_paste_continues_after_existing_content_on_column_b(tmp_path: Path) -> None:
+def write_user_like_gatling(tmp_path: Path) -> Path:
+    """마스터 헤더가 B6이고, 앞 새글은 채워져 있으며 댓글·대댓글이 뒤에 있는 실제 파일 형태."""
     path = tmp_path / "복붙용.xlsm"
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "마스터"
-    for offset, header in enumerate(("링크", "타입", "제목", "내용")):
+    for offset, header in enumerate(("링크", "타입", "제목", "내용", "크롬번호", "아이디", "비번", "해시태그")):
         sheet.cell(6, 2 + offset, header)
-    for row_number in range(7, 16):
-        sheet.row_dimensions[row_number].hidden = True
-    for row_number in range(16, 31):
-        sheet.cell(row_number, 2, f"https://cafe.naver.com/cantsb/{row_number}")
-        sheet.cell(row_number, 3, "새글")
+    sheet.cell(7, 2, 800)
+    sheet.cell(7, 3, "딜레이")
+    sheet.cell(8, 3, TYPE_EDIT_POST)
+    sheet.cell(8, 4, "이미 있는 수정 제목")
+    sheet.cell(8, 5, "이미 있는 수정 본문")
+    for row_number in range(9, 13):
+        sheet.cell(row_number, 3, TYPE_NEW_POST)
         sheet.cell(row_number, 4, f"이미 있는 제목 {row_number}")
         sheet.cell(row_number, 5, f"이미 있는 본문 {row_number}")
-    for row_number in range(31, 40):
-        sheet.cell(row_number, 3, "새글")
+    for row_number in range(13, 17):
+        sheet.cell(row_number, 3, TYPE_NEW_POST)
+        sheet.cell(row_number, 9, f"준비된 해시 {row_number}")
+    for row_number in range(17, 19):
+        sheet.cell(row_number, 3, TYPE_COMMENT)
+        sheet.cell(row_number, 5, f"이미 있는 댓글 {row_number}")
+    for row_number in range(19, 22):
+        sheet.cell(row_number, 3, TYPE_COMMENT)
+        sheet.cell(row_number, 9, f"댓글 해시 {row_number}")
+    sheet.cell(22, 2, 1)
+    sheet.cell(22, 3, TYPE_REPLY)
+    sheet.cell(22, 5, "이미 있는 대댓글")
+    for row_number in range(23, 26):
+        sheet.cell(row_number, 3, TYPE_REPLY)
+    sheet.cell(27, 3, TYPE_COMMENT)
+    sheet.cell(27, 5, "뒤에 있는 댓글")
+    sheet.cell(28, 3, TYPE_REPLY)
+    sheet.cell(28, 5, "뒤에 있는 대댓글")
     workbook.save(path)
+    return path
 
+
+def test_recognize_uses_first_empty_title_not_last_comment(tmp_path: Path) -> None:
+    path = write_user_like_gatling(tmp_path)
+    info = recognize_gatling_workbook(path)
+
+    assert info.recognized is True
+    assert info.header_row == 6
+    assert info.start_column == 2
+    assert info.next_row == 13
+    assert "13행" in info.message
+
+
+def test_paste_fills_empty_title_and_keeps_comment_blocks(tmp_path: Path) -> None:
+    path = write_user_like_gatling(tmp_path)
     brand = write_brand_csv(
         tmp_path,
         "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
@@ -438,15 +472,77 @@ def test_paste_continues_after_existing_content_on_column_b(tmp_path: Path) -> N
 
     result, start_row = paste_manuscripts_into_gatling(brand, path)
 
-    assert start_row == 31
+    assert start_row == 13
     workbook = load_workbook(path)
     sheet = workbook["마스터"]
-    assert sheet.cell(16, 4).value == "이미 있는 제목 16"
-    assert sheet.cell(30, 4).value == "이미 있는 제목 30"
-    assert sheet.cell(31, 3).value == TYPE_NEW_POST
-    assert sheet.cell(31, 4).value == "실제 원고 제목"
-    assert sheet.cell(31, 5).value == "실제 원고 본문"
+    assert sheet.cell(12, 4).value == "이미 있는 제목 12"
+    assert sheet.cell(13, 3).value == TYPE_NEW_POST
+    assert sheet.cell(13, 4).value == "실제 원고 제목"
+    assert sheet.cell(13, 5).value == "실제 원고 본문"
+    assert sheet.cell(14, 3).value == TYPE_NEW_POST
+    assert sheet.cell(14, 4) is None or sheet.cell(14, 4).value is None
+    assert sheet.cell(17, 5).value == "이미 있는 댓글 17"
+    assert sheet.cell(19, 3).value == TYPE_COMMENT
+    assert sheet.cell(19, 5).value == "첫 댓글"
+    assert sheet.cell(22, 5).value == "이미 있는 대댓글"
+    assert sheet.cell(23, 3).value == TYPE_REPLY
+    assert sheet.cell(23, 5).value == "첫 답글"
+    assert sheet.cell(27, 5).value == "뒤에 있는 댓글"
+    assert sheet.cell(28, 5).value == "뒤에 있는 대댓글"
     assert result.rows[0].title == "실제 원고 제목"
+
+
+def test_filled_row_thirty_one_is_not_treated_as_empty(tmp_path: Path) -> None:
+    path = tmp_path / "숨긴행처럼보임.xlsm"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "마스터"
+    for offset, header in enumerate(("링크", "타입", "제목", "내용")):
+        sheet.cell(6, 2 + offset, header)
+    for row_number in range(7, 63):
+        sheet.cell(row_number, 3, TYPE_NEW_POST)
+        sheet.cell(row_number, 4, f"이미 있는 제목 {row_number}")
+        sheet.cell(row_number, 5, f"이미 있는 본문 {row_number}")
+    for row_number in range(63, 70):
+        sheet.cell(row_number, 3, TYPE_NEW_POST)
+        sheet.cell(row_number, 9, "다이어트 카페")
+    for row_number in range(94, 100):
+        sheet.cell(row_number, 3, TYPE_COMMENT)
+        sheet.cell(row_number, 5, f"이미 있는 댓글 {row_number}")
+    for row_number in range(149, 152):
+        sheet.cell(row_number, 3, TYPE_COMMENT)
+    workbook.save(path)
+
+    info = recognize_gatling_workbook(path)
+    assert info.next_row == 63
+    assert sheet.cell(31, 4).value == "이미 있는 제목 31"
+
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{QUESTION_SOURCE}",고요한아침,writer,질문형,,,,,가입인사\n',
+    )
+    _, start_row = paste_manuscripts_into_gatling(brand, path)
+    workbook = load_workbook(path)
+    sheet = workbook["마스터"]
+    assert start_row == 63
+    assert sheet.cell(31, 4).value == "이미 있는 제목 31"
+    assert sheet.cell(62, 4).value == "이미 있는 제목 62"
+    assert sheet.cell(63, 4).value == "실제 원고 제목"
+    assert sheet.cell(94, 5).value == "이미 있는 댓글 94"
+    assert sheet.cell(149, 5).value == "첫 댓글"
+
+
+def test_real_user_master_starts_at_row_sixty_three() -> None:
+    source = Path("/tmp/gatling-user/user.xlsm")
+    if not source.exists():
+        pytest.skip("사용자 기관총 파일이 없습니다")
+    path = Path("/tmp/gatling-user/user-copy.xlsm")
+    path.write_bytes(source.read_bytes())
+
+    info = recognize_gatling_workbook(path)
+    assert info.next_row == 63
+    assert "63행" in info.message
 
 
 def test_xlsb_is_recognized_but_not_writable(tmp_path: Path) -> None:

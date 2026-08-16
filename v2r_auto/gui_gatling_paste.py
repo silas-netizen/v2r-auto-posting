@@ -221,8 +221,10 @@ class GatlingPasteApp(AutomationApp):
                         (
                             "넣기 완료",
                             (
-                                f"기존 글은 그대로 두고 마스터 {start_row}행부터 "
-                                f"{len(result.rows)}줄을 이어 넣었습니다.\n"
+                                f"기존 글은 그대로 두고, 제목·본문이 비어 있던 "
+                                f"{start_row}행부터 새 글을 넣었습니다. "
+                                f"댓글·대댓글은 각 칸의 빈 내용부터 넣었습니다.\n"
+                                f"전체 {len(result.rows)}줄.\n"
                                 f"제목·본문 {counts.get('새글', 0) + counts.get('글수정', 0)} / "
                                 f"댓글 {counts.get('댓글', 0)} / "
                                 f"대댓글 {counts.get('대댓글', 0)}"
