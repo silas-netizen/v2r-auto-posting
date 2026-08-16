@@ -276,6 +276,14 @@ def _preview_values(values: list[object], limit: int = 6) -> str:
     return ", ".join(items) if items else "(비어 있음)"
 
 
+def _row_has_manuscript(values: list[object], start_column: int) -> bool:
+    """A row is used when 링크, 제목, or 내용 has text. 타입만 있는 칸은 빈 칸으로 본다."""
+    link = values[start_column - 1] if len(values) >= start_column else None
+    title = values[start_column + 1] if len(values) >= start_column + 2 else None
+    body = values[start_column + 2] if len(values) >= start_column + 3 else None
+    return any(_cell(value) for value in (link, title, body))
+
+
 def _scan_sheet_rows(
     rows: list[tuple[int, list[object]]],
 ) -> tuple[int, int, list[str], int, str]:
@@ -294,9 +302,7 @@ def _scan_sheet_rows(
             headers = [_cell(value) for value in values[start : start + len(MASTER_HEADERS)]]
             last_row = row_number
             continue
-        if headers and any(
-            _cell(value) for value in values[start_column - 1 : start_column + 3]
-        ):
+        if headers and _row_has_manuscript(values, start_column):
             last_row = row_number
     return header_row, start_column, headers, last_row, row6_preview
 
@@ -433,22 +439,50 @@ def require_writable_gatling(path: str | Path) -> GatlingFileInfo:
     return info
 
 
+def _sheet_row_has_manuscript(sheet, row_number: int, start_column: int) -> bool:
+    values: list[object] = [None] * (start_column + 3)
+    values[start_column - 1] = sheet.cell(row_number, start_column).value
+    values[start_column + 1] = sheet.cell(row_number, start_column + 2).value
+    values[start_column + 2] = sheet.cell(row_number, start_column + 3).value
+    return _row_has_manuscript(values, start_column)
+
+
+def _next_empty_master_rows(sheet, info: GatlingFileInfo, count: int) -> list[int]:
+    last_content = info.header_row
+    last_sheet_row = max(sheet.max_row or info.header_row, info.header_row)
+    for row_number in range(info.header_row + 1, last_sheet_row + 1):
+        if _sheet_row_has_manuscript(sheet, row_number, info.start_column):
+            last_content = row_number
+    found: list[int] = []
+    row_number = last_content + 1
+    while len(found) < count:
+        hidden = bool(getattr(sheet.row_dimensions[row_number], "hidden", False))
+        if not hidden and not _sheet_row_has_manuscript(
+            sheet, row_number, info.start_column
+        ):
+            found.append(row_number)
+        row_number += 1
+        if row_number > last_content + count + 5000:
+            raise GatlingPasteError("마스터에서 이어 넣을 빈 행을 찾지 못했습니다")
+    return found
+
+
 def append_master_rows(path: str | Path, rows: list[MasterRow]) -> int:
     info = require_writable_gatling(path)
     keep_vba = info.kind == "xlsm"
     workbook = load_workbook(info.path, keep_vba=keep_vba)
     try:
         sheet = workbook[info.master_sheet]
-        start_row = info.next_row
-        for offset, row in enumerate(rows):
+        target_rows = _next_empty_master_rows(sheet, info, len(rows))
+        for row_number, row in zip(target_rows, rows):
             for column, value in enumerate(row.cells(), start=info.start_column):
                 if value is None or value == "":
                     continue
-                sheet.cell(start_row + offset, column, value)
+                sheet.cell(row_number, column, value)
         workbook.save(info.path)
+        return target_rows[0]
     finally:
         workbook.close()
-    return info.next_row
 
 
 def load_gatling_brand_jobs(

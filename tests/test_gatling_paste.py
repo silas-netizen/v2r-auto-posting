@@ -412,6 +412,43 @@ def test_paste_appends_after_existing_master_rows(tmp_path: Path) -> None:
     assert sheet.cell(15, 4).value == "더 깊은 답글"
 
 
+def test_paste_continues_after_existing_content_on_column_b(tmp_path: Path) -> None:
+    path = tmp_path / "복붙용.xlsm"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "마스터"
+    for offset, header in enumerate(("링크", "타입", "제목", "내용")):
+        sheet.cell(6, 2 + offset, header)
+    for row_number in range(7, 16):
+        sheet.row_dimensions[row_number].hidden = True
+    for row_number in range(16, 31):
+        sheet.cell(row_number, 2, f"https://cafe.naver.com/cantsb/{row_number}")
+        sheet.cell(row_number, 3, "새글")
+        sheet.cell(row_number, 4, f"이미 있는 제목 {row_number}")
+        sheet.cell(row_number, 5, f"이미 있는 본문 {row_number}")
+    for row_number in range(31, 40):
+        sheet.cell(row_number, 3, "새글")
+    workbook.save(path)
+
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{QUESTION_SOURCE}",고요한아침,writer,질문형,,,,,가입인사\n',
+    )
+
+    result, start_row = paste_manuscripts_into_gatling(brand, path)
+
+    assert start_row == 31
+    workbook = load_workbook(path)
+    sheet = workbook["마스터"]
+    assert sheet.cell(16, 4).value == "이미 있는 제목 16"
+    assert sheet.cell(30, 4).value == "이미 있는 제목 30"
+    assert sheet.cell(31, 3).value == TYPE_NEW_POST
+    assert sheet.cell(31, 4).value == "실제 원고 제목"
+    assert sheet.cell(31, 5).value == "실제 원고 본문"
+    assert result.rows[0].title == "실제 원고 제목"
+
+
 def test_xlsb_is_recognized_but_not_writable(tmp_path: Path) -> None:
     source = Path("/tmp/gatling/gatling.bin")
     if not source.exists():
