@@ -220,6 +220,7 @@ class PhotoWasherController:
         try:
             from pywinauto import Desktop, mouse
             from pywinauto.application import Application
+            from pywinauto.keyboard import send_keys
             from win32api import GetSystemMetrics
             from win32con import HWND_TOP, SWP_SHOWWINDOW
             from win32gui import SetForegroundWindow, SetWindowPos
@@ -241,23 +242,25 @@ class PhotoWasherController:
             )
             window.wait("visible enabled ready", timeout=30)
 
+            self.logger.info(
+                "포토워셔 배치 폴더 열기: %s",
+                batch_dir,
+            )
             explorer_process = subprocess.Popen(
-                [
-                    "explorer.exe",
-                    f"/select,{batch_dir}",
-                ]
+                ["explorer.exe", str(batch_dir)]
             )
             desktop = Desktop(backend="uia")
-            folder_item = None
+            image_item = None
+            image_names = {path.name for path in image_paths}
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
                 for candidate in reversed(
                     desktop.windows(class_name="CabinetWClass")
                 ):
+                    matching_items = []
                     for control_type in (
                         "ListItem",
                         "DataItem",
-                        "TreeItem",
                     ):
                         try:
                             items = candidate.descendants(
@@ -265,38 +268,32 @@ class PhotoWasherController:
                             )
                         except Exception:
                             items = []
-                        folder_item = next(
-                            (
-                                item
-                                for item in items
-                                if item.window_text() == batch_dir.name
-                            ),
-                            None,
+                        matching_items.extend(
+                            item
+                            for item in items
+                            if item.window_text() in image_names
                         )
-                        if folder_item is not None:
-                            explorer_window = candidate
-                            break
-                    if folder_item is None:
+                    if not matching_items:
                         try:
                             for item in candidate.descendants():
                                 if (
-                                    item.window_text() == batch_dir.name
+                                    item.window_text() in image_names
                                     and item.rectangle().width() > 0
                                     and item.rectangle().height() > 0
                                 ):
-                                    explorer_window = candidate
-                                    folder_item = item
-                                    break
+                                    matching_items.append(item)
                         except Exception:
                             pass
-                    if folder_item is not None:
+                    if matching_items:
+                        explorer_window = candidate
+                        image_item = matching_items[0]
                         break
-                if folder_item is not None:
+                if image_item is not None:
                     break
                 time.sleep(0.25)
-            if folder_item is None or explorer_window is None:
+            if image_item is None or explorer_window is None:
                 raise PhotoWashError(
-                    "포토워셔로 드래그할 배치 폴더를 탐색기에서 찾지 못했습니다"
+                    "포토워셔 배치 폴더의 사진을 탐색기에서 찾지 못했습니다"
                 )
             main_window = window.wrapper_object()
             screen_width = GetSystemMetrics(0)
@@ -329,15 +326,18 @@ class PhotoWasherController:
                 SWP_SHOWWINDOW,
             )
             time.sleep(1)
-            if not folder_item.is_visible() or not folder_item.is_enabled():
+            if not image_item.is_visible() or not image_item.is_enabled():
                 raise PhotoWashError(
-                    "포토워셔로 드래그할 배치 폴더가 화면에서 활성화되지 않았습니다"
+                    "포토워셔로 드래그할 사진이 화면에서 활성화되지 않았습니다"
                 )
-            folder_item.click_input()
+            SetForegroundWindow(explorer_window.handle)
+            explorer_window.set_focus()
+            send_keys("^a")
+            time.sleep(0.5)
             drop_text = window.child_window(
                 title="파일 또는 폴더를 여기에 드래그하세요",
             )
-            source_rect = folder_item.rectangle()
+            source_rect = image_item.rectangle()
             source = (
                 (source_rect.left + source_rect.right) // 2,
                 (source_rect.top + source_rect.bottom) // 2,
@@ -359,8 +359,10 @@ class PhotoWasherController:
                     "포토워셔 드롭 문구 대신 창 내부 상대 위치를 사용합니다"
                 )
             self.logger.info(
-                "포토워셔 드래그 준비: 탐색기 항목 %s / 시작 %s / 대상 %s",
-                type(folder_item).__name__,
+                "포토워셔 드래그 준비: 사진 %s개 / 탐색기 항목 %s / "
+                "시작 %s / 대상 %s",
+                len(image_paths),
+                type(image_item).__name__,
                 source,
                 target,
             )
