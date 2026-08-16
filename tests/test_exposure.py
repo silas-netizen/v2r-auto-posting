@@ -12,6 +12,7 @@ from v2r_auto.exposure import (
     cafe_name_option,
     status_option,
     collect_our_cafe_hits,
+    keep_visible_cafe_hits,
     is_cafe_article_url,
     is_clustered_sub_result,
     keyword_tool_query,
@@ -54,9 +55,10 @@ class FakeResponse:
 
 
 class FakeNaver:
-    def __init__(self, search_html, post_texts=None):
+    def __init__(self, search_html, post_texts=None, visible_urls=None):
         self.search_html = search_html
         self.post_texts = post_texts or {}
+        self.visible_urls = visible_urls
         self.searched: list[str] = []
         self.opened: list[str] = []
 
@@ -65,6 +67,9 @@ class FakeNaver:
         if isinstance(self.search_html, dict):
             return self.search_html[keyword]
         return self.search_html
+
+    def visible_cafe_article_urls(self):
+        return self.visible_urls
 
     def open_post_text(self, url: str) -> str:
         self.opened.append(url)
@@ -241,6 +246,80 @@ def test_cluster_sub_post_alone_is_hidden() -> None:
     ).run([_row("남재현 다이어트")], dry_run=False)
     assert naver.opened == [main]
     assert opened[-1][0] == "밀려남"
+
+
+def test_hidden_cafe_card_is_not_kept() -> None:
+    hidden = "https://cafe.naver.com/yangmom/727928"
+    other = "https://cafe.naver.com/no1sejong/4214533"
+    html = f"""
+    <a href="https://cafe.naver.com/yangmom">양평맘</a>
+    <a href="{hidden}">치질 초기증상인데 병원 가야 할까요ㅠㅠ</a>
+    """
+    hits = collect_our_cafe_hits(html, list(DEFAULT_CAFE_NAMES))
+    assert [hit.cafe_name for hit in hits] == ["양평맘"]
+    assert keep_visible_cafe_hits(hits, [other]) == []
+    assert [hit.url for hit in keep_visible_cafe_hits(hits, [hidden])] == [hidden]
+
+
+def test_hidden_tonggeom_card_is_not_exposed() -> None:
+    hidden = "https://cafe.naver.com/yangmom/727928"
+    html = f"""
+    <a href="https://cafe.naver.com/yangmom">양평 맘`s 전원 Story</a>
+    <a href="{hidden}" style="visibility:hidden">치질 초기증상인데 병원 가야 할까요ㅠㅠ</a>
+    """
+    updated = []
+    naver = FakeNaver(
+        html,
+        {hidden: "본문에 자연방패 항문세정제 후기"},
+        visible_urls=[],
+    )
+
+    class FakeNotion:
+        def update_status(self, row, status):
+            updated.append(status)
+
+        def update_check_result(
+            self, row, *, status, cafe_name=None, search_volume=None, volume_found=False
+        ):
+            updated.append(status)
+
+    ExposureChecker(
+        FakeNotion(),
+        naver,
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    ).run([_row("치질", "노출완")], dry_run=False)
+    assert naver.opened == []
+    assert updated == ["밀려남"]
+
+
+def test_visible_tonggeom_card_is_still_exposed() -> None:
+    post = "https://cafe.naver.com/yangmom/727928"
+    html = f"""
+    <a href="https://cafe.naver.com/yangmom">양평맘</a>
+    <a href="{post}">치질 초기증상인데 병원 가야 할까요ㅠㅠ</a>
+    """
+    updated = []
+    naver = FakeNaver(
+        html,
+        {post: "본문에 자연방패 항문세정제 후기"},
+        visible_urls=[post],
+    )
+
+    class FakeNotion:
+        def update_check_result(
+            self, row, *, status, cafe_name=None, search_volume=None, volume_found=False
+        ):
+            updated.append((status, cafe_name))
+
+    ExposureChecker(
+        FakeNotion(),
+        naver,
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    ).run([_row("치질")], dry_run=False)
+    assert naver.opened == [post]
+    assert updated[-1][0] == "노출완"
 
 
 def test_same_search_query_ignores_spaces_only() -> None:

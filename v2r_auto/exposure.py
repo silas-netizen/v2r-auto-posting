@@ -447,6 +447,16 @@ def collect_our_cafe_hits(html: str, cafe_names: list[str]) -> list[CafeHit]:
     return hits
 
 
+def keep_visible_cafe_hits(
+    hits: list[CafeHit], visible_urls: list[str] | None
+) -> list[CafeHit]:
+    """통검 화면에 실제로 보이는 카페 글만 남긴다. None이면 걸러내지 않는다."""
+    if visible_urls is None:
+        return hits
+    keys = {article_dedupe_key(url) for url in visible_urls if url}
+    return [hit for hit in hits if article_dedupe_key(hit.url) in keys]
+
+
 class ExposureChecker:
     def __init__(
         self,
@@ -537,19 +547,45 @@ class ExposureChecker:
         except Exception as exc:
             self.logger.error("네이버 검색 실패 (%s): %s", keyword, exc)
             return
-        hits = collect_our_cafe_hits(html, self.cafe_names)
+        html_hits = collect_our_cafe_hits(html, self.cafe_names)
+        visible_urls = None
+        lookup_visible = getattr(self.naver, "visible_cafe_article_urls", None)
+        if callable(lookup_visible):
+            try:
+                visible_urls = lookup_visible()
+            except Exception as exc:
+                self.logger.warning("통검 화면 글 확인 실패: %s", exc)
+                visible_urls = None
+        hits = keep_visible_cafe_hits(html_hits, visible_urls)
+        if html_hits and visible_urls is not None and len(hits) < len(html_hits):
+            kept = {article_dedupe_key(hit.url) for hit in hits}
+            hidden_names = ", ".join(
+                hit.cafe_name
+                for hit in html_hits
+                if article_dedupe_key(hit.url) not in kept
+            )
+            self.logger.info(
+                "통검에 가려진 우리 카페 글은 제외합니다: %s",
+                hidden_names,
+            )
         cafe_name = ""
         status = STATUS_HIDDEN
         if not hits:
-            named = matching_cafe_name(_strip_tags(html), self.cafe_names)
-            if named:
-                self.logger.warning(
-                    "밀려남: %s / 화면에 %s 이름은 보이지만 우리 카페 글 주소를 못 찾았습니다",
+            if html_hits and visible_urls is not None:
+                self.logger.info(
+                    "밀려남: %s / 통검 화면에 우리 카페 글이 보이지 않습니다",
                     keyword,
-                    named,
                 )
             else:
-                self.logger.info("밀려남: %s / 통합검색에 우리 카페 없음", keyword)
+                named = matching_cafe_name(_strip_tags(html), self.cafe_names)
+                if named:
+                    self.logger.warning(
+                        "밀려남: %s / 화면에 %s 이름은 보이지만 우리 카페 글 주소를 못 찾았습니다",
+                        keyword,
+                        named,
+                    )
+                else:
+                    self.logger.info("밀려남: %s / 통합검색에 우리 카페 없음", keyword)
         else:
             names = ", ".join(hit.cafe_name for hit in hits)
             self.logger.info("우리 카페 글 %s건: %s", len(hits), names)
