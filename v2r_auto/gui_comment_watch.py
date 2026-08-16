@@ -49,7 +49,8 @@ class CommentWatchApp(AutomationApp):
                 "브랜드 시트에서 완료 링크가 있는 씨씨앙·양평맘 글을 확인합니다. "
                 "이전 일상 글의 카페 화면을 직접 열어, 다른 카페 회원이 댓글을 달았으면 "
                 "K열에 그 카페 글 링크를 넣습니다. V2R이 쓰거나 쓰려는 댓글은 보지 않습니다. "
-                "없으면 K열을 비웁니다."
+                "없으면 K열을 비웁니다. "
+                "네이버 로그인만 되어 있으면 됩니다. 카페 창을 열어둘 필요는 없습니다."
             ),
             wraplength=760,
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
@@ -160,7 +161,8 @@ class CommentWatchApp(AutomationApp):
                 self._set_progress(3, 3)
                 self.ui_queue.put(("info", ("확인 완료", plan.summary())))
             except CommentWatchError as exc:
-                self.ui_queue.put(("error", ("시트 열 확인", str(exc))))
+                title = "시트 열 확인" if "열을 찾지" in str(exc) else "확인 실패"
+                self.ui_queue.put(("error", (title, str(exc))))
             except Exception as exc:
                 self.logger.exception("댓글 확인 실패")
                 self.ui_queue.put(("error", ("실행 실패", str(exc))))

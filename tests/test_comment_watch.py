@@ -129,10 +129,20 @@ def test_cafe_html_ignores_v2r_written_comments() -> None:
 
 
 def test_login_wall_is_an_error() -> None:
-    html = "<html>로그인이 필요합니다. nid.naver.com</html>"
-    assert page_requires_cafe_login(html) is True
+    html = "<html>로그인이 필요합니다</html>"
+    assert page_requires_cafe_login(html, "https://nid.naver.com/nidlogin.login") is True
     with pytest.raises(CommentWatchError, match="로그인"):
-        other_member_comment_count(html)
+        other_member_comment_count(html, "https://nid.naver.com/nidlogin.login")
+
+
+def test_logged_in_cafe_page_is_not_a_login_wall() -> None:
+    html = cafe_html_with_member_comment() + (
+        '<script src="https://nid.naver.com/login/static/js/login.js"></script>'
+        "<a href='https://nid.naver.com/nidlogin.login'>로그인</a>"
+    )
+    url = "https://cafe.naver.com/f-e/cafes/22788814/articles/730069"
+    assert page_requires_cafe_login(html, url) is False
+    assert other_member_comment_count(html, url) == 1
 
 
 def test_skip_when_previous_original_is_missing() -> None:

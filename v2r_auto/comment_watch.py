@@ -29,15 +29,15 @@ OUR_COMMENT_MARKERS = (
     "chenallo",
     "colpith",
 )
-LOGIN_HINTS = (
-    "nid.naver.com",
+LOGIN_URL_HINTS = (
+    "nid.naver.com/nidlogin",
+    "nid.naver.com/login",
+)
+LOGIN_PAGE_HINTS = (
     "로그인이 필요",
     "로그인 후 이용",
     "로그인해주세요",
     "로그인 해주세요",
-    "멤버만 볼 수",
-    "카페 멤버만",
-    "가입한 회원만",
 )
 COMMENT_COUNT_PATTERNS = (
     re.compile(r'"commentCount"\s*:\s*(\d+)'),
@@ -90,16 +90,8 @@ def _find_header(headers: list[str], aliases: Iterable[str]) -> str:
     )
 
 
-def page_requires_cafe_login(html: str) -> bool:
-    text = html or ""
-    lowered = text.casefold()
-    return any(hint.casefold() in lowered for hint in LOGIN_HINTS)
-
-
 def cafe_article_ready(html: str) -> bool:
     text = html or ""
-    if page_requires_cafe_login(text):
-        return True
     return any(
         marker in text
         for marker in (
@@ -111,6 +103,17 @@ def cafe_article_ready(html: str) -> bool:
             "CommentBox",
         )
     ) or bool(re.search(r"댓글\s*\d+", text))
+
+
+def page_requires_cafe_login(html: str, url: str = "") -> bool:
+    """Only a real login page counts. Logged-in cafe HTML still mentions nid.naver.com."""
+    current = (url or "").casefold()
+    if any(hint in current for hint in LOGIN_URL_HINTS):
+        return True
+    if cafe_article_ready(html):
+        return False
+    lowered = (html or "").casefold()
+    return any(hint.casefold() in lowered for hint in LOGIN_PAGE_HINTS)
 
 
 def _visible_comment_count(html: str) -> int:
@@ -140,12 +143,13 @@ def _is_our_comment(text: str) -> bool:
     return any(marker in lowered for marker in OUR_COMMENT_MARKERS)
 
 
-def other_member_comment_count(html: str) -> int:
+def other_member_comment_count(html: str, url: str = "") -> int:
     """Count cafe comments from other members. Ignore V2R-written comments."""
-    if page_requires_cafe_login(html):
+    if page_requires_cafe_login(html, url):
         raise CommentWatchError(
-            "네이버 카페에 로그인한 뒤 다시 확인해 주세요. "
-            "로그인 준비에서 카페 창을 열어 두세요"
+            "네이버 로그인 화면이 열렸습니다. "
+            "이 프로그램 크롬에서 네이버에 로그인한 뒤 다시 확인해 주세요. "
+            "카페 창을 따로 열어둘 필요는 없습니다"
         )
     nicks = _comment_nicks(html)
     if nicks:

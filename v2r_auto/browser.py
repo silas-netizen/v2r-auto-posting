@@ -130,7 +130,8 @@ class V2RBrowser:
             self.logger.info("네이버 카페 로그인 확인 탭을 열었습니다")
         if include_cafe:
             self.logger.info(
-                "로그인 준비 창을 열었습니다. Google, V2R, 네이버 카페 로그인을 확인하세요"
+                "로그인 준비 창을 열었습니다. Google, V2R, 네이버 로그인을 확인하세요. "
+                "카페 창을 계속 열어둘 필요는 없습니다"
             )
         else:
             self.logger.info("로그인 준비 창을 열었습니다. Google과 V2R 로그인을 확인하세요")
@@ -441,13 +442,15 @@ class V2RBrowser:
             deadline = time.monotonic() + max(self.config.timeout_seconds, 20)
             while time.monotonic() < deadline:
                 last_html = self._cafe_page_html()
-                if page_requires_cafe_login(last_html):
+                current_url = self.driver.current_url
+                if page_requires_cafe_login(last_html, current_url):
                     raise CommentWatchError(
-                        "네이버 카페에 로그인한 뒤 다시 확인해 주세요. "
-                        "로그인 준비에서 카페 창을 열어 두세요"
+                        "네이버 로그인 화면이 열렸습니다. "
+                        "이 프로그램 크롬에서 네이버에 로그인한 뒤 다시 확인해 주세요. "
+                        "카페 창을 따로 열어둘 필요는 없습니다"
                     )
                 if cafe_article_ready(last_html):
-                    count = other_member_comment_count(last_html)
+                    count = other_member_comment_count(last_html, current_url)
                     self.logger.info(
                         "카페 글 %s 확인: 다른 회원 댓글 %s개",
                         article_id,
