@@ -149,6 +149,26 @@ CAFE_IFRAME_SELECTORS = (
 )
 NAVER_LOGIN_COOKIES = {"NID_AUT", "NID_SES"}
 ADS_HOME_URL = "https://ads.naver.com/"
+VISIBLE_CAFE_LINKS_JS = r"""
+const visible = (el) => {
+  if (!el) return false;
+  const r = el.getBoundingClientRect();
+  const st = window.getComputedStyle(el);
+  if (r.width < 2 || r.height < 2) return false;
+  if (st.visibility === 'hidden' || st.display === 'none' || Number(st.opacity) === 0) return false;
+  let p = el;
+  while (p && p !== document.body) {
+    const ps = window.getComputedStyle(p);
+    if (ps.display === 'none' || ps.visibility === 'hidden' || Number(ps.opacity) === 0) return false;
+    p = p.parentElement;
+  }
+  return true;
+};
+return Array.from(document.querySelectorAll('a[href*="cafe.naver.com"]'))
+  .filter(visible)
+  .map((a) => a.href || '')
+  .filter(Boolean);
+"""
 
 
 def is_naver_logged_in_cookies(cookies) -> bool:
@@ -185,6 +205,7 @@ class SeleniumNaverSearch:
         self._naver_handle: str | None = None
         self._ads_handle: str | None = None
         self._volume_unavailable = False
+        self._last_visible_cafe_urls: list[str] | None = None
 
     def _driver(self):
         self._ensure_browser()
@@ -293,7 +314,30 @@ class SeleniumNaverSearch:
         if not self._click_spacing_autocomplete(driver, query):
             box.send_keys(Keys.ENTER)
         self._wait_for_integrated_results(driver, query)
+        self._last_visible_cafe_urls = self._collect_visible_cafe_urls(driver)
         return driver.page_source
+
+    def visible_cafe_article_urls(self) -> list[str] | None:
+        return self._last_visible_cafe_urls
+
+    def _collect_visible_cafe_urls(self, driver) -> list[str] | None:
+        try:
+            hrefs = driver.execute_script(VISIBLE_CAFE_LINKS_JS) or []
+        except Exception as exc:
+            self.logger.warning("통검에서 보이는 카페 글을 가리지 못했습니다: %s", exc)
+            return None
+        urls: list[str] = []
+        seen: set[str] = set()
+        for href in hrefs:
+            text = str(href or "").strip()
+            if not text:
+                continue
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            urls.append(text)
+        return urls
 
     def lookup_search_volume(self, keyword: str) -> int | None:
         if self._volume_unavailable:
