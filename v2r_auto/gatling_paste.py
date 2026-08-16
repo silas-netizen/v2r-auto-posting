@@ -58,6 +58,9 @@ TYPE_NEW_POST = "새글"
 TYPE_EDIT_POST = "글수정"
 TYPE_COMMENT = "댓글"
 TYPE_REPLY = "대댓글"
+TYPE_DELAY = "딜레이"
+ARTICLE_TYPES = {TYPE_NEW_POST, TYPE_EDIT_POST}
+COMMENT_BLOCK_TYPES = {TYPE_COMMENT, TYPE_REPLY}
 COMMENT_ALLOWED = "허용"
 REQUIRED_MASTER_HEADERS = MASTER_HEADERS[:4]
 WRITABLE_KINDS = {"xlsx", "xlsm"}
@@ -167,9 +170,12 @@ class GatlingFileInfo:
     header_row: int = MASTER_HEADER_ROW
     start_column: int = 1
     row6_preview: str = ""
+    next_article_row: int = 0
 
     @property
     def next_row(self) -> int:
+        if self.next_article_row:
+            return self.next_article_row
         return max(self.last_data_row + 1, self.header_row + 1)
 
 
@@ -276,22 +282,55 @@ def _preview_values(values: list[object], limit: int = 6) -> str:
     return ", ".join(items) if items else "(비어 있음)"
 
 
+def _column_value(values: list[object], start_column: int, offset: int) -> object:
+    index = start_column - 1 + offset
+    if index < 0 or index >= len(values):
+        return None
+    return values[index]
+
+
+def _row_type(values: list[object], start_column: int) -> str:
+    return _cell(_column_value(values, start_column, 1))
+
+
+def _row_has_title_or_body(values: list[object], start_column: int) -> bool:
+    title = _column_value(values, start_column, 2)
+    body = _column_value(values, start_column, 3)
+    return any(_cell(value) for value in (title, body))
+
+
 def _row_has_manuscript(values: list[object], start_column: int) -> bool:
     """A row is used when 링크, 제목, or 내용 has text. 타입만 있는 칸은 빈 칸으로 본다."""
-    link = values[start_column - 1] if len(values) >= start_column else None
-    title = values[start_column + 1] if len(values) >= start_column + 2 else None
-    body = values[start_column + 2] if len(values) >= start_column + 3 else None
-    return any(_cell(value) for value in (link, title, body))
+    link = _column_value(values, start_column, 0)
+    return bool(_cell(link)) or _row_has_title_or_body(values, start_column)
+
+
+def _is_empty_article_values(
+    values: list[object],
+    start_column: int,
+    comment_block_started: bool,
+) -> bool:
+    """Empty 새글/글수정 slot. 댓글·대댓글 구간과 딜레이 행은 빼고, 제목·본문이 없어야 한다."""
+    typ = _row_type(values, start_column)
+    if typ in {TYPE_DELAY, *COMMENT_BLOCK_TYPES}:
+        return False
+    if _row_has_title_or_body(values, start_column):
+        return False
+    if typ in ARTICLE_TYPES:
+        return True
+    return typ == "" and not comment_block_started
 
 
 def _scan_sheet_rows(
     rows: list[tuple[int, list[object]]],
-) -> tuple[int, int, list[str], int, str]:
+) -> tuple[int, int, list[str], int, str, int]:
     header_row = 0
     start_column = 1
     headers: list[str] = []
     last_row = 0
     row6_preview = ""
+    next_article_row = 0
+    comment_block_started = False
     for row_number, values in rows:
         if row_number == MASTER_HEADER_ROW:
             row6_preview = _preview_values(values)
@@ -302,33 +341,58 @@ def _scan_sheet_rows(
             headers = [_cell(value) for value in values[start : start + len(MASTER_HEADERS)]]
             last_row = row_number
             continue
-        if headers and _row_has_manuscript(values, start_column):
+        if not headers:
+            continue
+        typ = _row_type(values, start_column)
+        if typ in COMMENT_BLOCK_TYPES:
+            comment_block_started = True
+        if _row_has_manuscript(values, start_column):
             last_row = row_number
-    return header_row, start_column, headers, last_row, row6_preview
+        if not next_article_row and _is_empty_article_values(
+            values, start_column, comment_block_started
+        ):
+            next_article_row = row_number
+    return header_row, start_column, headers, last_row, row6_preview, next_article_row
 
 
 def _xlsx_master_preview(
     path: Path,
-) -> tuple[list[str], str, int, int, list[str], int, str]:
+) -> tuple[list[str], str, int, int, list[str], int, str, int]:
     workbook = load_workbook(path, read_only=True, data_only=False)
     try:
         names = list(workbook.sheetnames)
         sheet_name = _choose_master_sheet(names)
         if not sheet_name:
-            return names, "", 0, 1, [], 0, ""
+            return names, "", 0, 1, [], 0, "", 0
         sheet = workbook[sheet_name]
         rows: list[tuple[int, list[object]]] = []
         for row_number, row in enumerate(sheet.iter_rows(min_row=1, max_col=30), start=1):
             rows.append((row_number, [cell.value for cell in row]))
-        header_row, start_column, headers, last_row, row6_preview = _scan_sheet_rows(rows)
-        return names, sheet_name, header_row, start_column, headers, last_row, row6_preview
+        (
+            header_row,
+            start_column,
+            headers,
+            last_row,
+            row6_preview,
+            next_article_row,
+        ) = _scan_sheet_rows(rows)
+        return (
+            names,
+            sheet_name,
+            header_row,
+            start_column,
+            headers,
+            last_row,
+            row6_preview,
+            next_article_row,
+        )
     finally:
         workbook.close()
 
 
 def _xlsb_master_preview(
     path: Path,
-) -> tuple[list[str], str, int, int, list[str], int, str]:
+) -> tuple[list[str], str, int, int, list[str], int, str, int]:
     try:
         from pyxlsb import open_workbook
     except ImportError as exc:
@@ -340,15 +404,31 @@ def _xlsb_master_preview(
         names = list(workbook.sheets)
         sheet_name = _choose_master_sheet(names)
         if not sheet_name:
-            return names, "", 0, 1, [], 0, ""
+            return names, "", 0, 1, [], 0, "", 0
         rows: list[tuple[int, list[object]]] = []
         with workbook.get_sheet(sheet_name) as sheet:
             for row_number, row in enumerate(sheet.rows(), start=1):
                 values = [cell.v for cell in row]
                 cells = values[1:] if values and values[0] is None else values
                 rows.append((row_number, cells))
-        header_row, start_column, headers, last_row, row6_preview = _scan_sheet_rows(rows)
-        return names, sheet_name, header_row, start_column, headers, last_row, row6_preview
+        (
+            header_row,
+            start_column,
+            headers,
+            last_row,
+            row6_preview,
+            next_article_row,
+        ) = _scan_sheet_rows(rows)
+        return (
+            names,
+            sheet_name,
+            header_row,
+            start_column,
+            headers,
+            last_row,
+            row6_preview,
+            next_article_row,
+        )
 
 
 def recognize_gatling_workbook(path: str | Path) -> GatlingFileInfo:
@@ -372,6 +452,7 @@ def recognize_gatling_workbook(path: str | Path) -> GatlingFileInfo:
             headers,
             last_data_row,
             row6_preview,
+            next_article_row,
         ) = _xlsb_master_preview(file_path)
     else:
         try:
@@ -383,6 +464,7 @@ def recognize_gatling_workbook(path: str | Path) -> GatlingFileInfo:
                 headers,
                 last_data_row,
                 row6_preview,
+                next_article_row,
             ) = _xlsx_master_preview(file_path)
         except Exception as exc:
             raise GatlingPasteError(
@@ -391,6 +473,9 @@ def recognize_gatling_workbook(path: str | Path) -> GatlingFileInfo:
 
     recognized = bool(master_sheet and headers)
     writable = recognized and kind in WRITABLE_KINDS
+    resolved_header = header_row or MASTER_HEADER_ROW
+    resolved_last = last_data_row or resolved_header
+    resolved_next_article = next_article_row or (resolved_last + 1)
     if not master_sheet:
         message = (
             "이 파일에는 '마스터' 시트가 없어 기관총 엑셀로 보지 않습니다. "
@@ -405,13 +490,14 @@ def recognize_gatling_workbook(path: str | Path) -> GatlingFileInfo:
         )
     elif kind == "xlsb":
         message = (
-            f"기관총 파일로 확인했습니다. 마스터에 이미 {last_data_row}행까지 있습니다. "
-            + XLSB_WRITE_MESSAGE
+            f"기관총 파일로 확인했습니다. 제목·본문이 비어 있는 칸은 "
+            f"{resolved_next_article}행입니다. " + XLSB_WRITE_MESSAGE
         )
     else:
         message = (
-            f"기관총 파일로 확인했습니다. 마스터 {last_data_row}행 다음에 "
-            "제목·본문·댓글을 이어 넣습니다"
+            f"기관총 파일로 확인했습니다. 제목·본문이 비어 있는 "
+            f"{resolved_next_article}행부터 새 글을 넣고, "
+            "댓글·대댓글은 내용이 비어 있는 칸부터 넣습니다"
         )
 
     return GatlingFileInfo(
@@ -419,14 +505,15 @@ def recognize_gatling_workbook(path: str | Path) -> GatlingFileInfo:
         kind=kind,
         sheet_names=sheet_names,
         headers=headers,
-        last_data_row=last_data_row or header_row,
+        last_data_row=resolved_last,
         recognized=recognized,
         writable=writable,
         message=message,
         master_sheet=master_sheet or MASTER_SHEET_NAME,
-        header_row=header_row or MASTER_HEADER_ROW,
+        header_row=resolved_header,
         start_column=start_column,
         row6_preview=row6_preview,
+        next_article_row=resolved_next_article,
     )
 
 
@@ -439,32 +526,77 @@ def require_writable_gatling(path: str | Path) -> GatlingFileInfo:
     return info
 
 
-def _sheet_row_has_manuscript(sheet, row_number: int, start_column: int) -> bool:
+def _sheet_row_values(sheet, row_number: int, start_column: int) -> list[object]:
     values: list[object] = [None] * (start_column + 3)
     values[start_column - 1] = sheet.cell(row_number, start_column).value
+    values[start_column] = sheet.cell(row_number, start_column + 1).value
     values[start_column + 1] = sheet.cell(row_number, start_column + 2).value
     values[start_column + 2] = sheet.cell(row_number, start_column + 3).value
-    return _row_has_manuscript(values, start_column)
+    return values
 
 
-def _next_empty_master_rows(sheet, info: GatlingFileInfo, count: int) -> list[int]:
-    last_content = info.header_row
+def _sheet_row_has_title_or_body(sheet, row_number: int, start_column: int) -> bool:
+    return _row_has_title_or_body(_sheet_row_values(sheet, row_number, start_column), start_column)
+
+
+def _collect_empty_type_slots(
+    sheet, info: GatlingFileInfo
+) -> tuple[list[int], list[int], list[int]]:
     last_sheet_row = max(sheet.max_row or info.header_row, info.header_row)
+    article_slots: list[int] = []
+    comment_slots: list[int] = []
+    reply_slots: list[int] = []
+    comment_block_started = False
     for row_number in range(info.header_row + 1, last_sheet_row + 1):
-        if _sheet_row_has_manuscript(sheet, row_number, info.start_column):
-            last_content = row_number
-    found: list[int] = []
-    row_number = last_content + 1
-    while len(found) < count:
-        hidden = bool(getattr(sheet.row_dimensions[row_number], "hidden", False))
-        if not hidden and not _sheet_row_has_manuscript(
-            sheet, row_number, info.start_column
+        values = _sheet_row_values(sheet, row_number, info.start_column)
+        typ = _row_type(values, info.start_column)
+        if typ in COMMENT_BLOCK_TYPES:
+            comment_block_started = True
+        if typ == TYPE_COMMENT and not _row_has_title_or_body(values, info.start_column):
+            comment_slots.append(row_number)
+        elif typ == TYPE_REPLY and not _row_has_title_or_body(values, info.start_column):
+            reply_slots.append(row_number)
+        elif _is_empty_article_values(values, info.start_column, comment_block_started):
+            article_slots.append(row_number)
+    return article_slots, comment_slots, reply_slots
+
+
+def _target_rows_for_paste(
+    sheet, info: GatlingFileInfo, rows: list[MasterRow]
+) -> list[int]:
+    """Put 새글/글수정 in empty title/body slots, comments in empty 내용 slots of that type."""
+    article_slots, comment_slots, reply_slots = _collect_empty_type_slots(sheet, info)
+    used: set[int] = set()
+    append_at = max(sheet.max_row or info.header_row, info.header_row) + 1
+    targets: list[int] = []
+
+    def take(pool: list[int]) -> int:
+        nonlocal append_at
+        for row_number in pool:
+            if row_number not in used:
+                used.add(row_number)
+                return row_number
+        while append_at in used or _sheet_row_has_title_or_body(
+            sheet, append_at, info.start_column
         ):
-            found.append(row_number)
-        row_number += 1
-        if row_number > last_content + count + 5000:
-            raise GatlingPasteError("마스터에서 이어 넣을 빈 행을 찾지 못했습니다")
-    return found
+            append_at += 1
+            if append_at > info.header_row + 20000:
+                raise GatlingPasteError("마스터에서 이어 넣을 빈 행을 찾지 못했습니다")
+        chosen = append_at
+        used.add(chosen)
+        append_at += 1
+        return chosen
+
+    for row in rows:
+        if row.type in ARTICLE_TYPES:
+            targets.append(take(article_slots))
+        elif row.type == TYPE_COMMENT:
+            targets.append(take(comment_slots))
+        elif row.type == TYPE_REPLY:
+            targets.append(take(reply_slots))
+        else:
+            targets.append(take([]))
+    return targets
 
 
 def append_master_rows(path: str | Path, rows: list[MasterRow]) -> int:
@@ -473,7 +605,7 @@ def append_master_rows(path: str | Path, rows: list[MasterRow]) -> int:
     workbook = load_workbook(info.path, keep_vba=keep_vba)
     try:
         sheet = workbook[info.master_sheet]
-        target_rows = _next_empty_master_rows(sheet, info, len(rows))
+        target_rows = _target_rows_for_paste(sheet, info, rows)
         for row_number, row in zip(target_rows, rows):
             for column, value in enumerate(row.cells(), start=info.start_column):
                 if value is None or value == "":
