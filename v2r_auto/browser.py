@@ -61,6 +61,7 @@ class V2RBrowser:
         self.driver: webdriver.Chrome | None = None
         self.v2r_handle: str | None = None
         self.google_handle: str | None = None
+        self.cafe_handle: str | None = None
         self._api_capture_active = False
         self._affiliate_publisher = None
         self._immediate_publisher = None
@@ -99,6 +100,7 @@ class V2RBrowser:
             self.driver = None
             self.v2r_handle = None
             self.google_handle = None
+            self.cafe_handle = None
             self._api_capture_active = False
             self._affiliate_publisher = None
             self._immediate_publisher = None
@@ -109,7 +111,7 @@ class V2RBrowser:
             raise AutomationError("브라우저가 시작되지 않았습니다")
         return WebDriverWait(self.driver, self.config.timeout_seconds)
 
-    def open_login_window(self, sheet_url: str = "") -> None:
+    def open_login_window(self, sheet_url: str = "", *, include_cafe: bool = False) -> None:
         self.start()
         assert self.driver
         self._navigate(V2R_LIST_URL, self.v2r_handle)
@@ -119,7 +121,19 @@ class V2RBrowser:
             self.google_handle = self.driver.current_window_handle
             self._navigate(sheet_url, self.google_handle)
             self.logger.info("Google Sheets 로그인 확인 탭을 열었습니다")
-        self.logger.info("로그인 준비 창을 열었습니다. Google과 V2R 로그인을 확인하세요")
+        if include_cafe:
+            from .comment_watch import CAFE_HOME_URL
+
+            self.driver.switch_to.new_window("tab")
+            self.cafe_handle = self.driver.current_window_handle
+            self._navigate(CAFE_HOME_URL, self.cafe_handle)
+            self.logger.info("네이버 카페 로그인 확인 탭을 열었습니다")
+        if include_cafe:
+            self.logger.info(
+                "로그인 준비 창을 열었습니다. Google, V2R, 네이버 카페 로그인을 확인하세요"
+            )
+        else:
+            self.logger.info("로그인 준비 창을 열었습니다. Google과 V2R 로그인을 확인하세요")
 
     def _switch_to_handle(self, preferred: str | None = None) -> None:
         assert self.driver
@@ -379,6 +393,71 @@ class V2RBrowser:
             "GET",
             "/naver_cafe_articles/article",
             query={"source_id": source_id},
+        )
+
+    def _ensure_cafe_tab(self) -> None:
+        self.start()
+        assert self.driver
+        if self.cafe_handle and self.cafe_handle in self.driver.window_handles:
+            return
+        self.driver.switch_to.new_window("tab")
+        self.cafe_handle = self.driver.current_window_handle
+
+    def _cafe_page_html(self) -> str:
+        assert self.driver
+        self.driver.switch_to.default_content()
+        parts = [self.driver.page_source]
+        frames = list(self.driver.find_elements(By.TAG_NAME, "iframe"))
+        for frame in frames:
+            try:
+                self.driver.switch_to.default_content()
+                self.driver.switch_to.frame(frame)
+                parts.append(self.driver.page_source)
+            except Exception:
+                pass
+            finally:
+                self.driver.switch_to.default_content()
+        return "\n".join(parts)
+
+    def check_cafe_article_comments(self, cafe_id: int, article_id: int) -> int:
+        from .comment_watch import (
+            CommentWatchError,
+            cafe_article_fallback_url,
+            cafe_article_ready,
+            cafe_article_url,
+            other_member_comment_count,
+            page_requires_cafe_login,
+        )
+
+        self._ensure_cafe_tab()
+        assert self.driver
+        urls = (
+            cafe_article_url(cafe_id, article_id),
+            cafe_article_fallback_url(cafe_id, article_id),
+        )
+        last_html = ""
+        for url in urls:
+            self._navigate(url, self.cafe_handle)
+            deadline = time.monotonic() + max(self.config.timeout_seconds, 20)
+            while time.monotonic() < deadline:
+                last_html = self._cafe_page_html()
+                if page_requires_cafe_login(last_html):
+                    raise CommentWatchError(
+                        "네이버 카페에 로그인한 뒤 다시 확인해 주세요. "
+                        "로그인 준비에서 카페 창을 열어 두세요"
+                    )
+                if cafe_article_ready(last_html):
+                    count = other_member_comment_count(last_html)
+                    self.logger.info(
+                        "카페 글 %s 확인: 다른 회원 댓글 %s개",
+                        article_id,
+                        count,
+                    )
+                    time.sleep(1)
+                    return count
+                time.sleep(0.8)
+        raise CommentWatchError(
+            f"카페 글 {article_id}을 열지 못했습니다. 네이버 로그인과 카페 가입을 확인해 주세요"
         )
 
     def write_comment_marks(self, sheet_url: str, plan) -> None:

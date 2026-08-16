@@ -20,6 +20,39 @@ DEFAULT_SHEET_URL = (
     "1J8Nq-UQxLzrt3fOqIkZ2HRskZJTFQlOjmFjIh3wlzBs/"
     "edit?gid=0#gid=0"
 )
+CAFE_HOME_URL = "https://cafe.naver.com"
+OUR_COMMENT_MARKERS = (
+    "quilliant",
+    "hunnede",
+    "prtchht",
+    "chocobbn",
+    "chenallo",
+    "colpith",
+)
+LOGIN_HINTS = (
+    "nid.naver.com",
+    "로그인이 필요",
+    "로그인 후 이용",
+    "로그인해주세요",
+    "로그인 해주세요",
+    "멤버만 볼 수",
+    "카페 멤버만",
+    "가입한 회원만",
+)
+COMMENT_COUNT_PATTERNS = (
+    re.compile(r'"commentCount"\s*:\s*(\d+)'),
+    re.compile(r'"comment_count"\s*:\s*(\d+)'),
+    re.compile(r"댓글\s*<[^>]*>\s*(\d+)"),
+    re.compile(r"댓글\s*(\d+)"),
+)
+COMMENT_NICK_PATTERN = re.compile(
+    r'class="[^"]*(?:nickname|nick_name|comment_nickname)[^"]*"[^>]*>([^<]+)',
+    re.IGNORECASE,
+)
+COMMENT_ITEM_PATTERN = re.compile(
+    r'class="[^"]*(?:comment_item|CommentItem|comment_box|box_cmt)[^"]*"',
+    re.IGNORECASE,
+)
 
 
 class CommentWatchError(ValueError):
@@ -34,18 +67,14 @@ def source_id_from_url(url: str) -> str:
 
 
 def cafe_article_url(cafe_id: int | str, article_id: int | str) -> str:
+    return f"https://cafe.naver.com/f-e/cafes/{cafe_id}/articles/{article_id}"
+
+
+def cafe_article_fallback_url(cafe_id: int | str, article_id: int | str) -> str:
     return (
         "https://cafe.naver.com/ArticleRead.nhn"
         f"?clubid={cafe_id}&articleid={article_id}"
     )
-
-
-def extra_comment_count(history: dict[str, Any] | None) -> int:
-    if not history:
-        return 0
-    real = int(history.get("real_comment_count") or 0)
-    written = int(history.get("write_comment_count") or 0)
-    return max(0, real - written)
 
 
 def _find_header(headers: list[str], aliases: Iterable[str]) -> str:
@@ -61,6 +90,72 @@ def _find_header(headers: list[str], aliases: Iterable[str]) -> str:
     )
 
 
+def page_requires_cafe_login(html: str) -> bool:
+    text = html or ""
+    lowered = text.casefold()
+    return any(hint.casefold() in lowered for hint in LOGIN_HINTS)
+
+
+def cafe_article_ready(html: str) -> bool:
+    text = html or ""
+    if page_requires_cafe_login(text):
+        return True
+    return any(
+        marker in text
+        for marker in (
+            "commentCount",
+            "comment_count",
+            "se-main-container",
+            "article_container",
+            "comment_list",
+            "CommentBox",
+        )
+    ) or bool(re.search(r"댓글\s*\d+", text))
+
+
+def _visible_comment_count(html: str) -> int:
+    counts: list[int] = []
+    for pattern in COMMENT_COUNT_PATTERNS:
+        for match in pattern.finditer(html or ""):
+            nearby = (html or "")[max(0, match.start() - 12) : match.start()]
+            if "비허용" in nearby:
+                continue
+            counts.append(int(match.group(1)))
+    return max(counts) if counts else 0
+
+
+def _comment_nicks(html: str) -> list[str]:
+    nicks: list[str] = []
+    for match in COMMENT_NICK_PATTERN.finditer(html or ""):
+        nick = re.sub(r"\s+", " ", match.group(1)).strip()
+        if nick:
+            nicks.append(nick)
+    return nicks
+
+
+def _is_our_comment(text: str) -> bool:
+    lowered = (text or "").casefold()
+    if "v2r" in lowered:
+        return True
+    return any(marker in lowered for marker in OUR_COMMENT_MARKERS)
+
+
+def other_member_comment_count(html: str) -> int:
+    """Count cafe comments from other members. Ignore V2R-written comments."""
+    if page_requires_cafe_login(html):
+        raise CommentWatchError(
+            "네이버 카페에 로그인한 뒤 다시 확인해 주세요. "
+            "로그인 준비에서 카페 창을 열어 두세요"
+        )
+    nicks = _comment_nicks(html)
+    if nicks:
+        return sum(1 for nick in nicks if not _is_our_comment(nick))
+    items = COMMENT_ITEM_PATTERN.findall(html or "")
+    if items:
+        return len(items)
+    return _visible_comment_count(html)
+
+
 @dataclass(frozen=True, slots=True)
 class ArticleView:
     source_id: str
@@ -68,7 +163,6 @@ class ArticleView:
     dest_status: str
     cafe_id: int | None
     article_id: int | None
-    extra_comments: int
     title: str = ""
 
 
@@ -87,7 +181,6 @@ def parse_article_view(payload: dict[str, Any]) -> ArticleView:
         dest_status=str(dest.get("status") or "").upper(),
         cafe_id=int(cafe_id) if cafe_id not in (None, "") else None,
         article_id=int(article_id) if article_id not in (None, "") else None,
-        extra_comments=extra_comment_count(history),
         title=str(source.get("title") or dest.get("title") or ""),
     )
 
@@ -97,10 +190,12 @@ class WatchDecision:
     action: str
     cafe_url: str
     reason: str
+    cafe_id: int | None = None
+    article_id: int | None = None
 
 
 def decide_row(revision: ArticleView, parent: ArticleView | None = None) -> WatchDecision:
-    """Decide the K-column value for one F-column V2R revision link."""
+    """Decide whether this revision's daily cafe post should be opened."""
     if not revision.parent_source_id:
         return WatchDecision("skip", "", "이전 원본글 없음")
     if revision.dest_status in PUBLISHED_STATUSES:
@@ -109,23 +204,49 @@ def decide_row(revision: ArticleView, parent: ArticleView | None = None) -> Watc
         return WatchDecision("need_parent", "", "원본글을 더 확인해야 함")
     article_id = parent.article_id or revision.article_id
     cafe_id = parent.cafe_id or revision.cafe_id
-    if parent.extra_comments > 0 and article_id and cafe_id:
+    if not article_id or not cafe_id:
+        return WatchDecision("skip", "", "카페 글 번호를 찾지 못함")
+    return WatchDecision(
+        "open_cafe",
+        cafe_article_url(cafe_id, article_id),
+        "카페에서 다른 회원 댓글을 확인해야 함",
+        cafe_id=cafe_id,
+        article_id=article_id,
+    )
+
+
+def apply_cafe_result(decision: WatchDecision, other_count: int) -> WatchDecision:
+    if decision.action != "open_cafe":
+        return decision
+    if other_count > 0:
         return WatchDecision(
             "mark",
-            cafe_article_url(cafe_id, article_id),
-            f"일상 글에 다른 댓글 {parent.extra_comments}개",
+            decision.cafe_url,
+            f"카페에서 다른 회원 댓글 {other_count}개",
+            cafe_id=decision.cafe_id,
+            article_id=decision.article_id,
         )
-    return WatchDecision("clear", "", "일상 글에 다른 댓글 없음")
+    return WatchDecision(
+        "clear",
+        "",
+        "카페에서 다른 회원 댓글 없음",
+        cafe_id=decision.cafe_id,
+        article_id=decision.article_id,
+    )
 
 
 def inspect_rows(
     rows: list[dict[str, str]],
     fetch_article: Callable[[str], dict[str, Any]],
+    check_cafe_comments: Callable[[int, int], int],
+    should_stop: Callable[[], bool] | None = None,
 ) -> list[dict[str, str]]:
-    """Fill K-column values using V2R article API responses."""
+    """Fill K-column values by opening the daily cafe post."""
     updated: list[dict[str, str]] = []
     parent_cache: dict[str, ArticleView] = {}
     for row in rows:
+        if should_stop and should_stop():
+            raise CommentWatchError("확인을 중지했습니다")
         item = dict(row)
         mark_header = item["__mark_header"]
         item[mark_header] = ""
@@ -139,6 +260,9 @@ def inspect_rows(
             if parent_id not in parent_cache:
                 parent_cache[parent_id] = parse_article_view(fetch_article(parent_id))
             decision = decide_row(revision, parent_cache[parent_id])
+        if decision.action == "open_cafe" and decision.cafe_id and decision.article_id:
+            other_count = check_cafe_comments(decision.cafe_id, decision.article_id)
+            decision = apply_cafe_result(decision, other_count)
         item[mark_header] = decision.cafe_url
         item["__action"] = decision.action
         item["__reason"] = decision.reason
@@ -182,7 +306,7 @@ class CommentWatchPlan:
         return "\n".join(
             [
                 f"완료 링크 {self.checked_count()}개 확인",
-                f"댓글 있어 카페 링크 {self.mark_count()}개",
+                f"다른 회원 댓글 있어 카페 링크 {self.mark_count()}개",
                 f"건너뜀 {self.skip_count()}개",
                 "K열만 바꿉니다. 완료 링크와 다른 열은 건드리지 않습니다.",
             ]
@@ -229,9 +353,16 @@ def build_plan(
     headers: list[str],
     rows: list[dict[str, str]],
     fetch_article: Callable[[str], dict[str, Any]],
+    check_cafe_comments: Callable[[int, int], int],
+    should_stop: Callable[[], bool] | None = None,
 ) -> CommentWatchPlan:
     mark_header = _find_header(headers, MARK_HEADERS)
-    inspected = inspect_rows(rows, fetch_article)
+    inspected = inspect_rows(
+        rows,
+        fetch_article,
+        check_cafe_comments,
+        should_stop=should_stop,
+    )
     return CommentWatchPlan(headers=headers, mark_header=mark_header, rows=inspected)
 
 

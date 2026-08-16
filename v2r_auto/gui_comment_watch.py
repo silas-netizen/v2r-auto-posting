@@ -47,8 +47,9 @@ class CommentWatchApp(AutomationApp):
             outer,
             text=(
                 "브랜드 시트에서 완료 링크가 있는 씨씨앙·양평맘 글을 확인합니다. "
-                "이전 원본글이 있고 아직 수정 전이며, 일상 글에 다른 사람 댓글이 있으면 "
-                "K열에 카페 글 링크를 넣습니다. 없으면 K열을 비웁니다."
+                "이전 일상 글의 카페 화면을 직접 열어, 다른 카페 회원이 댓글을 달았으면 "
+                "K열에 그 카페 글 링크를 넣습니다. V2R이 쓰거나 쓰려는 댓글은 보지 않습니다. "
+                "없으면 K열을 비웁니다."
             ),
             wraplength=760,
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
@@ -96,7 +97,9 @@ class CommentWatchApp(AutomationApp):
 
     def _open_login(self) -> None:
         sheet_url = self.sheet_url.get().strip()
-        self._run_background(lambda: self.browser.open_login_window(sheet_url))
+        self._run_background(
+            lambda: self.browser.open_login_window(sheet_url, include_cafe=True)
+        )
 
     def _start(self) -> None:
         if self.worker and not self.worker.done():
@@ -110,7 +113,8 @@ class CommentWatchApp(AutomationApp):
             confirmed = messagebox.askyesno(
                 "시트에 쓰기",
                 "K열(일상 글에 댓글)만 바꿉니다.\n"
-                "댓글이 있는 행에는 카페 링크를 넣고, 없는 행은 비웁니다.\n계속할까요?",
+                "카페에서 다른 회원 댓글이 있는 행에는 카페 링크를 넣고, "
+                "없는 행은 비웁니다.\n계속할까요?",
             )
             if not confirmed:
                 return
@@ -127,8 +131,14 @@ class CommentWatchApp(AutomationApp):
                 self._set_progress(1, 3)
                 if self.stop_event.is_set():
                     return
-                self.logger.info("V2R에서 원본글과 댓글을 확인합니다")
-                plan = build_plan(headers, rows, self.browser.fetch_v2r_article)
+                self.logger.info("카페를 열어 다른 회원 댓글을 확인합니다")
+                plan = build_plan(
+                    headers,
+                    rows,
+                    self.browser.fetch_v2r_article,
+                    self.browser.check_cafe_article_comments,
+                    should_stop=self.stop_event.is_set,
+                )
                 for row in plan.rows:
                     if not row.get("__source_id"):
                         continue
