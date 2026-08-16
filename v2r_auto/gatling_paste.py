@@ -163,10 +163,14 @@ class GatlingFileInfo:
     recognized: bool
     writable: bool
     message: str
+    master_sheet: str = MASTER_SHEET_NAME
+    header_row: int = MASTER_HEADER_ROW
+    start_column: int = 1
+    row6_preview: str = ""
 
     @property
     def next_row(self) -> int:
-        return max(self.last_data_row + 1, MASTER_HEADER_ROW + 1)
+        return max(self.last_data_row + 1, self.header_row + 1)
 
 
 def is_affiliate_cafe(cafe: str) -> bool:
@@ -248,36 +252,77 @@ def workbook_kind(path: str | Path) -> str:
 
 
 def is_master_header_row(values: list[object]) -> bool:
-    cleaned = [_cell(value) for value in values[: len(REQUIRED_MASTER_HEADERS)]]
-    return cleaned == list(REQUIRED_MASTER_HEADERS)
+    return find_header_start(_cell(value) for value in values) is not None
 
 
-def _xlsx_master_preview(path: Path) -> tuple[list[str], list[str], int]:
+def find_header_start(values) -> int | None:
+    cleaned = [_cell(value) for value in values]
+    wanted = list(REQUIRED_MASTER_HEADERS)
+    for start, _value in enumerate(cleaned):
+        if cleaned[start : start + len(wanted)] == wanted:
+            return start
+    return None
+
+
+def _choose_master_sheet(sheet_names: list[str]) -> str:
+    for name in sheet_names:
+        if _cell(name) == MASTER_SHEET_NAME:
+            return name
+    return ""
+
+
+def _preview_values(values: list[object], limit: int = 6) -> str:
+    items = [_cell(value) or "(빈칸)" for value in values[:limit]]
+    return ", ".join(items) if items else "(비어 있음)"
+
+
+def _scan_sheet_rows(
+    rows: list[tuple[int, list[object]]],
+) -> tuple[int, int, list[str], int, str]:
+    header_row = 0
+    start_column = 1
+    headers: list[str] = []
+    last_row = 0
+    row6_preview = ""
+    for row_number, values in rows:
+        if row_number == MASTER_HEADER_ROW:
+            row6_preview = _preview_values(values)
+        start = find_header_start(values)
+        if start is not None and not headers:
+            header_row = row_number
+            start_column = start + 1
+            headers = [_cell(value) for value in values[start : start + len(MASTER_HEADERS)]]
+            last_row = row_number
+            continue
+        if headers and any(
+            _cell(value) for value in values[start_column - 1 : start_column + 3]
+        ):
+            last_row = row_number
+    return header_row, start_column, headers, last_row, row6_preview
+
+
+def _xlsx_master_preview(
+    path: Path,
+) -> tuple[list[str], str, int, int, list[str], int, str]:
     workbook = load_workbook(path, read_only=True, data_only=False)
     try:
         names = list(workbook.sheetnames)
-        if MASTER_SHEET_NAME not in workbook.sheetnames:
-            return names, [], MASTER_HEADER_ROW
-        sheet = workbook[MASTER_SHEET_NAME]
-        headers: list[str] = []
-        last_row = MASTER_HEADER_ROW
-        for row_number, row in enumerate(
-            sheet.iter_rows(min_row=1, max_col=len(MASTER_HEADERS)),
-            start=1,
-        ):
-            values = [cell.value for cell in row]
-            if row_number == MASTER_HEADER_ROW:
-                headers = [_cell(value) for value in values]
-            elif row_number > MASTER_HEADER_ROW and any(
-                _cell(value) for value in values[:4]
-            ):
-                last_row = row_number
-        return names, headers, last_row
+        sheet_name = _choose_master_sheet(names)
+        if not sheet_name:
+            return names, "", 0, 1, [], 0, ""
+        sheet = workbook[sheet_name]
+        rows: list[tuple[int, list[object]]] = []
+        for row_number, row in enumerate(sheet.iter_rows(min_row=1, max_col=30), start=1):
+            rows.append((row_number, [cell.value for cell in row]))
+        header_row, start_column, headers, last_row, row6_preview = _scan_sheet_rows(rows)
+        return names, sheet_name, header_row, start_column, headers, last_row, row6_preview
     finally:
         workbook.close()
 
 
-def _xlsb_master_preview(path: Path) -> tuple[list[str], list[str], int]:
+def _xlsb_master_preview(
+    path: Path,
+) -> tuple[list[str], str, int, int, list[str], int, str]:
     try:
         from pyxlsb import open_workbook
     except ImportError as exc:
@@ -287,26 +332,21 @@ def _xlsb_master_preview(path: Path) -> tuple[list[str], list[str], int]:
 
     with open_workbook(str(path)) as workbook:
         names = list(workbook.sheets)
-        if MASTER_SHEET_NAME not in names:
-            return names, [], MASTER_HEADER_ROW
-        headers: list[str] = []
-        last_row = MASTER_HEADER_ROW
-        with workbook.get_sheet(MASTER_SHEET_NAME) as sheet:
+        sheet_name = _choose_master_sheet(names)
+        if not sheet_name:
+            return names, "", 0, 1, [], 0, ""
+        rows: list[tuple[int, list[object]]] = []
+        with workbook.get_sheet(sheet_name) as sheet:
             for row_number, row in enumerate(sheet.rows(), start=1):
                 values = [cell.v for cell in row]
-                # pyxlsb rows are 1-based; index 0 is unused.
                 cells = values[1:] if values and values[0] is None else values
-                if row_number == MASTER_HEADER_ROW:
-                    headers = [_cell(value) for value in cells[: len(MASTER_HEADERS)]]
-                elif row_number > MASTER_HEADER_ROW and any(
-                    _cell(value) for value in cells[:4]
-                ):
-                    last_row = row_number
-        return names, headers, last_row
+                rows.append((row_number, cells))
+        header_row, start_column, headers, last_row, row6_preview = _scan_sheet_rows(rows)
+        return names, sheet_name, header_row, start_column, headers, last_row, row6_preview
 
 
 def recognize_gatling_workbook(path: str | Path) -> GatlingFileInfo:
-    """Confirm the chosen file is 기관총 by 마스터 sheet + header names."""
+    """Confirm the chosen file is 기관총 by finding 링크/타입/제목/내용 headers."""
     file_path = Path(path)
     if not file_path.exists():
         raise GatlingPasteError(f"기관총 엑셀 파일이 없습니다: {file_path}")
@@ -318,25 +358,44 @@ def recognize_gatling_workbook(path: str | Path) -> GatlingFileInfo:
         )
 
     if kind == "xlsb":
-        sheet_names, headers, last_data_row = _xlsb_master_preview(file_path)
+        (
+            sheet_names,
+            master_sheet,
+            header_row,
+            start_column,
+            headers,
+            last_data_row,
+            row6_preview,
+        ) = _xlsb_master_preview(file_path)
     else:
         try:
-            sheet_names, headers, last_data_row = _xlsx_master_preview(file_path)
+            (
+                sheet_names,
+                master_sheet,
+                header_row,
+                start_column,
+                headers,
+                last_data_row,
+                row6_preview,
+            ) = _xlsx_master_preview(file_path)
         except Exception as exc:
             raise GatlingPasteError(
-                "엑셀 파일을 열지 못했습니다. 기관총 파일이 맞는지 확인해 주세요"
+                "엑셀 파일을 열지 못했습니다. 파일이 열려 있으면 닫고 다시 선택해 주세요"
             ) from exc
 
-    has_master = MASTER_SHEET_NAME in sheet_names
-    headers_ok = is_master_header_row(headers)
-    recognized = has_master and headers_ok
+    recognized = bool(master_sheet and headers)
     writable = recognized and kind in WRITABLE_KINDS
-
-    if not has_master:
-        message = "이 파일에는 '마스터' 시트가 없어 기관총 엑셀로 보지 않습니다"
-    elif not headers_ok:
+    if not master_sheet:
         message = (
-            "마스터 6행에 '링크, 타입, 제목, 내용' 열이 없어 기관총 엑셀로 보지 않습니다"
+            "이 파일에는 '마스터' 시트가 없어 기관총 엑셀로 보지 않습니다. "
+            f"지금 시트: {', '.join(sheet_names) or '(없음)'}"
+        )
+    elif not headers:
+        message = (
+            "마스터에서 '링크, 타입, 제목, 내용' 열을 찾지 못했습니다. "
+            f"6행에 보이는 값: {row6_preview or '(비어 있음)'}. "
+            "엑셀을 열어 마스터 시트에 그 네 칸이 있는지 확인해 주세요. "
+            "파일이 열려 있으면 저장한 뒤 닫고 다시 선택해 주세요."
         )
     elif kind == "xlsb":
         message = (
@@ -354,10 +413,14 @@ def recognize_gatling_workbook(path: str | Path) -> GatlingFileInfo:
         kind=kind,
         sheet_names=sheet_names,
         headers=headers,
-        last_data_row=last_data_row,
+        last_data_row=last_data_row or header_row,
         recognized=recognized,
         writable=writable,
         message=message,
+        master_sheet=master_sheet or MASTER_SHEET_NAME,
+        header_row=header_row or MASTER_HEADER_ROW,
+        start_column=start_column,
+        row6_preview=row6_preview,
     )
 
 
@@ -375,10 +438,10 @@ def append_master_rows(path: str | Path, rows: list[MasterRow]) -> int:
     keep_vba = info.kind == "xlsm"
     workbook = load_workbook(info.path, keep_vba=keep_vba)
     try:
-        sheet = workbook[MASTER_SHEET_NAME]
+        sheet = workbook[info.master_sheet]
         start_row = info.next_row
         for offset, row in enumerate(rows):
-            for column, value in enumerate(row.cells(), start=1):
+            for column, value in enumerate(row.cells(), start=info.start_column):
                 if value is None or value == "":
                     continue
                 sheet.cell(start_row + offset, column, value)

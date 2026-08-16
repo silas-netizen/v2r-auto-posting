@@ -350,6 +350,27 @@ def test_recognize_gatling_by_master_headers(tmp_path: Path) -> None:
     assert "이어 넣습니다" in info.message
 
 
+def test_recognize_headers_even_if_shifted_or_not_on_row_six(tmp_path: Path) -> None:
+    path = tmp_path / "shifted.xlsm"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "마스터"
+    sheet.cell(5, 2, "링크")
+    sheet.cell(5, 3, "타입")
+    sheet.cell(5, 4, "제목")
+    sheet.cell(5, 5, "내용")
+    sheet.cell(6, 3, "새글")
+    sheet.cell(6, 4, "기존 제목")
+    workbook.save(path)
+
+    info = recognize_gatling_workbook(path)
+
+    assert info.recognized is True
+    assert info.header_row == 5
+    assert info.start_column == 2
+    assert info.next_row == 7
+
+
 def test_reject_excel_that_is_not_gatling(tmp_path: Path) -> None:
     path = tmp_path / "other.xlsx"
     workbook = Workbook()
@@ -362,6 +383,7 @@ def test_reject_excel_that_is_not_gatling(tmp_path: Path) -> None:
     assert info.recognized is False
     assert info.writable is False
     assert "마스터" in info.message
+    assert "시트" in info.message
 
 
 def test_paste_appends_after_existing_master_rows(tmp_path: Path) -> None:

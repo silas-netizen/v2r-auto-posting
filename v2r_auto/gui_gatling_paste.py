@@ -53,8 +53,9 @@ class GatlingPasteApp(AutomationApp):
             text=(
                 "구글 시트 원고의 제목, 본문, 댓글·대댓글을 기관총 .xlsm 마스터에 "
                 "자동으로 넣는 프로그램입니다. "
-                "브랜드 시트 주소를 넣고, 기관총 .xlsm 파일을 고른 뒤 "
-                "'제목·본문·댓글 넣기'를 누르면 됩니다."
+                "구글 시트 주소를 쓰면 '로그인 준비'로 구글에 한 번 로그인해야 합니다. "
+                "브랜드 CSV 파일을 쓰면 로그인은 필요 없습니다. "
+                "기관총 파일은 엑셀에서 닫아 둔 .xlsm을 고르세요."
             ),
             wraplength=800,
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
