@@ -52,9 +52,9 @@ class GatlingPasteApp(AutomationApp):
             outer,
             text=(
                 "구글 시트 원고의 제목, 본문, 댓글·대댓글을 기관총 마스터에 넣습니다. "
-                "기관총 엑셀은 컴퓨터가 찾아다니지 않습니다. "
-                "파일을 고르면 마스터 시트와 6행 열 이름(링크, 타입, 제목, 내용)으로 "
-                "기관총 파일이 맞는지 확인합니다."
+                "기관총 파일은 .xlsm을 선택하세요. "
+                "고른 파일에 마스터 시트와 6행 열 이름(링크, 타입, 제목, 내용)이 있으면 "
+                "기관총 파일로 보고 마지막 줄 다음에 이어 넣습니다."
             ),
             wraplength=800,
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
@@ -118,7 +118,8 @@ class GatlingPasteApp(AutomationApp):
         selected = filedialog.askopenfilename(
             title="기관총 엑셀 선택",
             filetypes=[
-                ("엑셀 파일", "*.xlsx *.xlsm *.xlsb"),
+                ("기관총 Excel", "*.xlsm"),
+                ("엑셀 파일", "*.xlsm *.xlsx *.xlsb"),
                 ("모든 파일", "*.*"),
             ],
         )

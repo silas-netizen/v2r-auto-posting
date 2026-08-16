@@ -18,6 +18,7 @@ from v2r_auto.gatling_paste import (
     build_and_write_master,
     build_gatling_master,
     build_master_rows,
+    create_master_template,
     exact_board_name,
     load_gatling_brand_jobs,
     paste_manuscripts_into_gatling,
@@ -324,6 +325,17 @@ def test_manuscript_only_uses_sheet_title_body_and_all_comments() -> None:
         "깊은 답글",
         "더 깊은 답글",
     ]
+
+
+def test_xlsm_template_is_recognized_and_writable(tmp_path: Path) -> None:
+    path = create_master_template(tmp_path / "V2R-Gatling-Master.xlsm")
+    info = recognize_gatling_workbook(path)
+
+    assert path.suffix == ".xlsm"
+    assert info.recognized is True
+    assert info.writable is True
+    assert info.kind == "xlsm"
+    assert info.next_row == 7
 
 
 def test_recognize_gatling_by_master_headers(tmp_path: Path) -> None:

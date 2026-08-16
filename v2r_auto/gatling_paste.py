@@ -643,6 +643,23 @@ def build_gatling_master(
     return GatlingBuildResult(rows=rows, jobs=jobs, skipped=skipped)
 
 
+def create_master_template(path: str | Path) -> Path:
+    """Create an empty 기관총 마스터 workbook. Prefer .xlsm for paste-in-place."""
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = MASTER_SHEET_NAME
+    sheet["A1"] = (
+        "붙여넣기용 마스터입니다. 6행 열 이름은 기관총과 같습니다. "
+        "제목·본문·댓글은 7행부터 이어 넣습니다."
+    )
+    for column, header in enumerate(MASTER_HEADERS, start=1):
+        sheet.cell(MASTER_HEADER_ROW, column, header)
+    workbook.save(output)
+    return output
+
+
 def write_master_xlsx(path: str | Path, rows: list[MasterRow]) -> Path:
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
