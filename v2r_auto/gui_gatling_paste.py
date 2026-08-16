@@ -1,24 +1,22 @@
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
 
 from .daily_posts import DailyPostSheetError
 from .gatling_paste import (
-    DAILY_POST_SHEET_URL,
     GatlingPasteError,
-    build_and_write_master,
     build_gatling_master,
-    is_affiliate_cafe,
+    paste_manuscripts_into_gatling,
+    recognize_gatling_workbook,
 )
 from .gui import AutomationApp
 from .state import AnotherInstanceRunningError, InstanceLock
 
 
 class GatlingPasteApp(AutomationApp):
-    """Copy brand-sheet manuscripts into a 기관총 마스터 Excel file."""
+    """Copy brand-sheet title, body, and comments into a 기관총 마스터 file."""
 
     app_name = "V2R 기관총 붙여넣기"
     data_folder_name = "V2RGatlingPaste"
@@ -37,16 +35,15 @@ class GatlingPasteApp(AutomationApp):
 
     def _create_variables(self) -> None:
         self.sheet_url = tk.StringVar()
-        self.daily_sheet_url = tk.StringVar(value=DAILY_POST_SHEET_URL)
         self.local_csv = tk.StringVar()
-        self.local_daily_csv = tk.StringVar()
+        self.gatling_path = tk.StringVar()
         self.progress_text = tk.StringVar(value="대기 중")
 
     def _build_ui(self) -> None:
         outer = ttk.Frame(self, padding=16)
         outer.pack(fill=tk.BOTH, expand=True)
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(8, weight=1)
+        outer.rowconfigure(7, weight=1)
 
         ttk.Label(outer, text=self.app_name, font=("", 18, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
@@ -54,54 +51,52 @@ class GatlingPasteApp(AutomationApp):
         ttk.Label(
             outer,
             text=(
-                "브랜드 시트 원고를 기관총 마스터 엑셀로 옮깁니다. "
-                "제휴 카페(씨씨앙·양평맘)는 일상 글을 새글에, 실제 원고를 글수정에 넣습니다. "
-                "기관총에서 등록할 때는 새글만 먼저 등록하면 됩니다. "
-                "대댓글 A열은 대상 번호(2.1=대대댓글2, 2.2=대대대댓글2)이고, "
-                "글 주소는 결과링크에 넣습니다."
+                "구글 시트 원고의 제목, 본문, 댓글·대댓글을 기관총 마스터에 넣습니다. "
+                "기관총 엑셀은 컴퓨터가 찾아다니지 않습니다. "
+                "파일을 고르면 마스터 시트와 6행 열 이름(링크, 타입, 제목, 내용)으로 "
+                "기관총 파일이 맞는지 확인합니다."
             ),
             wraplength=800,
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
         self._entry_row(outer, 2, "브랜드 시트 URL", self.sheet_url)
-        self._entry_row(outer, 3, "일상 글 시트 URL", self.daily_sheet_url)
         self._entry_row(
             outer,
-            4,
+            3,
             "브랜드 CSV",
             self.local_csv,
             button=("파일", self._choose_csv),
         )
         self._entry_row(
             outer,
-            5,
-            "일상 글 CSV",
-            self.local_daily_csv,
-            button=("파일", self._choose_daily_csv),
+            4,
+            "기관총 엑셀",
+            self.gatling_path,
+            button=("파일", self._choose_gatling),
         )
 
         actions = ttk.Frame(outer)
-        actions.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 10))
+        actions.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(8, 10))
         ttk.Button(actions, text="로그인 준비", command=self._open_login).pack(
             side=tk.LEFT
         )
-        ttk.Button(actions, text="대상 확인", command=self._check_data).pack(
+        ttk.Button(actions, text="기관총 확인", command=self._check_gatling).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        ttk.Button(actions, text="원고 확인", command=self._check_data).pack(
             side=tk.LEFT, padx=(8, 0)
         )
         self.start_button = ttk.Button(
-            actions, text="엑셀 만들기", command=self._start
+            actions, text="제목·본문·댓글 넣기", command=self._start
         )
         self.start_button.pack(side=tk.LEFT, padx=(8, 0))
         self.stop_button = ttk.Button(
             actions, text="중지", command=self._stop, state=tk.DISABLED
         )
         self.stop_button.pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Button(
-            actions, text="결과 폴더", command=lambda: self._open_folder(self.report_dir)
-        ).pack(side=tk.RIGHT)
 
         progress_frame = ttk.Frame(outer)
-        progress_frame.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        progress_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 6))
         progress_frame.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_frame, maximum=100)
         self.progress.grid(row=0, column=0, sticky="ew")
@@ -110,7 +105,7 @@ class GatlingPasteApp(AutomationApp):
         )
 
         log_frame = ttk.LabelFrame(outer, text="진행 기록", padding=8)
-        log_frame.grid(row=8, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=7, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state=tk.DISABLED)
@@ -119,45 +114,52 @@ class GatlingPasteApp(AutomationApp):
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=scrollbar.set)
 
-    def _choose_daily_csv(self) -> None:
+    def _choose_gatling(self) -> None:
         selected = filedialog.askopenfilename(
-            title="일상 글 CSV 파일 선택",
-            filetypes=[("CSV 파일", "*.csv"), ("모든 파일", "*.*")],
+            title="기관총 엑셀 선택",
+            filetypes=[
+                ("엑셀 파일", "*.xlsx *.xlsm *.xlsb"),
+                ("모든 파일", "*.*"),
+            ],
         )
         if selected:
-            self.local_daily_csv.set(selected)
+            self.gatling_path.set(selected)
 
     def _open_login(self) -> None:
-        sheet_url = self.sheet_url.get().strip() or self.daily_sheet_url.get().strip()
+        sheet_url = self.sheet_url.get().strip()
         self._run_background(lambda: self.browser.open_login_window(sheet_url))
 
-    def _source_paths(self) -> tuple[Path, Path | None]:
-        brand_csv = self.local_csv.get().strip()
-        daily_csv = self.local_daily_csv.get().strip()
+    def _brand_path(self) -> Path:
+        local_csv = self.local_csv.get().strip()
+        if local_csv:
+            return Path(local_csv)
         sheet_url = self.sheet_url.get().strip()
-        daily_url = self.daily_sheet_url.get().strip()
-        brand_path = Path(brand_csv) if brand_csv else None
-        daily_path = Path(daily_csv) if daily_csv else None
-        if brand_path is None:
-            if not sheet_url:
-                raise GatlingPasteError("브랜드 시트 주소 또는 CSV 파일을 넣어 주세요")
-            brand_path = self.browser.download_sheet(sheet_url)
-            if daily_path is None and daily_url:
-                daily_path = self.browser.download_sheet(daily_url)
-        return brand_path, daily_path
+        if not sheet_url:
+            raise GatlingPasteError("브랜드 시트 주소 또는 CSV 파일을 넣어 주세요")
+        return self.browser.download_sheet(sheet_url)
+
+    def _check_gatling(self) -> None:
+        path = self.gatling_path.get().strip()
+        if not path:
+            messagebox.showerror("입력 오류", "기관총 엑셀 파일을 선택해 주세요")
+            return
+
+        def work() -> None:
+            info = recognize_gatling_workbook(path)
+            self.logger.info(info.message)
+            kind = "info" if info.recognized else "error"
+            self.ui_queue.put((kind, ("기관총 확인", info.message)))
+
+        self._run_background(work)
 
     def _check_data(self) -> None:
         def work() -> None:
-            brand_path, daily_path = self._source_paths()
-            result = build_gatling_master(brand_path, daily_path)
+            result = build_gatling_master(self._brand_path(), manuscript_only=True)
             counts = result.type_counts()
-            affiliate = sum(1 for job in result.jobs if is_affiliate_cafe(job.cafe))
             self.logger.info(
-                "대상 확인: 원고 %s건 / 제휴 %s건 / 새글 %s / 글수정 %s / 댓글 %s / 대댓글 %s",
+                "원고 확인: %s건 / 제목·본문 %s / 댓글 %s / 대댓글 %s",
                 len(result.jobs),
-                affiliate,
-                counts.get("새글", 0),
-                counts.get("글수정", 0),
+                counts.get("새글", 0) + counts.get("글수정", 0),
                 counts.get("댓글", 0),
                 counts.get("대댓글", 0),
             )
@@ -167,11 +169,10 @@ class GatlingPasteApp(AutomationApp):
                 (
                     "info",
                     (
-                        "대상 확인",
+                        "원고 확인",
                         (
-                            f"원고 {len(result.jobs)}건 (제휴 {affiliate}건)\n"
-                            f"새글 {counts.get('새글', 0)} / "
-                            f"글수정 {counts.get('글수정', 0)} / "
+                            f"원고 {len(result.jobs)}건\n"
+                            f"제목·본문 {counts.get('새글', 0) + counts.get('글수정', 0)} / "
                             f"댓글 {counts.get('댓글', 0)} / "
                             f"대댓글 {counts.get('대댓글', 0)}\n"
                             f"건너뜀 {len(result.skipped)}건"
@@ -185,36 +186,43 @@ class GatlingPasteApp(AutomationApp):
     def _start(self) -> None:
         if self.worker and not self.worker.done():
             return
-        output = self.report_dir / (
-            f"기관총_붙여넣기_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
-        )
+        gatling_path = self.gatling_path.get().strip()
+        if not gatling_path:
+            messagebox.showerror("입력 오류", "기관총 엑셀 파일을 선택해 주세요")
+            return
         self.stop_event.clear()
         self.start_button.configure(state=tk.DISABLED)
         self.stop_button.configure(state=tk.NORMAL)
         self.progress.configure(value=0)
-        self.progress_text.set("엑셀 준비 중")
+        self.progress_text.set("원고 넣는 중")
 
         def work() -> None:
             try:
                 self._set_progress(1, 3)
-                brand_path, daily_path = self._source_paths()
+                brand_path = self._brand_path()
                 self._set_progress(2, 3)
-                result = build_and_write_master(brand_path, output, daily_path)
+                result, start_row = paste_manuscripts_into_gatling(
+                    brand_path,
+                    gatling_path,
+                    manuscript_only=True,
+                )
                 counts = result.type_counts()
-                self.logger.info("기관총 엑셀 저장: %s", output)
+                self.logger.info(
+                    "기관총 마스터 %s행부터 %s줄을 넣었습니다",
+                    start_row,
+                    len(result.rows),
+                )
                 self._set_progress(3, 3)
                 self.ui_queue.put(
                     (
                         "info",
                         (
-                            "엑셀 만들기 완료",
+                            "넣기 완료",
                             (
-                                f"새글 {counts.get('새글', 0)} / "
-                                f"글수정 {counts.get('글수정', 0)} / "
+                                f"마스터 {start_row}행부터 {len(result.rows)}줄을 넣었습니다.\n"
+                                f"제목·본문 {counts.get('새글', 0) + counts.get('글수정', 0)} / "
                                 f"댓글 {counts.get('댓글', 0)} / "
-                                f"대댓글 {counts.get('대댓글', 0)}\n"
-                                f"건너뜀 {len(result.skipped)}건\n"
-                                f"파일: {output}"
+                                f"대댓글 {counts.get('대댓글', 0)}"
                             ),
                         ),
                     )

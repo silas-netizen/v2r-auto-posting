@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
 from v2r_auto.content import parse_article
 from v2r_auto.gatling_paste import (
@@ -20,7 +20,10 @@ from v2r_auto.gatling_paste import (
     build_master_rows,
     exact_board_name,
     load_gatling_brand_jobs,
+    paste_manuscripts_into_gatling,
+    recognize_gatling_workbook,
     reply_target_value,
+    require_writable_gatling,
 )
 from v2r_auto.models import DailyPost
 
@@ -49,6 +52,22 @@ QUESTION_SOURCE = """제목 :
 def write_brand_csv(tmp_path: Path, content: str) -> Path:
     path = tmp_path / "brand.csv"
     path.write_text(content, encoding="utf-8-sig")
+    return path
+
+
+def write_gatling_xlsx(tmp_path: Path, name: str = "gatling.xlsx") -> Path:
+    path = tmp_path / name
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "마스터"
+    for column, header in enumerate(MASTER_HEADERS, start=1):
+        sheet.cell(MASTER_HEADER_ROW, column, header)
+    sheet.cell(7, 1, 800)
+    sheet.cell(7, 2, "딜레이")
+    sheet.cell(8, 2, TYPE_NEW_POST)
+    sheet.cell(8, 3, "이미 있는 글")
+    sheet.cell(8, 4, "이미 있는 본문")
+    workbook.save(path)
     return path
 
 
@@ -278,3 +297,100 @@ def test_affiliate_sheet_without_daily_file_raises(tmp_path: Path) -> None:
 
     with pytest.raises(GatlingPasteError, match="일상 글 시트"):
         build_gatling_master(brand)
+
+
+def test_manuscript_only_uses_sheet_title_body_and_all_comments() -> None:
+    rows = build_master_rows(
+        make_job(cafe="씨씨앙", board="자유수다방", with_daily=False),
+        include_daily_new_post=False,
+    )
+
+    assert [row.type for row in rows] == [
+        TYPE_EDIT_POST,
+        TYPE_COMMENT,
+        TYPE_REPLY,
+        TYPE_COMMENT,
+        TYPE_REPLY,
+        TYPE_REPLY,
+        TYPE_REPLY,
+    ]
+    assert rows[0].title == "실제 원고 제목"
+    assert rows[0].body == "실제 원고 본문"
+    assert [row.body for row in rows[1:]] == [
+        "첫 댓글",
+        "첫 답글",
+        "둘째 댓글",
+        "둘째 답글",
+        "깊은 답글",
+        "더 깊은 답글",
+    ]
+
+
+def test_recognize_gatling_by_master_headers(tmp_path: Path) -> None:
+    path = write_gatling_xlsx(tmp_path)
+    info = recognize_gatling_workbook(path)
+
+    assert info.recognized is True
+    assert info.writable is True
+    assert info.kind == "xlsx"
+    assert info.last_data_row == 8
+    assert info.next_row == 9
+    assert "이어 넣습니다" in info.message
+
+
+def test_reject_excel_that_is_not_gatling(tmp_path: Path) -> None:
+    path = tmp_path / "other.xlsx"
+    workbook = Workbook()
+    workbook.active.title = "Sheet1"
+    workbook.active["A1"] = "이름"
+    workbook.save(path)
+
+    info = recognize_gatling_workbook(path)
+
+    assert info.recognized is False
+    assert info.writable is False
+    assert "마스터" in info.message
+
+
+def test_paste_appends_after_existing_master_rows(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{QUESTION_SOURCE}",고요한아침,writer,질문형,,,,,가입인사\n',
+    )
+    gatling = write_gatling_xlsx(tmp_path)
+
+    result, start_row = paste_manuscripts_into_gatling(brand, gatling)
+
+    assert start_row == 9
+    assert result.rows[0].title == "실제 원고 제목"
+    workbook = load_workbook(gatling)
+    sheet = workbook["마스터"]
+    assert sheet.cell(8, 3).value == "이미 있는 글"
+    assert sheet.cell(9, 2).value == TYPE_NEW_POST
+    assert sheet.cell(9, 3).value == "실제 원고 제목"
+    assert sheet.cell(9, 4).value == "실제 원고 본문"
+    assert sheet.cell(10, 2).value == TYPE_COMMENT
+    assert sheet.cell(10, 4).value == "첫 댓글"
+    assert sheet.cell(14, 1).value == 2.1
+    assert sheet.cell(14, 4).value == "깊은 답글"
+    assert sheet.cell(15, 1).value == 2.2
+    assert sheet.cell(15, 4).value == "더 깊은 답글"
+
+
+def test_xlsb_is_recognized_but_not_writable(tmp_path: Path) -> None:
+    source = Path("/tmp/gatling/gatling.bin")
+    if not source.exists():
+        pytest.skip("기관총 원본 샘플이 없습니다")
+    path = tmp_path / "gatling.xlsb"
+    path.write_bytes(source.read_bytes())
+
+    info = recognize_gatling_workbook(path)
+
+    assert info.recognized is True
+    assert info.writable is False
+    assert info.kind == "xlsb"
+    assert "마스터" in info.sheet_names
+    assert info.headers[:4] == ["링크", "타입", "제목", "내용"]
+    with pytest.raises(GatlingPasteError, match="xlsb"):
+        require_writable_gatling(path)
