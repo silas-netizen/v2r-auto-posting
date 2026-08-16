@@ -29,22 +29,14 @@ jobs:
         run: python -m pytest
 
       - name: Build EXE
-        run: |
-          python -m PyInstaller --noconfirm --clean v2r-auto-posting.spec
-          python -m PyInstaller --noconfirm --clean v2r-auto-affiliate.spec
-          python -m PyInstaller --noconfirm --clean v2r-immediate-posting.spec
-          python -m PyInstaller --noconfirm --clean v2r-exposure-checker.spec
+        run: python -m PyInstaller --noconfirm --clean v2r-exposure-checker.spec
 
       - name: Upload Windows programs
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: V2R-Auto-Posting-Windows
-          path: |
-            dist/V2R-Auto-Posting.exe
-            dist/V2R-Affiliate-Revision.exe
-            dist/V2R-Immediate-Posting.exe
-            dist/V2R-Exposure-Checker.exe
+          name: V2R-Exposure-Checker-Windows
+          path: dist/V2R-Exposure-Checker.exe
           if-no-files-found: error
           retention-days: 1
 
@@ -53,9 +45,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >
           gh release create "ci-exe-${{ github.run_id }}"
-          dist/V2R-Auto-Posting.exe
-          dist/V2R-Affiliate-Revision.exe
-          dist/V2R-Immediate-Posting.exe
           dist/V2R-Exposure-Checker.exe
           --title "Windows EXE ${{ github.sha }}"
           --notes "CI build from ${{ github.ref_name }}"
