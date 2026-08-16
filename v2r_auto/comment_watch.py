@@ -39,18 +39,15 @@ LOGIN_PAGE_HINTS = (
     "로그인해주세요",
     "로그인 해주세요",
 )
-COMMENT_COUNT_PATTERNS = (
+ARTICLE_COMMENT_COUNT_PATTERNS = (
+    re.compile(r'"article"\s*:\s*\{[^{}]{0,1200}"commentCount"\s*:\s*(\d+)'),
     re.compile(r'"commentCount"\s*:\s*(\d+)'),
     re.compile(r'"comment_count"\s*:\s*(\d+)'),
     re.compile(r"댓글\s*<[^>]*>\s*(\d+)"),
-    re.compile(r"댓글\s*(\d+)"),
+    re.compile(r">댓글\s*(\d+)<"),
 )
-COMMENT_NICK_PATTERN = re.compile(
-    r'class="[^"]*(?:nickname|nick_name|comment_nickname)[^"]*"[^>]*>([^<]+)',
-    re.IGNORECASE,
-)
-COMMENT_ITEM_PATTERN = re.compile(
-    r'class="[^"]*(?:comment_item|CommentItem|comment_box|box_cmt)[^"]*"',
+COMMENT_LIST_ITEM_PATTERN = re.compile(
+    r'class="[^"]*(?:CommentItem|comment_item)[^"]*"',
     re.IGNORECASE,
 )
 
@@ -116,31 +113,28 @@ def page_requires_cafe_login(html: str, url: str = "") -> bool:
     return any(hint.casefold() in lowered for hint in LOGIN_PAGE_HINTS)
 
 
-def _visible_comment_count(html: str) -> int:
-    counts: list[int] = []
-    for pattern in COMMENT_COUNT_PATTERNS:
-        for match in pattern.finditer(html or ""):
-            nearby = (html or "")[max(0, match.start() - 12) : match.start()]
-            if "비허용" in nearby:
-                continue
-            counts.append(int(match.group(1)))
-    return max(counts) if counts else 0
+def _article_comment_count(html: str) -> int:
+    """Use the article's own 댓글 N. Do not count writer/author nicknames."""
+    text = html or ""
+    for pattern in ARTICLE_COMMENT_COUNT_PATTERNS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        nearby = text[max(0, match.start() - 12) : match.start()]
+        if "비허용" in nearby:
+            continue
+        return int(match.group(1))
+    return 0
 
 
-def _comment_nicks(html: str) -> list[str]:
-    nicks: list[str] = []
-    for match in COMMENT_NICK_PATTERN.finditer(html or ""):
-        nick = re.sub(r"\s+", " ", match.group(1)).strip()
-        if nick:
-            nicks.append(nick)
-    return nicks
-
-
-def _is_our_comment(text: str) -> bool:
-    lowered = (text or "").casefold()
-    if "v2r" in lowered:
-        return True
-    return any(marker in lowered for marker in OUR_COMMENT_MARKERS)
+def _v2r_comments_in_list(html: str) -> int:
+    found = 0
+    for match in COMMENT_LIST_ITEM_PATTERN.finditer(html or ""):
+        start = match.start()
+        chunk = (html or "")[start : start + 400].casefold()
+        if "v2r" in chunk or any(marker in chunk for marker in OUR_COMMENT_MARKERS):
+            found += 1
+    return found
 
 
 def other_member_comment_count(html: str, url: str = "") -> int:
@@ -151,13 +145,8 @@ def other_member_comment_count(html: str, url: str = "") -> int:
             "이 프로그램 크롬에서 네이버에 로그인한 뒤 다시 확인해 주세요. "
             "카페 창을 따로 열어둘 필요는 없습니다"
         )
-    nicks = _comment_nicks(html)
-    if nicks:
-        return sum(1 for nick in nicks if not _is_our_comment(nick))
-    items = COMMENT_ITEM_PATTERN.findall(html or "")
-    if items:
-        return len(items)
-    return _visible_comment_count(html)
+    visible = _article_comment_count(html)
+    return max(0, visible - _v2r_comments_in_list(html))
 
 
 @dataclass(frozen=True, slots=True)

@@ -118,12 +118,39 @@ def test_cafe_html_counts_other_member_not_v2r_number() -> None:
     assert other_member_comment_count('{"commentCount": 1}') == 1
 
 
+def test_author_and_comment_box_are_not_extra_comments() -> None:
+    html = """
+    <button class="nickname">바다그림자도</button>
+    <div class="comment_inbox">
+      <a class="comment_nickname">구리스틴</a>
+    </div>
+    <h3>댓글 <em>0</em></h3>
+    <script>{"article":{"commentCount":0},"commentCount":0}</script>
+    """
+    assert other_member_comment_count(html) == 0
+
+    html_one = """
+    <button class="nickname">바다그림자도</button>
+    <div class="comment_inbox">
+      <a class="comment_nickname">구리스틴</a>
+    </div>
+    <h3>댓글 <em>1</em></h3>
+    <li class="CommentItem">
+      <a class="comment_nickname">쇼비쇼비2</a>
+    </li>
+    <script>{"article":{"commentCount":1},"commentCount":1}</script>
+    """
+    assert other_member_comment_count(html_one) == 1
+
+
 def test_cafe_html_ignores_v2r_written_comments() -> None:
     html = """
+    <h3>댓글 <em>1</em></h3>
     <li class="comment_item">
       <a class="comment_nickname">나는퀼보고(quilliant)</a>
       <span>V2R</span>
     </li>
+    <script>{"commentCount": 1}</script>
     """
     assert other_member_comment_count(html) == 0
 
