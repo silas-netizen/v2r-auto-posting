@@ -34,6 +34,10 @@ AFFILIATE_EXACT_BOARDS = {
     "씨씨앙": "자유 수다방",
     "양평맘": "이모저모 이야기💕",
 }
+AFFILIATE_BOARD_LINKS = {
+    "씨씨앙": "https://cafe.naver.com/f-e/cafes/25016228/menus/328?viewType=L",
+    "양평맘": "https://cafe.naver.com/f-e/cafes/22788814/menus/14?viewType=L",
+}
 KNOWN_EXACT_BOARDS = (
     "자유 수다방",
     "이모저모 이야기💕",
@@ -202,6 +206,11 @@ class GatlingFileInfo:
 
 def is_affiliate_cafe(cafe: str) -> bool:
     return cafe.strip() in AFFILIATE_CAFES
+
+
+def affiliate_board_link(cafe: str) -> str:
+    """양평맘·씨씨앙 새글 링크 열에 넣는 게시판 주소."""
+    return AFFILIATE_BOARD_LINKS.get((cafe or "").strip(), "")
 
 
 def exact_board_name(
@@ -932,6 +941,7 @@ def build_master_rows(
                 body=job.daily_post.body,
                 job=job,
                 board_name=board_name,
+                link=affiliate_board_link(job.cafe),
                 author=author,
             )
         )

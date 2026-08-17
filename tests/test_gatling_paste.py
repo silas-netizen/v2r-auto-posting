@@ -8,6 +8,7 @@ from v2r_auto.content import CommentNode, ParsedArticle, parse_article
 from v2r_auto.gatling_accounts import recognize_proxy_workbook
 from v2r_auto.images import ResolvedImage
 from v2r_auto.gatling_paste import (
+    AFFILIATE_BOARD_LINKS,
     AFFILIATE_EXACT_BOARDS,
     MASTER_HEADER_ROW,
     MASTER_HEADERS,
@@ -166,7 +167,7 @@ def test_affiliate_daily_goes_to_new_post_and_manuscript_goes_to_edit() -> None:
     assert rows[0].board_name == "자유 수다방"
     assert rows[0].hashtag == ""
     assert rows[0].prefix == "자유"
-    assert rows[0].link is None
+    assert rows[0].link == AFFILIATE_BOARD_LINKS["씨씨앙"]
     assert rows[0].image_location == ""
 
     assert rows[1].type == TYPE_EDIT_POST
@@ -183,6 +184,8 @@ def test_edit_and_comments_use_cafe_url_in_the_right_columns() -> None:
         make_job(cafe="양평맘", board="이모저모이야기", cafe_article_url=url)
     )
 
+    assert rows[0].type == TYPE_NEW_POST
+    assert rows[0].link == AFFILIATE_BOARD_LINKS["양평맘"]
     assert rows[1].type == TYPE_EDIT_POST
     assert rows[1].link == url
     assert rows[1].board_name == "이모저모 이야기💕"
@@ -208,6 +211,22 @@ def test_self_owned_manuscript_is_new_post_only() -> None:
     assert rows[0].board_name == "가입인사"
     assert rows[0].hashtag == "단식원 가격"
     assert all(not row.hashtag for row in rows[1:])
+
+
+def test_affiliate_new_post_gets_board_link_only() -> None:
+    ssi = build_master_rows(make_job(cafe="씨씨앙", board="자유수다방"))
+    yang = build_master_rows(make_job(cafe="양평맘", board="이모저모이야기"))
+    self_owned = build_master_rows(
+        make_job(cafe="고요한아침", board="가입인사", with_daily=False)
+    )
+
+    assert ssi[0].type == TYPE_NEW_POST
+    assert ssi[0].link == AFFILIATE_BOARD_LINKS["씨씨앙"]
+    assert all(row.link != AFFILIATE_BOARD_LINKS["씨씨앙"] for row in ssi[1:])
+    assert yang[0].link == AFFILIATE_BOARD_LINKS["양평맘"]
+    assert all(row.link != AFFILIATE_BOARD_LINKS["양평맘"] for row in yang[1:])
+    assert self_owned[0].type == TYPE_NEW_POST
+    assert self_owned[0].link is None
 
 
 def test_affiliate_without_daily_post_raises() -> None:
