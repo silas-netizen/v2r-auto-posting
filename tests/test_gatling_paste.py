@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from openpyxl import Workbook, load_workbook
 
-from v2r_auto.content import parse_article
+from v2r_auto.content import CommentNode, ParsedArticle, parse_article
 from v2r_auto.gatling_paste import (
     AFFILIATE_EXACT_BOARDS,
     MASTER_HEADER_ROW,
@@ -23,6 +23,7 @@ from v2r_auto.gatling_paste import (
     load_gatling_brand_jobs,
     paste_manuscripts_into_gatling,
     recognize_gatling_workbook,
+    replace_image_tokens,
     reply_target_value,
     require_writable_gatling,
 )
@@ -313,8 +314,8 @@ def test_manuscript_only_uses_sheet_title_body_and_all_comments() -> None:
     assert [row.type for row in rows] == [
         TYPE_EDIT_POST,
         TYPE_COMMENT,
-        TYPE_REPLY,
         TYPE_COMMENT,
+        TYPE_REPLY,
         TYPE_REPLY,
         TYPE_REPLY,
         TYPE_REPLY,
@@ -323,8 +324,8 @@ def test_manuscript_only_uses_sheet_title_body_and_all_comments() -> None:
     assert rows[0].body == "실제 원고 본문"
     assert [row.body for row in rows[1:]] == [
         "첫 댓글",
-        "첫 답글",
         "둘째 댓글",
+        "첫 답글",
         "둘째 답글",
         "깊은 답글",
         "더 깊은 답글",
@@ -565,6 +566,92 @@ def test_xlsb_is_recognized_but_not_writable(tmp_path: Path) -> None:
     assert info.headers[:4] == ["링크", "타입", "제목", "내용"]
     with pytest.raises(GatlingPasteError, match="xlsb"):
         require_writable_gatling(path)
+
+
+def test_image_tokens_become_gatling_placeholder() -> None:
+    assert replace_image_tokens("사진 {키워드} 끝") == "사진 {이미지} 끝"
+    assert replace_image_tokens("{A열 키워드}\n본문") == "{이미지}\n본문"
+    assert replace_image_tokens("{A열키워드}") == "{이미지}"
+    assert replace_image_tokens("이미 {이미지} 있음") == "이미 {이미지} 있음"
+
+
+def test_image_tokens_are_rewritten_in_title_body_and_comments() -> None:
+    source = (
+        "제목 :\n제목 {키워드}\n\n본문 :\n본문 {A열 키워드}\n\n"
+        "댓글1:\n댓글 {키워드}\n대댓글1:\n답글 {A열 키워드}\n"
+    )
+    job = GatlingBrandJob(
+        row_number=2,
+        keyword="엉덩이 종기",
+        article=parse_article("엉덩이 종기", source),
+        cafe="고요한아침",
+        board="가입인사",
+        article_type="질문형",
+    )
+
+    rows = build_master_rows(job, include_daily_new_post=False)
+
+    assert rows[0].title == "제목 {이미지}"
+    assert rows[0].body == "본문 {이미지}"
+    assert rows[1].body == "댓글 {이미지}"
+    assert rows[2].body == "답글 {이미지}"
+
+
+def test_revision_order_is_daily_edit_all_comments_then_replies() -> None:
+    rows = build_master_rows(make_job(cafe="씨씨앙", board="자유수다방"))
+    types = [row.type for row in rows]
+
+    assert types[:2] == [TYPE_NEW_POST, TYPE_EDIT_POST]
+    assert TYPE_EDIT_POST not in types[2:]
+    assert types[2:] == [TYPE_COMMENT, TYPE_COMMENT] + [TYPE_REPLY] * 4
+    assert rows[0].title == "일상 제목"
+    assert rows[1].title == "실제 원고 제목"
+
+
+def test_replies_are_grouped_by_depth_like_the_template() -> None:
+    comments = []
+    for index in range(1, 4):
+        child = CommentNode(label=f"대댓글{index}", text=f"답글{index}", depth=1, index=index)
+        comments.append(
+            CommentNode(
+                label=f"댓글{index}",
+                text=f"댓글{index} 내용",
+                depth=0,
+                index=index,
+                children=[child],
+            )
+        )
+    comments[1].children[0].children.append(
+        CommentNode(label="대대댓글2", text="깊은 답글", depth=2, index=2)
+    )
+    job = GatlingBrandJob(
+        row_number=2,
+        keyword="키워드",
+        article=ParsedArticle(
+            title="원고 제목",
+            body="원고 내용",
+            keyword="키워드",
+            tag="",
+            comments=comments,
+        ),
+        cafe="씨씨앙",
+        board="자유수다방",
+        article_type="질문형",
+        daily_post=DailyPost(row_number=2, cafe="씨씨앙", title="일상 글 제목", body="일상 글 내용"),
+    )
+
+    rows = build_master_rows(job)
+    replies = [row for row in rows if row.type == TYPE_REPLY]
+
+    assert [row.type for row in rows[:5]] == [
+        TYPE_NEW_POST,
+        TYPE_EDIT_POST,
+        TYPE_COMMENT,
+        TYPE_COMMENT,
+        TYPE_COMMENT,
+    ]
+    assert [row.link for row in replies] == [1, 2, 3, 2.1]
+    assert [row.body for row in replies] == ["답글1", "답글2", "답글3", "깊은 답글"]
 
 
 def test_completed_f_column_rows_are_kept_for_gatling(tmp_path: Path) -> None:

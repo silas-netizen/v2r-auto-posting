@@ -7,8 +7,11 @@ import tkinter as tk
 from .browser import user_facing_browser_error
 from .daily_posts import DailyPostSheetError
 from .gatling_paste import (
+    DAILY_POST_SHEET_URL,
     GatlingPasteError,
     build_gatling_master,
+    is_affiliate_cafe,
+    load_gatling_brand_jobs,
     paste_manuscripts_into_gatling,
     recognize_gatling_workbook,
 )
@@ -54,10 +57,11 @@ class GatlingPasteApp(AutomationApp):
             text=(
                 "구글 시트 원고의 제목, 본문, 댓글·대댓글을 기관총 .xlsm 마스터에 "
                 "자동으로 넣는 프로그램입니다. "
+                "제휴 카페(씨씨앙·양평맘)는 새글(일상) → 글수정(원고) → 댓글 → 대댓글 "
+                "순서로 넣습니다. 자사 카페는 새글에 원고를 바로 넣습니다. "
+                "시트에 {키워드} 또는 {A열 키워드}가 있으면 기관총이 읽는 {이미지}로 바꿉니다. "
                 "구글 시트 주소를 쓰면 '구글 시트 열기'로 시트를 엽니다. "
-                "V2R은 쓰지 않습니다. 로그인이 필요하면 그 Chrome 창에서만 하면 됩니다. "
-                "브랜드 CSV 파일을 쓰면 크롬은 필요 없습니다. "
-                "기관총 파일은 엑셀에서 닫아 둔 .xlsm을 고르세요."
+                "V2R은 쓰지 않습니다. 기관총 파일은 엑셀에서 닫아 둔 .xlsm을 고르세요."
             ),
             wraplength=800,
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
@@ -145,6 +149,14 @@ class GatlingPasteApp(AutomationApp):
             raise GatlingPasteError("브랜드 시트 주소 또는 CSV 파일을 넣어 주세요")
         return self.browser.download_sheet(sheet_url)
 
+    def _brand_and_daily_paths(self) -> tuple[Path, Path | None]:
+        brand_path = self._brand_path()
+        jobs, _ = load_gatling_brand_jobs(brand_path, skip_completed=False)
+        if any(is_affiliate_cafe(job.cafe) for job in jobs):
+            self.logger.info("제휴 카페용 일상 글 시트를 내려받습니다")
+            return brand_path, self.browser.download_sheet(DAILY_POST_SHEET_URL)
+        return brand_path, None
+
     def _check_gatling(self) -> None:
         path = self.gatling_path.get().strip()
         if not path:
@@ -161,16 +173,19 @@ class GatlingPasteApp(AutomationApp):
 
     def _check_data(self) -> None:
         def work() -> None:
+            brand_path, daily_path = self._brand_and_daily_paths()
             result = build_gatling_master(
-                self._brand_path(),
-                manuscript_only=True,
+                brand_path,
+                daily_path,
+                manuscript_only=False,
                 skip_completed=False,
             )
             counts = result.type_counts()
             self.logger.info(
-                "원고 확인: %s건 / 제목·본문 %s / 댓글 %s / 대댓글 %s",
+                "원고 확인: %s건 / 새글 %s / 글수정 %s / 댓글 %s / 대댓글 %s",
                 len(result.jobs),
-                counts.get("새글", 0) + counts.get("글수정", 0),
+                counts.get("새글", 0),
+                counts.get("글수정", 0),
                 counts.get("댓글", 0),
                 counts.get("대댓글", 0),
             )
@@ -183,7 +198,8 @@ class GatlingPasteApp(AutomationApp):
                         "원고 확인",
                         (
                             f"원고 {len(result.jobs)}건\n"
-                            f"제목·본문 {counts.get('새글', 0) + counts.get('글수정', 0)} / "
+                            f"새글 {counts.get('새글', 0)} / "
+                            f"글수정 {counts.get('글수정', 0)} / "
                             f"댓글 {counts.get('댓글', 0)} / "
                             f"대댓글 {counts.get('대댓글', 0)}\n"
                             f"건너뜀 {len(result.skipped)}건"
@@ -210,12 +226,13 @@ class GatlingPasteApp(AutomationApp):
         def work() -> None:
             try:
                 self._set_progress(1, 3)
-                brand_path = self._brand_path()
+                brand_path, daily_path = self._brand_and_daily_paths()
                 self._set_progress(2, 3)
                 result, start_row = paste_manuscripts_into_gatling(
                     brand_path,
                     gatling_path,
-                    manuscript_only=True,
+                    daily_path,
+                    manuscript_only=False,
                     skip_completed=False,
                 )
                 counts = result.type_counts()
@@ -235,7 +252,8 @@ class GatlingPasteApp(AutomationApp):
                                 f"{start_row}행부터 새 글을 넣었습니다. "
                                 f"댓글·대댓글은 각 칸의 빈 내용부터 넣었습니다.\n"
                                 f"전체 {len(result.rows)}줄.\n"
-                                f"제목·본문 {counts.get('새글', 0) + counts.get('글수정', 0)} / "
+                                f"새글 {counts.get('새글', 0)} / "
+                                f"글수정 {counts.get('글수정', 0)} / "
                                 f"댓글 {counts.get('댓글', 0)} / "
                                 f"대댓글 {counts.get('대댓글', 0)}"
                             ),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import random
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -64,6 +65,8 @@ COMMENT_BLOCK_TYPES = {TYPE_COMMENT, TYPE_REPLY}
 COMMENT_ALLOWED = "허용"
 REQUIRED_MASTER_HEADERS = MASTER_HEADERS[:4]
 WRITABLE_KINDS = {"xlsx", "xlsm"}
+IMAGE_PLACEHOLDER = "{이미지}"
+IMAGE_TOKEN_PATTERN = re.compile(r"\{(?:A열\s*)?키워드\}")
 XLSB_WRITE_MESSAGE = (
     "고른 파일은 기관총 원본(.xlsb)입니다. "
     "이 형식은 매크로 파일이라 프로그램이 제목·본문·댓글을 직접 넣을 수 없습니다. "
@@ -229,6 +232,11 @@ def exact_board_name(
             f"기관총에는 '{default}'처럼 정확한 이름이 필요합니다"
         )
     return wanted
+
+
+def replace_image_tokens(text: str) -> str:
+    """기관총은 {이미지}만 인식하므로 시트 표기를 맞춰 넣는다."""
+    return IMAGE_TOKEN_PATTERN.sub(IMAGE_PLACEHOLDER, text or "")
 
 
 def reply_target_value(node: CommentNode) -> int | float:
@@ -735,8 +743,8 @@ def _article_row(
     return MasterRow(
         link=link or None,
         type=type_name,
-        title=title,
-        body=body,
+        title=replace_image_tokens(title),
+        body=replace_image_tokens(body),
         hashtag=job.keyword,
         prefix=job.prefix,
         board_name=board_name,
@@ -744,26 +752,40 @@ def _article_row(
     )
 
 
-def _reply_rows(
-    node: CommentNode,
-    *,
-    keyword: str,
+def _comment_and_reply_rows(
+    job: GatlingBrandJob,
     article_url: str,
 ) -> list[MasterRow]:
+    """수정 발행 순서: 댓글을 모두 넣은 뒤, 대댓글은 얕은 것부터 넣는다."""
     rows: list[MasterRow] = []
-    for child in node.children:
+    for comment in job.article.comments:
         rows.append(
             MasterRow(
-                link=reply_target_value(child),
-                type=TYPE_REPLY,
-                body=child.text,
-                hashtag=keyword,
-                result_link=article_url,
+                link=article_url or None,
+                type=TYPE_COMMENT,
+                body=replace_image_tokens(comment.text),
+                hashtag=job.keyword,
             )
         )
-        rows.extend(
-            _reply_rows(child, keyword=keyword, article_url=article_url)
-        )
+    current = [
+        child
+        for comment in job.article.comments
+        for child in comment.children
+    ]
+    while current:
+        nxt: list[CommentNode] = []
+        for node in current:
+            rows.append(
+                MasterRow(
+                    link=reply_target_value(node),
+                    type=TYPE_REPLY,
+                    body=replace_image_tokens(node.text),
+                    hashtag=job.keyword,
+                    result_link=article_url,
+                )
+            )
+            nxt.extend(node.children)
+        current = nxt
     return rows
 
 
@@ -828,22 +850,7 @@ def build_master_rows(
             )
         )
 
-    for comment in job.article.comments:
-        rows.append(
-            MasterRow(
-                link=article_url or None,
-                type=TYPE_COMMENT,
-                body=comment.text,
-                hashtag=job.keyword,
-            )
-        )
-        rows.extend(
-            _reply_rows(
-                comment,
-                keyword=job.keyword,
-                article_url=article_url,
-            )
-        )
+    rows.extend(_comment_and_reply_rows(job, article_url))
     return rows
 
 
