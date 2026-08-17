@@ -4,6 +4,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
 
+from .browser import user_facing_browser_error
 from .daily_posts import DailyPostSheetError
 from .gatling_paste import (
     GatlingPasteError,
@@ -53,8 +54,9 @@ class GatlingPasteApp(AutomationApp):
             text=(
                 "구글 시트 원고의 제목, 본문, 댓글·대댓글을 기관총 .xlsm 마스터에 "
                 "자동으로 넣는 프로그램입니다. "
-                "구글 시트 주소를 쓰면 '로그인 준비'로 구글에 한 번 로그인해야 합니다. "
-                "브랜드 CSV 파일을 쓰면 로그인은 필요 없습니다. "
+                "구글 시트 주소를 쓰면 '구글 시트 열기'로 시트를 엽니다. "
+                "V2R은 쓰지 않습니다. 로그인이 필요하면 그 Chrome 창에서만 하면 됩니다. "
+                "브랜드 CSV 파일을 쓰면 크롬은 필요 없습니다. "
                 "기관총 파일은 엑셀에서 닫아 둔 .xlsm을 고르세요."
             ),
             wraplength=800,
@@ -78,7 +80,7 @@ class GatlingPasteApp(AutomationApp):
 
         actions = ttk.Frame(outer)
         actions.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(8, 10))
-        ttk.Button(actions, text="로그인 준비", command=self._open_login).pack(
+        ttk.Button(actions, text="구글 시트 열기", command=self._open_sheet).pack(
             side=tk.LEFT
         )
         ttk.Button(actions, text="기관총 확인", command=self._check_gatling).pack(
@@ -127,9 +129,12 @@ class GatlingPasteApp(AutomationApp):
         if selected:
             self.gatling_path.set(selected)
 
-    def _open_login(self) -> None:
+    def _open_sheet(self) -> None:
         sheet_url = self.sheet_url.get().strip()
-        self._run_background(lambda: self.browser.open_login_window(sheet_url))
+        if not sheet_url:
+            messagebox.showerror("입력 오류", "브랜드 시트 URL을 넣어 주세요")
+            return
+        self._run_background(lambda: self.browser.open_google_sheet(sheet_url))
 
     def _brand_path(self) -> Path:
         local_csv = self.local_csv.get().strip()
@@ -156,7 +161,11 @@ class GatlingPasteApp(AutomationApp):
 
     def _check_data(self) -> None:
         def work() -> None:
-            result = build_gatling_master(self._brand_path(), manuscript_only=True)
+            result = build_gatling_master(
+                self._brand_path(),
+                manuscript_only=True,
+                skip_completed=False,
+            )
             counts = result.type_counts()
             self.logger.info(
                 "원고 확인: %s건 / 제목·본문 %s / 댓글 %s / 대댓글 %s",
@@ -207,6 +216,7 @@ class GatlingPasteApp(AutomationApp):
                     brand_path,
                     gatling_path,
                     manuscript_only=True,
+                    skip_completed=False,
                 )
                 counts = result.type_counts()
                 self.logger.info(
@@ -234,10 +244,10 @@ class GatlingPasteApp(AutomationApp):
                 )
             except (GatlingPasteError, DailyPostSheetError) as exc:
                 self.logger.exception("기관총 붙여넣기 실패")
-                self.ui_queue.put(("error", ("붙여넣기 실패", str(exc))))
+                self.ui_queue.put(("error", ("붙여넣기 실패", user_facing_browser_error(exc))))
             except Exception as exc:
                 self.logger.exception("기관총 붙여넣기 실행 실패")
-                self.ui_queue.put(("error", ("실행 실패", str(exc))))
+                self.ui_queue.put(("error", ("실행 실패", user_facing_browser_error(exc))))
             finally:
                 self.ui_queue.put(("finished", None))
 
@@ -247,6 +257,20 @@ class GatlingPasteApp(AutomationApp):
         if hasattr(self, "instance_lock"):
             self.instance_lock.__exit__(None, None, None)
         super()._on_close()
+
+    def _run_background(self, callback) -> None:
+        if self.worker and not self.worker.done():
+            messagebox.showwarning("작업 중", "현재 작업이 끝난 뒤 다시 시도하세요")
+            return
+
+        def work() -> None:
+            try:
+                callback()
+            except Exception as exc:
+                self.logger.exception("작업 실패")
+                self.ui_queue.put(("error", ("오류", user_facing_browser_error(exc))))
+
+        self.worker = self.executor.submit(work)
 
 
 def main() -> None:

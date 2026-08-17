@@ -214,12 +214,16 @@ def test_load_brand_sheet_reads_board_and_skips_completed(tmp_path: Path) -> Non
         f'"완료키워드","제목 : 완료\n본문 : 완료본문",씨씨앙,writer,질문형,https://v2r.example/x,,,Y,자유수다방\n',
     )
 
-    jobs, skipped = load_gatling_brand_jobs(path)
+    jobs, skipped = load_gatling_brand_jobs(path, skip_completed=True)
 
     assert len(jobs) == 1
     assert jobs[0].board == "자유수다방"
     assert jobs[0].article.comments[1].children[0].children[0].label == "대대댓글2"
     assert any("완료 링크" in item for item in skipped)
+
+    kept, kept_skipped = load_gatling_brand_jobs(path)
+    assert len(kept) == 2
+    assert kept_skipped == []
 
 
 def test_build_assigns_daily_posts_and_writes_master_columns(tmp_path: Path) -> None:
@@ -561,3 +565,33 @@ def test_xlsb_is_recognized_but_not_writable(tmp_path: Path) -> None:
     assert info.headers[:4] == ["링크", "타입", "제목", "내용"]
     with pytest.raises(GatlingPasteError, match="xlsb"):
         require_writable_gatling(path)
+
+
+def test_completed_f_column_rows_are_kept_for_gatling(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"엉덩이 종기","{QUESTION_SOURCE}",양평맘,writer,질문형,'
+        "https://v2r.daboja.im/nc/articleDetail/1,,,,이모저모이야기\n",
+    )
+
+    jobs, skipped = load_gatling_brand_jobs(brand)
+    result = build_gatling_master(brand, manuscript_only=True)
+
+    assert skipped == []
+    assert len(jobs) == 1
+    assert jobs[0].keyword == "엉덩이 종기"
+    assert jobs[0].completion_url.startswith("https://v2r.daboja.im")
+    assert result.jobs[0].keyword == "엉덩이 종기"
+
+
+def test_skip_completed_explains_why_nothing_is_left(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"엉덩이 종기","{QUESTION_SOURCE}",양평맘,writer,질문형,'
+        "https://v2r.daboja.im/nc/articleDetail/1,,,,이모저모이야기\n",
+    )
+
+    with pytest.raises(GatlingPasteError, match="F열 완료 링크"):
+        load_gatling_brand_jobs(brand, skip_completed=True)

@@ -620,7 +620,7 @@ def append_master_rows(path: str | Path, rows: list[MasterRow]) -> int:
 def load_gatling_brand_jobs(
     path: str | Path,
     *,
-    skip_completed: bool = True,
+    skip_completed: bool = False,
 ) -> tuple[list[GatlingBrandJob], list[str]]:
     csv_path = Path(path)
     if not csv_path.exists():
@@ -683,7 +683,16 @@ def load_gatling_brand_jobs(
                 )
             )
     if not jobs:
-        raise GatlingPasteError("붙여넣을 브랜드 원고가 없습니다")
+        if skipped:
+            preview = "\n".join(skipped[:8])
+            extra = f"\n외 {len(skipped) - 8}건" if len(skipped) > 8 else ""
+            raise GatlingPasteError(
+                "붙여넣을 브랜드 원고가 없습니다.\n" + preview + extra
+            )
+        raise GatlingPasteError(
+            "붙여넣을 브랜드 원고가 없습니다. "
+            "시트에 키워드·본문·카페명·원고유형이 있는 행이 있는지 확인하세요."
+        )
     return jobs, skipped
 
 
@@ -842,7 +851,7 @@ def build_gatling_master(
     brand_path: str | Path,
     daily_path: str | Path | None = None,
     *,
-    skip_completed: bool = True,
+    skip_completed: bool = False,
     rng: random.Random | None = None,
     extra_exact_names: list[str] | tuple[str, ...] = (),
     manuscript_only: bool = False,
@@ -911,7 +920,7 @@ def build_and_write_master(
     output_path: str | Path,
     daily_path: str | Path | None = None,
     *,
-    skip_completed: bool = True,
+    skip_completed: bool = False,
     rng: random.Random | None = None,
     extra_exact_names: list[str] | tuple[str, ...] = (),
     manuscript_only: bool = False,
@@ -933,7 +942,7 @@ def paste_manuscripts_into_gatling(
     gatling_path: str | Path,
     daily_path: str | Path | None = None,
     *,
-    skip_completed: bool = True,
+    skip_completed: bool = False,
     rng: random.Random | None = None,
     extra_exact_names: list[str] | tuple[str, ...] = (),
     manuscript_only: bool = True,
