@@ -247,6 +247,58 @@ def replace_image_tokens(text: str) -> str:
     return IMAGE_TOKEN_PATTERN.sub(IMAGE_PLACEHOLDER, text or "")
 
 
+def manuscript_text_key(title: object, body: object) -> tuple[str, str]:
+    return (replace_image_tokens(_cell(title)), replace_image_tokens(_cell(body)))
+
+
+def drop_duplicate_manuscripts(
+    jobs: list[GatlingBrandJob],
+    existing: set[tuple[str, str]] | None = None,
+) -> tuple[list[GatlingBrandJob], list[str]]:
+    seen = set(existing or ())
+    kept: list[GatlingBrandJob] = []
+    skipped: list[str] = []
+    for job in jobs:
+        key = manuscript_text_key(job.article.title, job.article.body)
+        if not (key[0] and key[1]):
+            kept.append(job)
+            continue
+        if key in seen:
+            skipped.append(f"행 {job.row_number}: 제목·본문이 이미 있어 건너뜀")
+            continue
+        seen.add(key)
+        kept.append(job)
+    return kept, skipped
+
+
+def load_existing_manuscript_keys(path: str | Path) -> set[tuple[str, str]]:
+    info = recognize_gatling_workbook(path)
+    if not info.recognized:
+        return set()
+    workbook = load_workbook(info.path, data_only=True)
+    try:
+        if info.master_sheet not in workbook.sheetnames:
+            return set()
+        sheet = workbook[info.master_sheet]
+        keys: set[tuple[str, str]] = set()
+        type_col = info.start_column + 1
+        title_col = info.start_column + 2
+        body_col = info.start_column + 3
+        for row_number in range(info.header_row + 1, sheet.max_row + 1):
+            typ = _cell(sheet.cell(row_number, type_col).value)
+            if typ not in ARTICLE_TYPES:
+                continue
+            key = manuscript_text_key(
+                sheet.cell(row_number, title_col).value,
+                sheet.cell(row_number, body_col).value,
+            )
+            if key[0] and key[1]:
+                keys.add(key)
+        return keys
+    finally:
+        workbook.close()
+
+
 def reply_target_value(node: CommentNode) -> int | float:
     """기관총 대댓글 A열에 원래 쓰이는 대상 번호. URL을 넣지 않는다."""
     if node.depth <= 0:
@@ -935,12 +987,15 @@ def build_gatling_master(
     brand: str = "",
     image_resolver: GoogleDriveImageResolver | None = None,
     image_dir: str | Path | None = None,
+    existing_keys: set[tuple[str, str]] | None = None,
 ) -> GatlingBuildResult:
     jobs, skipped = load_gatling_brand_jobs(
         brand_path,
         skip_completed=skip_completed,
         brand=brand,
     )
+    jobs, duplicate_skipped = drop_duplicate_manuscripts(jobs, existing_keys)
+    skipped.extend(duplicate_skipped)
     include_daily_new_post = not manuscript_only
     affiliate_jobs = [job for job in jobs if is_affiliate_cafe(job.cafe)]
     if include_daily_new_post and affiliate_jobs:
@@ -1022,6 +1077,7 @@ def build_and_write_master(
     brand: str = "",
     image_resolver: GoogleDriveImageResolver | None = None,
     image_dir: str | Path | None = None,
+    existing_keys: set[tuple[str, str]] | None = None,
 ) -> GatlingBuildResult:
     result = build_gatling_master(
         brand_path,
@@ -1033,6 +1089,7 @@ def build_and_write_master(
         brand=brand,
         image_resolver=image_resolver,
         image_dir=image_dir,
+        existing_keys=existing_keys,
     )
     write_master_xlsx(output_path, result.rows)
     return result
@@ -1062,6 +1119,14 @@ def paste_manuscripts_into_gatling(
         brand=brand,
         image_resolver=image_resolver,
         image_dir=image_dir,
+        existing_keys=load_existing_manuscript_keys(gatling_path),
     )
+    if not result.rows:
+        preview = "\n".join(result.skipped[:8])
+        extra = f"\n외 {len(result.skipped) - 8}건" if len(result.skipped) > 8 else ""
+        raise GatlingPasteError(
+            "제목·본문이 같은 원고는 이미 기관총에 있어 넣지 않았습니다."
+            + (f"\n{preview}{extra}" if preview else "")
+        )
     start_row = append_master_rows(gatling_path, result.rows)
     return result, start_row

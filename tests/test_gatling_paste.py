@@ -745,3 +745,36 @@ def test_brand_is_read_from_sheet_filename(tmp_path: Path) -> None:
 
     jobs, _ = load_gatling_brand_jobs(path)
     assert jobs[0].brand == "뉴더미스"
+
+
+def test_same_title_and_body_are_not_pasted_twice(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{QUESTION_SOURCE}",고요한아침,writer,질문형,,,,,가입인사\n'
+        f'"다른 키워드","{QUESTION_SOURCE}",고요한아침,writer,질문형,,,,,가입인사\n',
+    )
+    gatling = write_gatling_xlsx(tmp_path)
+
+    first, _ = paste_manuscripts_into_gatling(brand, gatling)
+    assert len(first.jobs) == 1
+    assert any("제목·본문이 이미 있어" in item for item in first.skipped)
+
+    with pytest.raises(GatlingPasteError, match="제목·본문이 같은 원고"):
+        paste_manuscripts_into_gatling(brand, gatling)
+
+
+def test_same_title_with_different_body_is_kept(tmp_path: Path) -> None:
+    other = (
+        "제목 :\n실제 원고 제목\n\n본문 :\n다른 본문\n\n댓글1:\n첫 댓글\n"
+    )
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{QUESTION_SOURCE}",고요한아침,writer,질문형,,,,,가입인사\n'
+        f'"단식원 가격","{other}",고요한아침,writer,질문형,,,,,가입인사\n',
+    )
+
+    result = build_gatling_master(brand, manuscript_only=True)
+    assert len(result.jobs) == 2
+    assert result.skipped == []

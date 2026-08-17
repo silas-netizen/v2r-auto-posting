@@ -12,6 +12,7 @@ from .gatling_paste import (
     build_gatling_master,
     gatling_image_folder,
     is_affiliate_cafe,
+    load_existing_manuscript_keys,
     load_gatling_brand_jobs,
     paste_manuscripts_into_gatling,
     recognize_gatling_workbook,
@@ -64,6 +65,7 @@ class GatlingPasteApp(AutomationApp):
                 "해시태그는 원고 행에만 넣습니다. "
                 "시트에 {키워드}·{A열 키워드}·{B/A}가 있으면 사진을 고른 뒤 "
                 "{이미지}로 바꾸고, 고른 사진은 기관총 파일 옆 폴더에 모읍니다. "
+                "제목과 본문이 이미 있는 원고는 넣지 않습니다. "
                 "구글 시트 주소를 쓰면 '구글 시트 열기'로 시트를 엽니다. "
                 "V2R은 쓰지 않습니다. 기관총 파일은 엑셀에서 닫아 둔 .xlsm을 고르세요."
             ),
@@ -203,6 +205,10 @@ class GatlingPasteApp(AutomationApp):
     def _check_data(self) -> None:
         def work() -> None:
             brand_path, daily_path = self._brand_and_daily_paths()
+            gatling_path = self.gatling_path.get().strip()
+            existing_keys = (
+                load_existing_manuscript_keys(gatling_path) if gatling_path else None
+            )
             result = build_gatling_master(
                 brand_path,
                 daily_path,
@@ -210,6 +216,7 @@ class GatlingPasteApp(AutomationApp):
                 skip_completed=False,
                 brand=self._brand_name(brand_path),
                 image_resolver=self._image_resolver(),
+                existing_keys=existing_keys,
             )
             counts = result.type_counts()
             self.logger.info(
