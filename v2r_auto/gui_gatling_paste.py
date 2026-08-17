@@ -5,7 +5,7 @@ from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
 
 from .browser import user_facing_browser_error
-from .daily_posts import DailyPostSheetError
+from .daily_posts import DailyPostSheetError, looks_like_daily_sheet
 from .gatling_paste import (
     DAILY_POST_SHEET_URL,
     GatlingPasteError,
@@ -154,7 +154,17 @@ class GatlingPasteApp(AutomationApp):
         jobs, _ = load_gatling_brand_jobs(brand_path, skip_completed=False)
         if any(is_affiliate_cafe(job.cafe) for job in jobs):
             self.logger.info("제휴 카페용 일상 글 시트를 내려받습니다")
-            return brand_path, self.browser.download_sheet(DAILY_POST_SHEET_URL)
+            daily_path = self.browser.download_sheet(
+                DAILY_POST_SHEET_URL,
+                ignore_paths=[brand_path],
+            )
+            if not looks_like_daily_sheet(daily_path):
+                self.logger.info("일상 글 시트가 아니라 한 번 더 받습니다")
+                daily_path = self.browser.download_sheet(
+                    DAILY_POST_SHEET_URL,
+                    ignore_paths=[brand_path, daily_path],
+                )
+            return brand_path, daily_path
         return brand_path, None
 
     def _check_gatling(self) -> None:

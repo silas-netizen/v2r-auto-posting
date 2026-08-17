@@ -217,41 +217,75 @@ class V2RBrowser:
         parsed = urlparse(sheet_url)
         gid = parse_qs(parsed.query).get("gid", ["0"])[0]
         if parsed.fragment.startswith("gid="):
-            gid = parsed.fragment.split("=", 1)[1]
+            gid = parsed.fragment.split("=", 1)[1].split("&", 1)[0]
         return (
             f"https://docs.google.com/spreadsheets/d/{match.group(1)}"
             f"/export?format=csv&gid={gid}"
         )
 
-    def download_sheet(self, sheet_url: str) -> Path:
+    def _set_download_dir(self, dest: Path) -> bool:
+        assert self.driver
+        dest.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "behavior": "allow",
+            "downloadPath": str(dest.resolve()),
+        }
+        for command in ("Page.setDownloadBehavior", "Browser.setDownloadBehavior"):
+            try:
+                self.driver.execute_cdp_cmd(command, payload)
+                return True
+            except Exception:
+                continue
+        return False
+
+    def download_sheet(
+        self,
+        sheet_url: str,
+        *,
+        ignore_paths: list[Path] | tuple[Path, ...] | None = None,
+    ) -> Path:
+        ignored = {path.resolve() for path in (ignore_paths or [])}
         self.ensure_browser()
         try:
-            return self._download_sheet_once(sheet_url)
+            return self._download_sheet_once(sheet_url, ignore_paths=ignored)
         except Exception as exc:
             if not is_browser_session_dead(exc):
                 raise
             self.logger.info("크롬 연결이 끊겨 다시 열고 한 번 더 받습니다")
             self.reset_session()
             self.start()
-            return self._download_sheet_once(sheet_url)
+            return self._download_sheet_once(sheet_url, ignore_paths=ignored)
 
-    def _download_sheet_once(self, sheet_url: str) -> Path:
+    def _download_sheet_once(
+        self,
+        sheet_url: str,
+        *,
+        ignore_paths: set[Path] | None = None,
+    ) -> Path:
         self.ensure_browser()
         assert self.driver
         self._switch_to_handle(self.google_handle)
         self.google_handle = self.driver.current_window_handle
-        before = {path: path.stat().st_mtime for path in self.config.download_dir.glob("*.csv")}
+        dest_dir = self.config.download_dir / f"sheet-{time.time_ns()}"
+        if not self._set_download_dir(dest_dir):
+            dest_dir = self.config.download_dir
+        before = {path: path.stat().st_mtime for path in dest_dir.glob("*.csv")}
+        ignored = ignore_paths or set()
         self.logger.info("Google Sheets 데이터를 내려받습니다")
         request_started = time.time()
+        if "/export?" not in sheet_url:
+            self._navigate(sheet_url, self.google_handle)
         self._navigate(self._sheet_export_url(sheet_url), self.google_handle)
         deadline = time.monotonic() + self.config.timeout_seconds
         while time.monotonic() < deadline:
             candidates = sorted(
-                self.config.download_dir.glob("*.csv"),
+                dest_dir.glob("*.csv"),
                 key=lambda path: path.stat().st_mtime,
                 reverse=True,
             )
             for candidate in candidates:
+                if candidate.resolve() in ignored:
+                    continue
                 if candidate not in before or candidate.stat().st_mtime > before[candidate]:
                     related_download = candidate.with_suffix(candidate.suffix + ".crdownload")
                     if candidate.stat().st_mtime >= request_started and not related_download.exists():
