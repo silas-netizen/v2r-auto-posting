@@ -11,6 +11,12 @@ from openpyxl import Workbook, load_workbook
 from .cafe_catalog import normalized_name
 from .content import CommentNode, ContentFormatError, ParsedArticle, parse_article
 from .daily_posts import DailyPostSheetError, load_daily_posts
+from .gatling_accounts import (
+    ProxyAccount,
+    ProxyBook,
+    account_for_comment_node,
+    resolve_job_accounts,
+)
 from .images import (
     GoogleDriveImageResolver,
     ResolvedImage,
@@ -121,12 +127,16 @@ class MasterRow:
     type: str = ""
     title: str = ""
     body: str = ""
+    chrome_number: int | str = ""
+    account: str = ""
+    password: str = ""
     hashtag: str = ""
     prefix: str = ""
     board_name: str = ""
     comment_policy: str = ""
     result_link: str = ""
     image_location: str = ""
+    ip: str = ""
 
     def cells(self) -> list[object]:
         return [
@@ -134,9 +144,9 @@ class MasterRow:
             self.type,
             self.title,
             self.body,
-            None,
-            None,
-            None,
+            self.chrome_number if self.chrome_number != "" else None,
+            self.account or None,
+            self.password or None,
             self.hashtag,
             self.prefix,
             self.board_name,
@@ -146,7 +156,7 @@ class MasterRow:
             self.image_location or None,
             None,
             self.result_link or None,
-            None,
+            self.ip or None,
             None,
             None,
         ]
@@ -158,6 +168,7 @@ class GatlingBuildResult:
     jobs: list[GatlingBrandJob] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     image_count: int = 0
+    account_count: int = 0
 
     def type_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -808,6 +819,16 @@ def assign_daily_posts(
             job.daily_post = post
 
 
+def _with_account(row: MasterRow, account: ProxyAccount | None) -> MasterRow:
+    if account is None:
+        return row
+    row.chrome_number = account.chrome_number
+    row.account = account.account
+    row.password = account.password
+    row.ip = account.ip
+    return row
+
+
 def _article_row(
     *,
     type_name: str,
@@ -818,32 +839,43 @@ def _article_row(
     link: str = "",
     with_hashtag: bool = False,
     image_location: str = "",
+    author: ProxyAccount | None = None,
 ) -> MasterRow:
-    return MasterRow(
-        link=link or None,
-        type=type_name,
-        title=replace_image_tokens(title),
-        body=replace_image_tokens(body),
-        hashtag=job.keyword if with_hashtag else "",
-        prefix=job.prefix,
-        board_name=board_name,
-        comment_policy=COMMENT_ALLOWED,
-        image_location=image_location if with_hashtag else "",
+    return _with_account(
+        MasterRow(
+            link=link or None,
+            type=type_name,
+            title=replace_image_tokens(title),
+            body=replace_image_tokens(body),
+            hashtag=job.keyword if with_hashtag else "",
+            prefix=job.prefix,
+            board_name=board_name,
+            comment_policy=COMMENT_ALLOWED,
+            image_location=image_location if with_hashtag else "",
+        ),
+        author,
     )
 
 
 def _comment_and_reply_rows(
     job: GatlingBrandJob,
     article_url: str,
+    *,
+    author: ProxyAccount | None = None,
+    comment_map: dict[str, ProxyAccount] | None = None,
 ) -> list[MasterRow]:
     """수정 발행 순서: 댓글을 모두 넣은 뒤, 대댓글은 얕은 것부터 넣는다."""
     rows: list[MasterRow] = []
+    mapping = comment_map or {}
     for comment in job.article.comments:
         rows.append(
-            MasterRow(
-                link=article_url or None,
-                type=TYPE_COMMENT,
-                body=replace_image_tokens(comment.text),
+            _with_account(
+                MasterRow(
+                    link=article_url or None,
+                    type=TYPE_COMMENT,
+                    body=replace_image_tokens(comment.text),
+                ),
+                account_for_comment_node(job, comment, mapping, author),
             )
         )
     current = [
@@ -855,11 +887,14 @@ def _comment_and_reply_rows(
         nxt: list[CommentNode] = []
         for node in current:
             rows.append(
-                MasterRow(
-                    link=reply_target_value(node),
-                    type=TYPE_REPLY,
-                    body=replace_image_tokens(node.text),
-                    result_link=article_url,
+                _with_account(
+                    MasterRow(
+                        link=reply_target_value(node),
+                        type=TYPE_REPLY,
+                        body=replace_image_tokens(node.text),
+                        result_link=article_url,
+                    ),
+                    account_for_comment_node(job, node, mapping, author),
                 )
             )
             nxt.extend(node.children)
@@ -873,6 +908,8 @@ def build_master_rows(
     *,
     include_daily_new_post: bool = True,
     image_location: str = "",
+    proxy_book: ProxyBook | None = None,
+    rng: random.Random | None = None,
 ) -> list[MasterRow]:
     board_name = exact_board_name(
         job.board,
@@ -880,6 +917,7 @@ def build_master_rows(
         extra_exact_names=extra_exact_names,
     )
     article_url = (job.cafe_article_url or "").strip()
+    author, comment_map = resolve_job_accounts(job, proxy_book, rng=rng)
     rows: list[MasterRow] = []
 
     if is_affiliate_cafe(job.cafe) and include_daily_new_post:
@@ -894,6 +932,7 @@ def build_master_rows(
                 body=job.daily_post.body,
                 job=job,
                 board_name=board_name,
+                author=author,
             )
         )
         rows.append(
@@ -906,6 +945,7 @@ def build_master_rows(
                 link=article_url,
                 with_hashtag=True,
                 image_location=image_location,
+                author=author,
             )
         )
     elif is_affiliate_cafe(job.cafe):
@@ -919,6 +959,7 @@ def build_master_rows(
                 link=article_url,
                 with_hashtag=True,
                 image_location=image_location,
+                author=author,
             )
         )
     else:
@@ -932,10 +973,18 @@ def build_master_rows(
                 link=article_url,
                 with_hashtag=True,
                 image_location=image_location,
+                author=author,
             )
         )
 
-    rows.extend(_comment_and_reply_rows(job, article_url))
+    rows.extend(
+        _comment_and_reply_rows(
+            job,
+            article_url,
+            author=author if is_affiliate_cafe(job.cafe) else None,
+            comment_map=comment_map,
+        )
+    )
     return rows
 
 
@@ -1002,6 +1051,7 @@ def build_gatling_master(
     image_resolver: GoogleDriveImageResolver | None = None,
     image_dir: str | Path | None = None,
     existing_keys: set[tuple[str, str]] | None = None,
+    proxy_book: ProxyBook | None = None,
 ) -> GatlingBuildResult:
     jobs, skipped = load_gatling_brand_jobs(
         brand_path,
@@ -1018,10 +1068,20 @@ def build_gatling_master(
                 "제휴 카페 원고가 있어 일상 글 시트가 필요합니다"
             )
         assign_daily_posts(jobs, load_daily_posts(daily_path), rng=rng)
+    if proxy_book and affiliate_jobs and any(job.article.comments for job in affiliate_jobs):
+        comment_count = len(proxy_book.comment_accounts())
+        if comment_count < 6:
+            raise GatlingPasteError(
+                f"양평맘·씨씨앙 댓글 아이디가 6개 필요합니다. 지금 {comment_count}개입니다"
+            )
 
     rows: list[MasterRow] = []
     image_count = 0
     for job in jobs:
+        if proxy_book and job.account and not proxy_book.find_author(job.account, job.cafe):
+            skipped.append(
+                f"행 {job.row_number}: 작성계정 {job.account}을 프록시 엑셀에서 찾지 못했습니다"
+            )
         image_location, count = _resolve_job_images(
             job,
             image_resolver=image_resolver,
@@ -1035,6 +1095,8 @@ def build_gatling_master(
                 extra_exact_names=extra_exact_names,
                 include_daily_new_post=include_daily_new_post,
                 image_location=image_location,
+                proxy_book=proxy_book,
+                rng=rng,
             )
         )
     return GatlingBuildResult(
@@ -1042,6 +1104,7 @@ def build_gatling_master(
         jobs=jobs,
         skipped=skipped,
         image_count=image_count,
+        account_count=sum(1 for row in rows if row.account),
     )
 
 
@@ -1092,6 +1155,7 @@ def build_and_write_master(
     image_resolver: GoogleDriveImageResolver | None = None,
     image_dir: str | Path | None = None,
     existing_keys: set[tuple[str, str]] | None = None,
+    proxy_book: ProxyBook | None = None,
 ) -> GatlingBuildResult:
     result = build_gatling_master(
         brand_path,
@@ -1104,6 +1168,7 @@ def build_and_write_master(
         image_resolver=image_resolver,
         image_dir=image_dir,
         existing_keys=existing_keys,
+        proxy_book=proxy_book,
     )
     write_master_xlsx(output_path, result.rows)
     return result
@@ -1121,6 +1186,7 @@ def paste_manuscripts_into_gatling(
     brand: str = "",
     image_resolver: GoogleDriveImageResolver | None = None,
     image_dir: str | Path | None = None,
+    proxy_book: ProxyBook | None = None,
 ) -> tuple[GatlingBuildResult, int]:
     """Append Google Sheet title/body/comments into a recognized 기관총 마스터."""
     result = build_gatling_master(
@@ -1134,6 +1200,7 @@ def paste_manuscripts_into_gatling(
         image_resolver=image_resolver,
         image_dir=image_dir,
         existing_keys=load_existing_manuscript_keys(gatling_path),
+        proxy_book=proxy_book,
     )
     if not result.rows:
         preview = "\n".join(result.skipped[:8])

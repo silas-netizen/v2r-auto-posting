@@ -6,6 +6,7 @@ import tkinter as tk
 
 from .browser import user_facing_browser_error
 from .daily_posts import DailyPostSheetError, looks_like_daily_sheet
+from .gatling_accounts import recognize_proxy_workbook, require_proxy_workbook
 from .gatling_paste import (
     DAILY_POST_SHEET_URL,
     GatlingPasteError,
@@ -37,20 +38,21 @@ class GatlingPasteApp(AutomationApp):
             messagebox.showerror("중복 실행", str(exc))
             self.destroy()
             raise SystemExit(1) from exc
-        self.geometry("860x640")
-        self.minsize(800, 580)
+        self.geometry("860x700")
+        self.minsize(800, 620)
 
     def _create_variables(self) -> None:
         self.sheet_url = tk.StringVar()
         self.local_csv = tk.StringVar()
         self.gatling_path = tk.StringVar()
+        self.proxy_path = tk.StringVar()
         self.progress_text = tk.StringVar(value="대기 중")
 
     def _build_ui(self) -> None:
         outer = ttk.Frame(self, padding=16)
         outer.pack(fill=tk.BOTH, expand=True)
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(7, weight=1)
+        outer.rowconfigure(8, weight=1)
 
         ttk.Label(outer, text=self.app_name, font=("", 18, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
@@ -68,6 +70,8 @@ class GatlingPasteApp(AutomationApp):
                 "시트에 있는 원고는 모두 넣습니다. "
                 "엑셀 타입이 비어 있어도 새글·글수정·댓글·대댓글을 알아서 적습니다. "
                 "제목과 본문이 이미 같은 원고만 넣지 않습니다. "
+                "프록시 엑셀을 넣으면 양평맘·씨씨앙 댓글 아이디를 랜덤으로 넣고, "
+                "작성자 아이디·비번·크롬번호도 채웁니다. "
                 "구글 시트 주소를 쓰면 '구글 시트 열기'로 시트를 엽니다. "
                 "V2R은 쓰지 않습니다. 기관총 파일은 엑셀에서 닫아 둔 .xlsm을 고르세요."
             ),
@@ -89,13 +93,23 @@ class GatlingPasteApp(AutomationApp):
             self.gatling_path,
             button=("파일", self._choose_gatling),
         )
+        self._entry_row(
+            outer,
+            5,
+            "프록시 엑셀",
+            self.proxy_path,
+            button=("파일", self._choose_proxy),
+        )
 
         actions = ttk.Frame(outer)
-        actions.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(8, 10))
+        actions.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 10))
         ttk.Button(actions, text="구글 시트 열기", command=self._open_sheet).pack(
             side=tk.LEFT
         )
         ttk.Button(actions, text="기관총 확인", command=self._check_gatling).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        ttk.Button(actions, text="프록시 확인", command=self._check_proxy).pack(
             side=tk.LEFT, padx=(8, 0)
         )
         ttk.Button(actions, text="원고 확인", command=self._check_data).pack(
@@ -111,7 +125,7 @@ class GatlingPasteApp(AutomationApp):
         self.stop_button.pack(side=tk.LEFT, padx=(8, 0))
 
         progress_frame = ttk.Frame(outer)
-        progress_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        progress_frame.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(0, 6))
         progress_frame.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_frame, maximum=100)
         self.progress.grid(row=0, column=0, sticky="ew")
@@ -120,7 +134,7 @@ class GatlingPasteApp(AutomationApp):
         )
 
         log_frame = ttk.LabelFrame(outer, text="진행 기록", padding=8)
-        log_frame.grid(row=7, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=8, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state=tk.DISABLED)
@@ -140,6 +154,23 @@ class GatlingPasteApp(AutomationApp):
         )
         if selected:
             self.gatling_path.set(selected)
+
+    def _choose_proxy(self) -> None:
+        selected = filedialog.askopenfilename(
+            title="프록시 엑셀 선택",
+            filetypes=[
+                ("엑셀 파일", "*.xlsx *.xlsm *.csv"),
+                ("모든 파일", "*.*"),
+            ],
+        )
+        if selected:
+            self.proxy_path.set(selected)
+
+    def _proxy_book(self):
+        path = self.proxy_path.get().strip()
+        if not path:
+            return None
+        return require_proxy_workbook(path)
 
     def _open_sheet(self) -> None:
         sheet_url = self.sheet_url.get().strip()
@@ -204,6 +235,20 @@ class GatlingPasteApp(AutomationApp):
 
         self._run_background(work)
 
+    def _check_proxy(self) -> None:
+        path = self.proxy_path.get().strip()
+        if not path:
+            messagebox.showerror("입력 오류", "프록시 엑셀 파일을 선택해 주세요")
+            return
+
+        def work() -> None:
+            info = recognize_proxy_workbook(path)
+            self.logger.info(info.message)
+            kind = "info" if info.recognized else "error"
+            self.ui_queue.put((kind, ("프록시 확인", info.message)))
+
+        self._run_background(work)
+
     def _check_data(self) -> None:
         def work() -> None:
             brand_path, daily_path = self._brand_and_daily_paths()
@@ -219,16 +264,18 @@ class GatlingPasteApp(AutomationApp):
                 brand=self._brand_name(brand_path),
                 image_resolver=self._image_resolver(),
                 existing_keys=existing_keys,
+                proxy_book=self._proxy_book(),
             )
             counts = result.type_counts()
             self.logger.info(
-                "원고 확인: %s건 / 새글 %s / 글수정 %s / 댓글 %s / 대댓글 %s / 이미지 %s",
+                "원고 확인: %s건 / 새글 %s / 글수정 %s / 댓글 %s / 대댓글 %s / 이미지 %s / 계정 %s",
                 len(result.jobs),
                 counts.get("새글", 0),
                 counts.get("글수정", 0),
                 counts.get("댓글", 0),
                 counts.get("대댓글", 0),
                 result.image_count,
+                result.account_count,
             )
             for item in result.skipped:
                 self.logger.info("건너뜀 %s", item)
@@ -243,7 +290,8 @@ class GatlingPasteApp(AutomationApp):
                             f"글수정 {counts.get('글수정', 0)} / "
                             f"댓글 {counts.get('댓글', 0)} / "
                             f"대댓글 {counts.get('대댓글', 0)} / "
-                            f"이미지 {result.image_count}장\n"
+                            f"이미지 {result.image_count}장 / "
+                            f"계정 {result.account_count}줄\n"
                             f"건너뜀 {len(result.skipped)}건"
                         ),
                     ),
@@ -279,6 +327,7 @@ class GatlingPasteApp(AutomationApp):
                     brand=self._brand_name(brand_path),
                     image_resolver=self._image_resolver(),
                     image_dir=gatling_image_folder(gatling_path),
+                    proxy_book=self._proxy_book(),
                 )
                 counts = result.type_counts()
                 self.logger.info(
@@ -302,7 +351,8 @@ class GatlingPasteApp(AutomationApp):
                                 f"글수정 {counts.get('글수정', 0)} / "
                                 f"댓글 {counts.get('댓글', 0)} / "
                                 f"대댓글 {counts.get('대댓글', 0)} / "
-                                f"이미지 {result.image_count}장"
+                                f"이미지 {result.image_count}장 / "
+                                f"계정 {result.account_count}줄"
                             ),
                         ),
                     )
