@@ -11,6 +11,11 @@ from openpyxl import Workbook, load_workbook
 from .cafe_catalog import normalized_name
 from .content import CommentNode, ContentFormatError, ParsedArticle, parse_article
 from .daily_posts import DailyPostSheetError, load_daily_posts
+from .images import (
+    GoogleDriveImageResolver,
+    ResolvedImage,
+    brand_from_sheet_title,
+)
 from .models import DailyPost
 
 
@@ -66,7 +71,7 @@ COMMENT_ALLOWED = "허용"
 REQUIRED_MASTER_HEADERS = MASTER_HEADERS[:4]
 WRITABLE_KINDS = {"xlsx", "xlsm"}
 IMAGE_PLACEHOLDER = "{이미지}"
-IMAGE_TOKEN_PATTERN = re.compile(r"\{(?:A열\s*)?키워드\}")
+IMAGE_TOKEN_PATTERN = re.compile(r"\{(?:A열\s*)?키워드\}|\{B\s*/\s*A\}|\{BA\}")
 XLSB_WRITE_MESSAGE = (
     "고른 파일은 기관총 원본(.xlsb)입니다. "
     "이 형식은 매크로 파일이라 프로그램이 제목·본문·댓글을 직접 넣을 수 없습니다. "
@@ -105,6 +110,7 @@ class GatlingBrandJob:
     prefix: str = ""
     account_type: str = ""
     image_disabled: bool = False
+    brand: str = ""
     completion_url: str = ""
     cafe_article_url: str = ""
     daily_post: DailyPost | None = None
@@ -121,6 +127,7 @@ class MasterRow:
     board_name: str = ""
     comment_policy: str = ""
     result_link: str = ""
+    image_location: str = ""
 
     def cells(self) -> list[object]:
         return [
@@ -137,7 +144,7 @@ class MasterRow:
             None,
             self.comment_policy,
             None,
-            None,
+            self.image_location or None,
             None,
             self.result_link or None,
             None,
@@ -151,6 +158,7 @@ class GatlingBuildResult:
     rows: list[MasterRow]
     jobs: list[GatlingBrandJob] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    image_count: int = 0
 
     def type_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -629,11 +637,13 @@ def load_gatling_brand_jobs(
     path: str | Path,
     *,
     skip_completed: bool = False,
+    brand: str = "",
 ) -> tuple[list[GatlingBrandJob], list[str]]:
     csv_path = Path(path)
     if not csv_path.exists():
         raise GatlingPasteError(f"브랜드 시트 파일이 없습니다: {csv_path}")
 
+    detected_brand = brand or brand_from_sheet_title(csv_path.stem)
     skipped: list[str] = []
     with csv_path.open("r", encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream)
@@ -687,6 +697,7 @@ def load_gatling_brand_jobs(
                         _cell(row.get(OPTIONAL_COLUMNS["image_disabled"])).casefold()
                         == "y"
                     ),
+                    brand=detected_brand,
                     completion_url=completion_url,
                 )
             )
@@ -739,16 +750,19 @@ def _article_row(
     job: GatlingBrandJob,
     board_name: str,
     link: str = "",
+    with_hashtag: bool = False,
+    image_location: str = "",
 ) -> MasterRow:
     return MasterRow(
         link=link or None,
         type=type_name,
         title=replace_image_tokens(title),
         body=replace_image_tokens(body),
-        hashtag=job.keyword,
+        hashtag=job.keyword if with_hashtag else "",
         prefix=job.prefix,
         board_name=board_name,
         comment_policy=COMMENT_ALLOWED,
+        image_location=image_location if with_hashtag else "",
     )
 
 
@@ -764,7 +778,6 @@ def _comment_and_reply_rows(
                 link=article_url or None,
                 type=TYPE_COMMENT,
                 body=replace_image_tokens(comment.text),
-                hashtag=job.keyword,
             )
         )
     current = [
@@ -780,7 +793,6 @@ def _comment_and_reply_rows(
                     link=reply_target_value(node),
                     type=TYPE_REPLY,
                     body=replace_image_tokens(node.text),
-                    hashtag=job.keyword,
                     result_link=article_url,
                 )
             )
@@ -794,6 +806,7 @@ def build_master_rows(
     extra_exact_names: list[str] | tuple[str, ...] = (),
     *,
     include_daily_new_post: bool = True,
+    image_location: str = "",
 ) -> list[MasterRow]:
     board_name = exact_board_name(
         job.board,
@@ -825,6 +838,8 @@ def build_master_rows(
                 job=job,
                 board_name=board_name,
                 link=article_url,
+                with_hashtag=True,
+                image_location=image_location,
             )
         )
     elif is_affiliate_cafe(job.cafe):
@@ -836,6 +851,8 @@ def build_master_rows(
                 job=job,
                 board_name=board_name,
                 link=article_url,
+                with_hashtag=True,
+                image_location=image_location,
             )
         )
     else:
@@ -847,11 +864,64 @@ def build_master_rows(
                 job=job,
                 board_name=board_name,
                 link=article_url,
+                with_hashtag=True,
+                image_location=image_location,
             )
         )
 
     rows.extend(_comment_and_reply_rows(job, article_url))
     return rows
+
+
+def gatling_image_folder(gatling_path: str | Path) -> Path:
+    path = Path(gatling_path)
+    return path.with_name(f"{path.stem}_images")
+
+
+def collect_resolved_images(resolved: list[ResolvedImage], dest_dir: str | Path) -> str:
+    folder = Path(dest_dir)
+    folder.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+    used: set[str] = set()
+    for item in resolved:
+        dest = folder / item.local_path.name
+        if dest.name.casefold() in used or (
+            dest.exists() and dest.resolve() != item.local_path.resolve()
+        ):
+            dest = folder / f"{item.file_id}_{item.local_path.name}"
+        if dest.resolve() != item.local_path.resolve():
+            dest.write_bytes(item.local_path.read_bytes())
+        used.add(dest.name.casefold())
+        written.append(str(dest))
+    return "|".join(written)
+
+
+def _resolve_job_images(
+    job: GatlingBrandJob,
+    *,
+    image_resolver: GoogleDriveImageResolver | None,
+    image_dir: str | Path | None,
+    skipped: list[str],
+) -> tuple[str, int]:
+    if job.image_disabled or image_resolver is None or not (job.brand or "").strip():
+        return "", 0
+    source = f"{job.article.title}\n{job.article.body}"
+    try:
+        resolved = image_resolver.resolve_body(
+            brand=job.brand,
+            keyword=job.keyword,
+            body=source,
+            image_disabled=job.image_disabled,
+            row_number=job.row_number,
+        )
+    except Exception as exc:
+        skipped.append(f"행 {job.row_number}: 이미지 생략 ({exc})")
+        return "", 0
+    if not resolved:
+        return "", 0
+    if image_dir:
+        return collect_resolved_images(resolved, image_dir), len(resolved)
+    return "", len(resolved)
 
 
 def build_gatling_master(
@@ -862,10 +932,14 @@ def build_gatling_master(
     rng: random.Random | None = None,
     extra_exact_names: list[str] | tuple[str, ...] = (),
     manuscript_only: bool = False,
+    brand: str = "",
+    image_resolver: GoogleDriveImageResolver | None = None,
+    image_dir: str | Path | None = None,
 ) -> GatlingBuildResult:
     jobs, skipped = load_gatling_brand_jobs(
         brand_path,
         skip_completed=skip_completed,
+        brand=brand,
     )
     include_daily_new_post = not manuscript_only
     affiliate_jobs = [job for job in jobs if is_affiliate_cafe(job.cafe)]
@@ -877,15 +951,29 @@ def build_gatling_master(
         assign_daily_posts(jobs, load_daily_posts(daily_path), rng=rng)
 
     rows: list[MasterRow] = []
+    image_count = 0
     for job in jobs:
+        image_location, count = _resolve_job_images(
+            job,
+            image_resolver=image_resolver,
+            image_dir=image_dir,
+            skipped=skipped,
+        )
+        image_count += count
         rows.extend(
             build_master_rows(
                 job,
                 extra_exact_names=extra_exact_names,
                 include_daily_new_post=include_daily_new_post,
+                image_location=image_location,
             )
         )
-    return GatlingBuildResult(rows=rows, jobs=jobs, skipped=skipped)
+    return GatlingBuildResult(
+        rows=rows,
+        jobs=jobs,
+        skipped=skipped,
+        image_count=image_count,
+    )
 
 
 def create_master_template(path: str | Path) -> Path:
@@ -931,6 +1019,9 @@ def build_and_write_master(
     rng: random.Random | None = None,
     extra_exact_names: list[str] | tuple[str, ...] = (),
     manuscript_only: bool = False,
+    brand: str = "",
+    image_resolver: GoogleDriveImageResolver | None = None,
+    image_dir: str | Path | None = None,
 ) -> GatlingBuildResult:
     result = build_gatling_master(
         brand_path,
@@ -939,6 +1030,9 @@ def build_and_write_master(
         rng=rng,
         extra_exact_names=extra_exact_names,
         manuscript_only=manuscript_only,
+        brand=brand,
+        image_resolver=image_resolver,
+        image_dir=image_dir,
     )
     write_master_xlsx(output_path, result.rows)
     return result
@@ -953,6 +1047,9 @@ def paste_manuscripts_into_gatling(
     rng: random.Random | None = None,
     extra_exact_names: list[str] | tuple[str, ...] = (),
     manuscript_only: bool = True,
+    brand: str = "",
+    image_resolver: GoogleDriveImageResolver | None = None,
+    image_dir: str | Path | None = None,
 ) -> tuple[GatlingBuildResult, int]:
     """Append Google Sheet title/body/comments into a recognized 기관총 마스터."""
     result = build_gatling_master(
@@ -962,6 +1059,9 @@ def paste_manuscripts_into_gatling(
         rng=rng,
         extra_exact_names=extra_exact_names,
         manuscript_only=manuscript_only,
+        brand=brand,
+        image_resolver=image_resolver,
+        image_dir=image_dir,
     )
     start_row = append_master_rows(gatling_path, result.rows)
     return result, start_row

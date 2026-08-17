@@ -10,11 +10,13 @@ from .gatling_paste import (
     DAILY_POST_SHEET_URL,
     GatlingPasteError,
     build_gatling_master,
+    gatling_image_folder,
     is_affiliate_cafe,
     load_gatling_brand_jobs,
     paste_manuscripts_into_gatling,
     recognize_gatling_workbook,
 )
+from .images import GoogleDriveImageResolver, brand_from_sheet_title, load_sheet_brand
 from .gui import AutomationApp
 from .state import AnotherInstanceRunningError, InstanceLock
 
@@ -59,7 +61,9 @@ class GatlingPasteApp(AutomationApp):
                 "자동으로 넣는 프로그램입니다. "
                 "제휴 카페(씨씨앙·양평맘)는 새글(일상) → 글수정(원고) → 댓글 → 대댓글 "
                 "순서로 넣습니다. 자사 카페는 새글에 원고를 바로 넣습니다. "
-                "시트에 {키워드} 또는 {A열 키워드}가 있으면 기관총이 읽는 {이미지}로 바꿉니다. "
+                "해시태그는 원고 행에만 넣습니다. "
+                "시트에 {키워드}·{A열 키워드}·{B/A}가 있으면 사진을 고른 뒤 "
+                "{이미지}로 바꾸고, 고른 사진은 기관총 파일 옆 폴더에 모읍니다. "
                 "구글 시트 주소를 쓰면 '구글 시트 열기'로 시트를 엽니다. "
                 "V2R은 쓰지 않습니다. 기관총 파일은 엑셀에서 닫아 둔 .xlsm을 고르세요."
             ),
@@ -167,6 +171,21 @@ class GatlingPasteApp(AutomationApp):
             return brand_path, daily_path
         return brand_path, None
 
+    def _brand_name(self, brand_path: Path) -> str:
+        name = brand_from_sheet_title(brand_path.stem)
+        if name:
+            return name
+        url = self.sheet_url.get().strip()
+        if not url:
+            return ""
+        try:
+            return load_sheet_brand(url)
+        except Exception:
+            return ""
+
+    def _image_resolver(self) -> GoogleDriveImageResolver:
+        return GoogleDriveImageResolver(self.data_dir / "data", self.logger)
+
     def _check_gatling(self) -> None:
         path = self.gatling_path.get().strip()
         if not path:
@@ -189,15 +208,18 @@ class GatlingPasteApp(AutomationApp):
                 daily_path,
                 manuscript_only=False,
                 skip_completed=False,
+                brand=self._brand_name(brand_path),
+                image_resolver=self._image_resolver(),
             )
             counts = result.type_counts()
             self.logger.info(
-                "원고 확인: %s건 / 새글 %s / 글수정 %s / 댓글 %s / 대댓글 %s",
+                "원고 확인: %s건 / 새글 %s / 글수정 %s / 댓글 %s / 대댓글 %s / 이미지 %s",
                 len(result.jobs),
                 counts.get("새글", 0),
                 counts.get("글수정", 0),
                 counts.get("댓글", 0),
                 counts.get("대댓글", 0),
+                result.image_count,
             )
             for item in result.skipped:
                 self.logger.info("건너뜀 %s", item)
@@ -211,7 +233,8 @@ class GatlingPasteApp(AutomationApp):
                             f"새글 {counts.get('새글', 0)} / "
                             f"글수정 {counts.get('글수정', 0)} / "
                             f"댓글 {counts.get('댓글', 0)} / "
-                            f"대댓글 {counts.get('대댓글', 0)}\n"
+                            f"대댓글 {counts.get('대댓글', 0)} / "
+                            f"이미지 {result.image_count}장\n"
                             f"건너뜀 {len(result.skipped)}건"
                         ),
                     ),
@@ -244,6 +267,9 @@ class GatlingPasteApp(AutomationApp):
                     daily_path,
                     manuscript_only=False,
                     skip_completed=False,
+                    brand=self._brand_name(brand_path),
+                    image_resolver=self._image_resolver(),
+                    image_dir=gatling_image_folder(gatling_path),
                 )
                 counts = result.type_counts()
                 self.logger.info(
@@ -265,7 +291,8 @@ class GatlingPasteApp(AutomationApp):
                                 f"새글 {counts.get('새글', 0)} / "
                                 f"글수정 {counts.get('글수정', 0)} / "
                                 f"댓글 {counts.get('댓글', 0)} / "
-                                f"대댓글 {counts.get('대댓글', 0)}"
+                                f"대댓글 {counts.get('대댓글', 0)} / "
+                                f"이미지 {result.image_count}장"
                             ),
                         ),
                     )

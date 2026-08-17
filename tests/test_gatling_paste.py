@@ -4,6 +4,7 @@ import pytest
 from openpyxl import Workbook, load_workbook
 
 from v2r_auto.content import CommentNode, ParsedArticle, parse_article
+from v2r_auto.images import ResolvedImage
 from v2r_auto.gatling_paste import (
     AFFILIATE_EXACT_BOARDS,
     MASTER_HEADER_ROW,
@@ -18,7 +19,9 @@ from v2r_auto.gatling_paste import (
     build_and_write_master,
     build_gatling_master,
     build_master_rows,
+    collect_resolved_images,
     create_master_template,
+    gatling_image_folder,
     exact_board_name,
     load_gatling_brand_jobs,
     paste_manuscripts_into_gatling,
@@ -159,13 +162,15 @@ def test_affiliate_daily_goes_to_new_post_and_manuscript_goes_to_edit() -> None:
     assert rows[0].title == "일상 제목"
     assert rows[0].body == "일상 본문"
     assert rows[0].board_name == "자유 수다방"
-    assert rows[0].hashtag == "단식원 가격"
+    assert rows[0].hashtag == ""
     assert rows[0].prefix == "자유"
     assert rows[0].link is None
+    assert rows[0].image_location == ""
 
     assert rows[1].type == TYPE_EDIT_POST
     assert rows[1].title == "실제 원고 제목"
     assert rows[1].body == "실제 원고 본문"
+    assert rows[1].hashtag == "단식원 가격"
     assert rows[1].board_name == "자유 수다방"
     assert rows[1].link is None
 
@@ -199,6 +204,8 @@ def test_self_owned_manuscript_is_new_post_only() -> None:
     assert TYPE_EDIT_POST not in types
     assert rows[0].title == "실제 원고 제목"
     assert rows[0].board_name == "가입인사"
+    assert rows[0].hashtag == "단식원 가격"
+    assert all(not row.hashtag for row in rows[1:])
 
 
 def test_affiliate_without_daily_post_raises() -> None:
@@ -572,6 +579,7 @@ def test_image_tokens_become_gatling_placeholder() -> None:
     assert replace_image_tokens("사진 {키워드} 끝") == "사진 {이미지} 끝"
     assert replace_image_tokens("{A열 키워드}\n본문") == "{이미지}\n본문"
     assert replace_image_tokens("{A열키워드}") == "{이미지}"
+    assert replace_image_tokens("전 {B/A} 후") == "전 {이미지} 후"
     assert replace_image_tokens("이미 {이미지} 있음") == "이미 {이미지} 있음"
 
 
@@ -682,3 +690,58 @@ def test_skip_completed_explains_why_nothing_is_left(tmp_path: Path) -> None:
 
     with pytest.raises(GatlingPasteError, match="F열 완료 링크"):
         load_gatling_brand_jobs(brand, skip_completed=True)
+
+
+def test_collected_images_use_pipe_separated_paths(tmp_path: Path) -> None:
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    first = source_dir / "1.jpg"
+    second = source_dir / "31.jpg"
+    third = source_dir / "51.jpg"
+    first.write_bytes(b"one")
+    second.write_bytes(b"two")
+    third.write_bytes(b"three")
+    dest = tmp_path / "복불용_images"
+    resolved = [
+        ResolvedImage(0, "키워드", "a", "1.jpg", first),
+        ResolvedImage(1, "키워드", "b", "31.jpg", second),
+        ResolvedImage(2, "B/A", "c", "51.jpg", third),
+    ]
+
+    joined = collect_resolved_images(resolved, dest)
+
+    assert dest.joinpath("1.jpg").read_bytes() == b"one"
+    assert dest.joinpath("31.jpg").read_bytes() == b"two"
+    assert dest.joinpath("51.jpg").read_bytes() == b"three"
+    assert joined == "|".join(
+        [str(dest / "1.jpg"), str(dest / "31.jpg"), str(dest / "51.jpg")]
+    )
+
+
+def test_image_folder_sits_next_to_the_excel(tmp_path: Path) -> None:
+    path = tmp_path / "기관총 카페봇 복불용.xlsm"
+    assert gatling_image_folder(path) == tmp_path / "기관총 카페봇 복불용_images"
+
+
+def test_manuscript_row_gets_hashtag_and_image_location() -> None:
+    job = make_job(cafe="씨씨앙", board="자유수다방")
+    rows = build_master_rows(job, image_location=r"G:\image\1.jpg|G:\image\31.jpg")
+
+    assert rows[0].hashtag == ""
+    assert rows[0].image_location == ""
+    assert rows[1].hashtag == "단식원 가격"
+    assert rows[1].image_location == r"G:\image\1.jpg|G:\image\31.jpg"
+    assert rows[1].cells()[13] == r"G:\image\1.jpg|G:\image\31.jpg"
+    assert all(not row.hashtag and not row.image_location for row in rows[2:])
+
+
+def test_brand_is_read_from_sheet_filename(tmp_path: Path) -> None:
+    path = tmp_path / "카페 원고 작성 시트 (뉴더미스).csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"엉덩이 종기","{QUESTION_SOURCE}",양평맘,writer,질문형,,,,,이모저모이야기\n',
+        encoding="utf-8-sig",
+    )
+
+    jobs, _ = load_gatling_brand_jobs(path)
+    assert jobs[0].brand == "뉴더미스"
