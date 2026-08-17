@@ -778,3 +778,139 @@ def test_same_title_with_different_body_is_kept(tmp_path: Path) -> None:
     result = build_gatling_master(brand, manuscript_only=True)
     assert len(result.jobs) == 2
     assert result.skipped == []
+
+
+def _simple_source(title: str, body: str, comment: str = "댓글본문") -> str:
+    return f"제목 :\n{title}\n\n본문 :\n{body}\n\n댓글1:\n{comment}\n대댓글1:\n답글본문\n"
+
+
+def test_empty_excel_type_is_filled_and_all_sheet_jobs_are_pasted(tmp_path: Path) -> None:
+    path = tmp_path / "empty-type.xlsm"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "마스터"
+    for offset, header in enumerate(("링크", "타입", "제목", "내용")):
+        sheet.cell(6, 2 + offset, header)
+    sheet.cell(7, 3, TYPE_NEW_POST)
+    sheet.cell(7, 4, "이미 있는 제목")
+    sheet.cell(7, 5, "이미 있는 본문")
+    sheet.cell(8, 3, TYPE_NEW_POST)
+    sheet.cell(9, 2, 1)
+    for row_number in range(10, 16):
+        sheet.cell(row_number, 3, None)
+    workbook.save(path)
+
+    first = _simple_source("첫째 제목", "첫째 본문", "첫째 댓글")
+    second = _simple_source("둘째 제목", "둘째 본문", "둘째 댓글")
+    third = _simple_source("셋째 제목", "셋째 본문", "셋째 댓글")
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"키워드1","{first}",고요한아침,writer,,,,,,가입인사\n'
+        f'"키워드2","{second}",고요한아침,writer,질문형,,,,,가입인사\n'
+        f'"키워드3","{third}",고요한아침,writer,후기형,,,,,가입인사\n',
+    )
+
+    result, start_row = paste_manuscripts_into_gatling(brand, path)
+    workbook = load_workbook(path)
+    sheet = workbook["마스터"]
+
+    assert len(result.jobs) == 3
+    assert start_row == 8
+    assert sheet.cell(7, 4).value == "이미 있는 제목"
+    assert sheet.cell(8, 3).value == TYPE_NEW_POST
+    assert sheet.cell(8, 4).value == "첫째 제목"
+    assert sheet.cell(8, 5).value == "첫째 본문"
+    assert sheet.cell(9, 2).value is None
+    assert sheet.cell(9, 3).value == TYPE_COMMENT
+    assert sheet.cell(9, 5).value == "첫째 댓글"
+    assert sheet.cell(10, 3).value == TYPE_REPLY
+    assert sheet.cell(10, 5).value == "답글본문"
+    assert sheet.cell(11, 3).value == TYPE_NEW_POST
+    assert sheet.cell(11, 4).value == "둘째 제목"
+    assert sheet.cell(12, 3).value == TYPE_COMMENT
+    assert sheet.cell(12, 5).value == "둘째 댓글"
+    assert sheet.cell(13, 3).value == TYPE_REPLY
+    assert sheet.cell(14, 3).value == TYPE_NEW_POST
+    assert sheet.cell(14, 4).value == "셋째 제목"
+    assert sheet.cell(15, 3).value == TYPE_COMMENT
+    assert sheet.cell(15, 5).value == "셋째 댓글"
+
+
+def test_blank_type_after_comment_block_is_used_for_next_article(tmp_path: Path) -> None:
+    path = tmp_path / "blank-after-comments.xlsm"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "마스터"
+    for offset, header in enumerate(("링크", "타입", "제목", "내용")):
+        sheet.cell(6, 2 + offset, header)
+    sheet.cell(7, 3, TYPE_NEW_POST)
+    sheet.cell(7, 4, "이미 있는 제목")
+    sheet.cell(7, 5, "이미 있는 본문")
+    sheet.cell(8, 3, TYPE_COMMENT)
+    sheet.cell(8, 5, "이미 있는 댓글")
+    sheet.cell(9, 3, None)
+    sheet.cell(10, 3, None)
+    sheet.cell(11, 3, None)
+    workbook.save(path)
+
+    info = recognize_gatling_workbook(path)
+    assert info.next_row == 9
+
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"키워드1","{_simple_source("새 제목", "새 본문")}",고요한아침,writer,질문형,,,,,가입인사\n',
+    )
+    _, start_row = paste_manuscripts_into_gatling(brand, path)
+    workbook = load_workbook(path)
+    sheet = workbook["마스터"]
+    assert start_row == 9
+    assert sheet.cell(8, 5).value == "이미 있는 댓글"
+    assert sheet.cell(9, 3).value == TYPE_NEW_POST
+    assert sheet.cell(9, 4).value == "새 제목"
+    assert sheet.cell(10, 3).value == TYPE_COMMENT
+    assert sheet.cell(11, 3).value == TYPE_REPLY
+
+
+def test_extra_manuscripts_still_append_with_types(tmp_path: Path) -> None:
+    path = write_gatling_xlsx(tmp_path)
+    first = _simple_source("첫째 제목", "첫째 본문")
+    second = _simple_source("둘째 제목", "둘째 본문")
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"키워드1","{first}",고요한아침,writer,질문형,,,,,가입인사\n'
+        f'"키워드2","{second}",고요한아침,writer,질문형,,,,,가입인사\n',
+    )
+
+    result, start_row = paste_manuscripts_into_gatling(brand, path)
+    workbook = load_workbook(path)
+    sheet = workbook["마스터"]
+    titles = [
+        sheet.cell(row_number, 3).value
+        for row_number in range(7, sheet.max_row + 1)
+        if sheet.cell(row_number, 2).value == TYPE_NEW_POST
+    ]
+
+    assert len(result.jobs) == 2
+    assert start_row == 9
+    assert "이미 있는 글" in titles
+    assert "첫째 제목" in titles
+    assert "둘째 제목" in titles
+    assert sheet.cell(9, 2).value == TYPE_NEW_POST
+    assert sheet.cell(10, 2).value == TYPE_COMMENT
+    assert sheet.cell(11, 2).value == TYPE_REPLY
+
+
+def test_load_keeps_rows_without_article_type(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{_simple_source("제목만", "본문만")}",고요한아침,writer,,,,,,가입인사\n',
+    )
+
+    jobs, skipped = load_gatling_brand_jobs(brand)
+    assert skipped == []
+    assert len(jobs) == 1
+    assert jobs[0].article.title == "제목만"

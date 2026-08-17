@@ -66,7 +66,6 @@ TYPE_COMMENT = "댓글"
 TYPE_REPLY = "대댓글"
 TYPE_DELAY = "딜레이"
 ARTICLE_TYPES = {TYPE_NEW_POST, TYPE_EDIT_POST}
-COMMENT_BLOCK_TYPES = {TYPE_COMMENT, TYPE_REPLY}
 COMMENT_ALLOWED = "허용"
 REQUIRED_MASTER_HEADERS = MASTER_HEADERS[:4]
 WRITABLE_KINDS = {"xlsx", "xlsm"}
@@ -373,20 +372,30 @@ def _row_has_manuscript(values: list[object], start_column: int) -> bool:
     return bool(_cell(link)) or _row_has_title_or_body(values, start_column)
 
 
+def _paste_slot_kind(values: list[object], start_column: int) -> str:
+    """Empty title/body rows can take a manuscript. 딜레이와 이미 쓴 칸은 뺀다."""
+    typ = _row_type(values, start_column)
+    if typ == TYPE_DELAY or _row_has_title_or_body(values, start_column):
+        return ""
+    if typ in ARTICLE_TYPES:
+        return "article"
+    if typ == TYPE_COMMENT:
+        return "comment"
+    if typ == TYPE_REPLY:
+        return "reply"
+    if typ == "":
+        return "blank"
+    return ""
+
+
 def _is_empty_article_values(
     values: list[object],
     start_column: int,
-    comment_block_started: bool,
+    comment_block_started: bool = False,
 ) -> bool:
-    """Empty 새글/글수정 slot. 댓글·대댓글 구간과 딜레이 행은 빼고, 제목·본문이 없어야 한다."""
-    typ = _row_type(values, start_column)
-    if typ in {TYPE_DELAY, *COMMENT_BLOCK_TYPES}:
-        return False
-    if _row_has_title_or_body(values, start_column):
-        return False
-    if typ in ARTICLE_TYPES:
-        return True
-    return typ == "" and not comment_block_started
+    """Empty 새글/글수정 slot, or a blank 타입 row that can become one."""
+    del comment_block_started
+    return _paste_slot_kind(values, start_column) in {"article", "blank"}
 
 
 def _scan_sheet_rows(
@@ -398,7 +407,6 @@ def _scan_sheet_rows(
     last_row = 0
     row6_preview = ""
     next_article_row = 0
-    comment_block_started = False
     for row_number, values in rows:
         if row_number == MASTER_HEADER_ROW:
             row6_preview = _preview_values(values)
@@ -411,14 +419,9 @@ def _scan_sheet_rows(
             continue
         if not headers:
             continue
-        typ = _row_type(values, start_column)
-        if typ in COMMENT_BLOCK_TYPES:
-            comment_block_started = True
         if _row_has_manuscript(values, start_column):
             last_row = row_number
-        if not next_article_row and _is_empty_article_values(
-            values, start_column, comment_block_started
-        ):
+        if not next_article_row and _is_empty_article_values(values, start_column):
             next_article_row = row_number
     return header_row, start_column, headers, last_row, row6_preview, next_article_row
 
@@ -559,13 +562,14 @@ def recognize_gatling_workbook(path: str | Path) -> GatlingFileInfo:
     elif kind == "xlsb":
         message = (
             f"기관총 파일로 확인했습니다. 제목·본문이 비어 있는 칸은 "
-            f"{resolved_next_article}행입니다. " + XLSB_WRITE_MESSAGE
+            f"{resolved_next_article}행입니다. 타입이 비어 있어도 "
+            "새글·글수정·댓글·대댓글을 알아서 적습니다. " + XLSB_WRITE_MESSAGE
         )
     else:
         message = (
             f"기관총 파일로 확인했습니다. 제목·본문이 비어 있는 "
-            f"{resolved_next_article}행부터 새 글을 넣고, "
-            "댓글·대댓글은 내용이 비어 있는 칸부터 넣습니다"
+            f"{resolved_next_article}행부터 시트 원고를 모두 넣고, "
+            "타입이 비어 있으면 새글·글수정·댓글·대댓글을 알아서 적습니다"
         )
 
     return GatlingFileInfo(
@@ -609,41 +613,44 @@ def _sheet_row_has_title_or_body(sheet, row_number: int, start_column: int) -> b
 
 def _collect_empty_type_slots(
     sheet, info: GatlingFileInfo
-) -> tuple[list[int], list[int], list[int]]:
+) -> tuple[list[int], list[int], list[int], list[int]]:
     last_sheet_row = max(sheet.max_row or info.header_row, info.header_row)
     article_slots: list[int] = []
     comment_slots: list[int] = []
     reply_slots: list[int] = []
-    comment_block_started = False
+    blank_slots: list[int] = []
     for row_number in range(info.header_row + 1, last_sheet_row + 1):
         values = _sheet_row_values(sheet, row_number, info.start_column)
-        typ = _row_type(values, info.start_column)
-        if typ in COMMENT_BLOCK_TYPES:
-            comment_block_started = True
-        if typ == TYPE_COMMENT and not _row_has_title_or_body(values, info.start_column):
-            comment_slots.append(row_number)
-        elif typ == TYPE_REPLY and not _row_has_title_or_body(values, info.start_column):
-            reply_slots.append(row_number)
-        elif _is_empty_article_values(values, info.start_column, comment_block_started):
+        kind = _paste_slot_kind(values, info.start_column)
+        if kind == "article":
             article_slots.append(row_number)
-    return article_slots, comment_slots, reply_slots
+        elif kind == "comment":
+            comment_slots.append(row_number)
+        elif kind == "reply":
+            reply_slots.append(row_number)
+        elif kind == "blank":
+            blank_slots.append(row_number)
+    return article_slots, comment_slots, reply_slots, blank_slots
 
 
 def _target_rows_for_paste(
     sheet, info: GatlingFileInfo, rows: list[MasterRow]
 ) -> list[int]:
-    """Put 새글/글수정 in empty title/body slots, comments in empty 내용 slots of that type."""
-    article_slots, comment_slots, reply_slots = _collect_empty_type_slots(sheet, info)
+    """Use matching empty rows, then empty-타입 rows, then append so every job is written."""
+    article_slots, comment_slots, reply_slots, blank_slots = _collect_empty_type_slots(
+        sheet, info
+    )
     used: set[int] = set()
     append_at = max(sheet.max_row or info.header_row, info.header_row) + 1
     targets: list[int] = []
 
     def take(pool: list[int]) -> int:
         nonlocal append_at
-        for row_number in pool:
-            if row_number not in used:
-                used.add(row_number)
-                return row_number
+        for candidate in (pool, blank_slots):
+            for row_number in candidate:
+                if row_number not in used:
+                    used.add(row_number)
+                    return row_number
         while append_at in used or _sheet_row_has_title_or_body(
             sheet, append_at, info.start_column
         ):
@@ -667,6 +674,16 @@ def _target_rows_for_paste(
     return targets
 
 
+def _write_master_row(sheet, row_number: int, start_column: int, row: MasterRow) -> None:
+    """Always write 링크/타입/제목/내용 so leftover 타입·링크도 원고에 맞게 바꾼다."""
+    for offset, value in enumerate(row.cells()):
+        cell = sheet.cell(row_number, start_column + offset)
+        if offset < 4:
+            cell.value = None if value in (None, "") else value
+        elif value not in (None, ""):
+            cell.value = value
+
+
 def append_master_rows(path: str | Path, rows: list[MasterRow]) -> int:
     info = require_writable_gatling(path)
     keep_vba = info.kind == "xlsm"
@@ -675,10 +692,7 @@ def append_master_rows(path: str | Path, rows: list[MasterRow]) -> int:
         sheet = workbook[info.master_sheet]
         target_rows = _target_rows_for_paste(sheet, info, rows)
         for row_number, row in zip(target_rows, rows):
-            for column, value in enumerate(row.cells(), start=info.start_column):
-                if value is None or value == "":
-                    continue
-                sheet.cell(row_number, column, value)
+            _write_master_row(sheet, row_number, info.start_column, row)
         workbook.save(info.path)
         return target_rows[0]
     finally:
@@ -722,8 +736,8 @@ def load_gatling_brand_jobs(
             board = _cell(row.get(board_header))
             if not any((keyword, source, cafe, article_type, board)):
                 continue
-            if not all((keyword, source, cafe, article_type)):
-                skipped.append(f"행 {row_number}: 키워드·본문·카페명·원고유형이 비어 있음")
+            if not all((keyword, source, cafe)):
+                skipped.append(f"행 {row_number}: 키워드·본문·카페명이 비어 있음")
                 continue
             completion_url = _cell(row.get(OPTIONAL_COLUMNS["completion_url"]))
             if skip_completed and completion_url:
@@ -762,7 +776,7 @@ def load_gatling_brand_jobs(
             )
         raise GatlingPasteError(
             "붙여넣을 브랜드 원고가 없습니다. "
-            "시트에 키워드·본문·카페명·원고유형이 있는 행이 있는지 확인하세요."
+            "시트에 키워드·본문·카페명이 있는 행이 있는지 확인하세요."
         )
     return jobs, skipped
 
