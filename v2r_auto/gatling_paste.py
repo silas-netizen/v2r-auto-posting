@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import random
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -10,6 +11,11 @@ from openpyxl import Workbook, load_workbook
 from .cafe_catalog import normalized_name
 from .content import CommentNode, ContentFormatError, ParsedArticle, parse_article
 from .daily_posts import DailyPostSheetError, load_daily_posts
+from .images import (
+    GoogleDriveImageResolver,
+    ResolvedImage,
+    brand_from_sheet_title,
+)
 from .models import DailyPost
 
 
@@ -60,10 +66,11 @@ TYPE_COMMENT = "댓글"
 TYPE_REPLY = "대댓글"
 TYPE_DELAY = "딜레이"
 ARTICLE_TYPES = {TYPE_NEW_POST, TYPE_EDIT_POST}
-COMMENT_BLOCK_TYPES = {TYPE_COMMENT, TYPE_REPLY}
 COMMENT_ALLOWED = "허용"
 REQUIRED_MASTER_HEADERS = MASTER_HEADERS[:4]
 WRITABLE_KINDS = {"xlsx", "xlsm"}
+IMAGE_PLACEHOLDER = "{이미지}"
+IMAGE_TOKEN_PATTERN = re.compile(r"\{(?:A열\s*)?키워드\}|\{B\s*/\s*A\}|\{BA\}")
 XLSB_WRITE_MESSAGE = (
     "고른 파일은 기관총 원본(.xlsb)입니다. "
     "이 형식은 매크로 파일이라 프로그램이 제목·본문·댓글을 직접 넣을 수 없습니다. "
@@ -102,6 +109,7 @@ class GatlingBrandJob:
     prefix: str = ""
     account_type: str = ""
     image_disabled: bool = False
+    brand: str = ""
     completion_url: str = ""
     cafe_article_url: str = ""
     daily_post: DailyPost | None = None
@@ -118,6 +126,7 @@ class MasterRow:
     board_name: str = ""
     comment_policy: str = ""
     result_link: str = ""
+    image_location: str = ""
 
     def cells(self) -> list[object]:
         return [
@@ -134,7 +143,7 @@ class MasterRow:
             None,
             self.comment_policy,
             None,
-            None,
+            self.image_location or None,
             None,
             self.result_link or None,
             None,
@@ -148,6 +157,7 @@ class GatlingBuildResult:
     rows: list[MasterRow]
     jobs: list[GatlingBrandJob] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
+    image_count: int = 0
 
     def type_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -231,6 +241,63 @@ def exact_board_name(
     return wanted
 
 
+def replace_image_tokens(text: str) -> str:
+    """기관총은 {이미지}만 인식하므로 시트 표기를 맞춰 넣는다."""
+    return IMAGE_TOKEN_PATTERN.sub(IMAGE_PLACEHOLDER, text or "")
+
+
+def manuscript_text_key(title: object, body: object) -> tuple[str, str]:
+    return (replace_image_tokens(_cell(title)), replace_image_tokens(_cell(body)))
+
+
+def drop_duplicate_manuscripts(
+    jobs: list[GatlingBrandJob],
+    existing: set[tuple[str, str]] | None = None,
+) -> tuple[list[GatlingBrandJob], list[str]]:
+    seen = set(existing or ())
+    kept: list[GatlingBrandJob] = []
+    skipped: list[str] = []
+    for job in jobs:
+        key = manuscript_text_key(job.article.title, job.article.body)
+        if not (key[0] and key[1]):
+            kept.append(job)
+            continue
+        if key in seen:
+            skipped.append(f"행 {job.row_number}: 제목·본문이 이미 있어 건너뜀")
+            continue
+        seen.add(key)
+        kept.append(job)
+    return kept, skipped
+
+
+def load_existing_manuscript_keys(path: str | Path) -> set[tuple[str, str]]:
+    info = recognize_gatling_workbook(path)
+    if not info.recognized:
+        return set()
+    workbook = load_workbook(info.path, data_only=True)
+    try:
+        if info.master_sheet not in workbook.sheetnames:
+            return set()
+        sheet = workbook[info.master_sheet]
+        keys: set[tuple[str, str]] = set()
+        type_col = info.start_column + 1
+        title_col = info.start_column + 2
+        body_col = info.start_column + 3
+        for row_number in range(info.header_row + 1, sheet.max_row + 1):
+            typ = _cell(sheet.cell(row_number, type_col).value)
+            if typ not in ARTICLE_TYPES:
+                continue
+            key = manuscript_text_key(
+                sheet.cell(row_number, title_col).value,
+                sheet.cell(row_number, body_col).value,
+            )
+            if key[0] and key[1]:
+                keys.add(key)
+        return keys
+    finally:
+        workbook.close()
+
+
 def reply_target_value(node: CommentNode) -> int | float:
     """기관총 대댓글 A열에 원래 쓰이는 대상 번호. URL을 넣지 않는다."""
     if node.depth <= 0:
@@ -305,20 +372,30 @@ def _row_has_manuscript(values: list[object], start_column: int) -> bool:
     return bool(_cell(link)) or _row_has_title_or_body(values, start_column)
 
 
+def _paste_slot_kind(values: list[object], start_column: int) -> str:
+    """Empty title/body rows can take a manuscript. 딜레이와 이미 쓴 칸은 뺀다."""
+    typ = _row_type(values, start_column)
+    if typ == TYPE_DELAY or _row_has_title_or_body(values, start_column):
+        return ""
+    if typ in ARTICLE_TYPES:
+        return "article"
+    if typ == TYPE_COMMENT:
+        return "comment"
+    if typ == TYPE_REPLY:
+        return "reply"
+    if typ == "":
+        return "blank"
+    return ""
+
+
 def _is_empty_article_values(
     values: list[object],
     start_column: int,
-    comment_block_started: bool,
+    comment_block_started: bool = False,
 ) -> bool:
-    """Empty 새글/글수정 slot. 댓글·대댓글 구간과 딜레이 행은 빼고, 제목·본문이 없어야 한다."""
-    typ = _row_type(values, start_column)
-    if typ in {TYPE_DELAY, *COMMENT_BLOCK_TYPES}:
-        return False
-    if _row_has_title_or_body(values, start_column):
-        return False
-    if typ in ARTICLE_TYPES:
-        return True
-    return typ == "" and not comment_block_started
+    """Empty 새글/글수정 slot, or a blank 타입 row that can become one."""
+    del comment_block_started
+    return _paste_slot_kind(values, start_column) in {"article", "blank"}
 
 
 def _scan_sheet_rows(
@@ -330,7 +407,6 @@ def _scan_sheet_rows(
     last_row = 0
     row6_preview = ""
     next_article_row = 0
-    comment_block_started = False
     for row_number, values in rows:
         if row_number == MASTER_HEADER_ROW:
             row6_preview = _preview_values(values)
@@ -343,14 +419,9 @@ def _scan_sheet_rows(
             continue
         if not headers:
             continue
-        typ = _row_type(values, start_column)
-        if typ in COMMENT_BLOCK_TYPES:
-            comment_block_started = True
         if _row_has_manuscript(values, start_column):
             last_row = row_number
-        if not next_article_row and _is_empty_article_values(
-            values, start_column, comment_block_started
-        ):
+        if not next_article_row and _is_empty_article_values(values, start_column):
             next_article_row = row_number
     return header_row, start_column, headers, last_row, row6_preview, next_article_row
 
@@ -491,13 +562,14 @@ def recognize_gatling_workbook(path: str | Path) -> GatlingFileInfo:
     elif kind == "xlsb":
         message = (
             f"기관총 파일로 확인했습니다. 제목·본문이 비어 있는 칸은 "
-            f"{resolved_next_article}행입니다. " + XLSB_WRITE_MESSAGE
+            f"{resolved_next_article}행입니다. 타입이 비어 있어도 "
+            "새글·글수정·댓글·대댓글을 알아서 적습니다. " + XLSB_WRITE_MESSAGE
         )
     else:
         message = (
             f"기관총 파일로 확인했습니다. 제목·본문이 비어 있는 "
-            f"{resolved_next_article}행부터 새 글을 넣고, "
-            "댓글·대댓글은 내용이 비어 있는 칸부터 넣습니다"
+            f"{resolved_next_article}행부터 시트 원고를 모두 넣고, "
+            "타입이 비어 있으면 새글·글수정·댓글·대댓글을 알아서 적습니다"
         )
 
     return GatlingFileInfo(
@@ -541,41 +613,44 @@ def _sheet_row_has_title_or_body(sheet, row_number: int, start_column: int) -> b
 
 def _collect_empty_type_slots(
     sheet, info: GatlingFileInfo
-) -> tuple[list[int], list[int], list[int]]:
+) -> tuple[list[int], list[int], list[int], list[int]]:
     last_sheet_row = max(sheet.max_row or info.header_row, info.header_row)
     article_slots: list[int] = []
     comment_slots: list[int] = []
     reply_slots: list[int] = []
-    comment_block_started = False
+    blank_slots: list[int] = []
     for row_number in range(info.header_row + 1, last_sheet_row + 1):
         values = _sheet_row_values(sheet, row_number, info.start_column)
-        typ = _row_type(values, info.start_column)
-        if typ in COMMENT_BLOCK_TYPES:
-            comment_block_started = True
-        if typ == TYPE_COMMENT and not _row_has_title_or_body(values, info.start_column):
-            comment_slots.append(row_number)
-        elif typ == TYPE_REPLY and not _row_has_title_or_body(values, info.start_column):
-            reply_slots.append(row_number)
-        elif _is_empty_article_values(values, info.start_column, comment_block_started):
+        kind = _paste_slot_kind(values, info.start_column)
+        if kind == "article":
             article_slots.append(row_number)
-    return article_slots, comment_slots, reply_slots
+        elif kind == "comment":
+            comment_slots.append(row_number)
+        elif kind == "reply":
+            reply_slots.append(row_number)
+        elif kind == "blank":
+            blank_slots.append(row_number)
+    return article_slots, comment_slots, reply_slots, blank_slots
 
 
 def _target_rows_for_paste(
     sheet, info: GatlingFileInfo, rows: list[MasterRow]
 ) -> list[int]:
-    """Put 새글/글수정 in empty title/body slots, comments in empty 내용 slots of that type."""
-    article_slots, comment_slots, reply_slots = _collect_empty_type_slots(sheet, info)
+    """Use matching empty rows, then empty-타입 rows, then append so every job is written."""
+    article_slots, comment_slots, reply_slots, blank_slots = _collect_empty_type_slots(
+        sheet, info
+    )
     used: set[int] = set()
     append_at = max(sheet.max_row or info.header_row, info.header_row) + 1
     targets: list[int] = []
 
     def take(pool: list[int]) -> int:
         nonlocal append_at
-        for row_number in pool:
-            if row_number not in used:
-                used.add(row_number)
-                return row_number
+        for candidate in (pool, blank_slots):
+            for row_number in candidate:
+                if row_number not in used:
+                    used.add(row_number)
+                    return row_number
         while append_at in used or _sheet_row_has_title_or_body(
             sheet, append_at, info.start_column
         ):
@@ -599,6 +674,16 @@ def _target_rows_for_paste(
     return targets
 
 
+def _write_master_row(sheet, row_number: int, start_column: int, row: MasterRow) -> None:
+    """Always write 링크/타입/제목/내용 so leftover 타입·링크도 원고에 맞게 바꾼다."""
+    for offset, value in enumerate(row.cells()):
+        cell = sheet.cell(row_number, start_column + offset)
+        if offset < 4:
+            cell.value = None if value in (None, "") else value
+        elif value not in (None, ""):
+            cell.value = value
+
+
 def append_master_rows(path: str | Path, rows: list[MasterRow]) -> int:
     info = require_writable_gatling(path)
     keep_vba = info.kind == "xlsm"
@@ -607,10 +692,7 @@ def append_master_rows(path: str | Path, rows: list[MasterRow]) -> int:
         sheet = workbook[info.master_sheet]
         target_rows = _target_rows_for_paste(sheet, info, rows)
         for row_number, row in zip(target_rows, rows):
-            for column, value in enumerate(row.cells(), start=info.start_column):
-                if value is None or value == "":
-                    continue
-                sheet.cell(row_number, column, value)
+            _write_master_row(sheet, row_number, info.start_column, row)
         workbook.save(info.path)
         return target_rows[0]
     finally:
@@ -620,12 +702,14 @@ def append_master_rows(path: str | Path, rows: list[MasterRow]) -> int:
 def load_gatling_brand_jobs(
     path: str | Path,
     *,
-    skip_completed: bool = True,
+    skip_completed: bool = False,
+    brand: str = "",
 ) -> tuple[list[GatlingBrandJob], list[str]]:
     csv_path = Path(path)
     if not csv_path.exists():
         raise GatlingPasteError(f"브랜드 시트 파일이 없습니다: {csv_path}")
 
+    detected_brand = brand or brand_from_sheet_title(csv_path.stem)
     skipped: list[str] = []
     with csv_path.open("r", encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream)
@@ -652,8 +736,8 @@ def load_gatling_brand_jobs(
             board = _cell(row.get(board_header))
             if not any((keyword, source, cafe, article_type, board)):
                 continue
-            if not all((keyword, source, cafe, article_type)):
-                skipped.append(f"행 {row_number}: 키워드·본문·카페명·원고유형이 비어 있음")
+            if not all((keyword, source, cafe)):
+                skipped.append(f"행 {row_number}: 키워드·본문·카페명이 비어 있음")
                 continue
             completion_url = _cell(row.get(OPTIONAL_COLUMNS["completion_url"]))
             if skip_completed and completion_url:
@@ -679,11 +763,21 @@ def load_gatling_brand_jobs(
                         _cell(row.get(OPTIONAL_COLUMNS["image_disabled"])).casefold()
                         == "y"
                     ),
+                    brand=detected_brand,
                     completion_url=completion_url,
                 )
             )
     if not jobs:
-        raise GatlingPasteError("붙여넣을 브랜드 원고가 없습니다")
+        if skipped:
+            preview = "\n".join(skipped[:8])
+            extra = f"\n외 {len(skipped) - 8}건" if len(skipped) > 8 else ""
+            raise GatlingPasteError(
+                "붙여넣을 브랜드 원고가 없습니다.\n" + preview + extra
+            )
+        raise GatlingPasteError(
+            "붙여넣을 브랜드 원고가 없습니다. "
+            "시트에 키워드·본문·카페명이 있는 행이 있는지 확인하세요."
+        )
     return jobs, skipped
 
 
@@ -722,39 +816,54 @@ def _article_row(
     job: GatlingBrandJob,
     board_name: str,
     link: str = "",
+    with_hashtag: bool = False,
+    image_location: str = "",
 ) -> MasterRow:
     return MasterRow(
         link=link or None,
         type=type_name,
-        title=title,
-        body=body,
-        hashtag=job.keyword,
+        title=replace_image_tokens(title),
+        body=replace_image_tokens(body),
+        hashtag=job.keyword if with_hashtag else "",
         prefix=job.prefix,
         board_name=board_name,
         comment_policy=COMMENT_ALLOWED,
+        image_location=image_location if with_hashtag else "",
     )
 
 
-def _reply_rows(
-    node: CommentNode,
-    *,
-    keyword: str,
+def _comment_and_reply_rows(
+    job: GatlingBrandJob,
     article_url: str,
 ) -> list[MasterRow]:
+    """수정 발행 순서: 댓글을 모두 넣은 뒤, 대댓글은 얕은 것부터 넣는다."""
     rows: list[MasterRow] = []
-    for child in node.children:
+    for comment in job.article.comments:
         rows.append(
             MasterRow(
-                link=reply_target_value(child),
-                type=TYPE_REPLY,
-                body=child.text,
-                hashtag=keyword,
-                result_link=article_url,
+                link=article_url or None,
+                type=TYPE_COMMENT,
+                body=replace_image_tokens(comment.text),
             )
         )
-        rows.extend(
-            _reply_rows(child, keyword=keyword, article_url=article_url)
-        )
+    current = [
+        child
+        for comment in job.article.comments
+        for child in comment.children
+    ]
+    while current:
+        nxt: list[CommentNode] = []
+        for node in current:
+            rows.append(
+                MasterRow(
+                    link=reply_target_value(node),
+                    type=TYPE_REPLY,
+                    body=replace_image_tokens(node.text),
+                    result_link=article_url,
+                )
+            )
+            nxt.extend(node.children)
+        current = nxt
     return rows
 
 
@@ -763,6 +872,7 @@ def build_master_rows(
     extra_exact_names: list[str] | tuple[str, ...] = (),
     *,
     include_daily_new_post: bool = True,
+    image_location: str = "",
 ) -> list[MasterRow]:
     board_name = exact_board_name(
         job.board,
@@ -794,6 +904,8 @@ def build_master_rows(
                 job=job,
                 board_name=board_name,
                 link=article_url,
+                with_hashtag=True,
+                image_location=image_location,
             )
         )
     elif is_affiliate_cafe(job.cafe):
@@ -805,6 +917,8 @@ def build_master_rows(
                 job=job,
                 board_name=board_name,
                 link=article_url,
+                with_hashtag=True,
+                image_location=image_location,
             )
         )
     else:
@@ -816,41 +930,86 @@ def build_master_rows(
                 job=job,
                 board_name=board_name,
                 link=article_url,
+                with_hashtag=True,
+                image_location=image_location,
             )
         )
 
-    for comment in job.article.comments:
-        rows.append(
-            MasterRow(
-                link=article_url or None,
-                type=TYPE_COMMENT,
-                body=comment.text,
-                hashtag=job.keyword,
-            )
-        )
-        rows.extend(
-            _reply_rows(
-                comment,
-                keyword=job.keyword,
-                article_url=article_url,
-            )
-        )
+    rows.extend(_comment_and_reply_rows(job, article_url))
     return rows
+
+
+def gatling_image_folder(gatling_path: str | Path) -> Path:
+    path = Path(gatling_path)
+    return path.with_name(f"{path.stem}_images")
+
+
+def collect_resolved_images(resolved: list[ResolvedImage], dest_dir: str | Path) -> str:
+    folder = Path(dest_dir)
+    folder.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+    used: set[str] = set()
+    for item in resolved:
+        dest = folder / item.local_path.name
+        if dest.name.casefold() in used or (
+            dest.exists() and dest.resolve() != item.local_path.resolve()
+        ):
+            dest = folder / f"{item.file_id}_{item.local_path.name}"
+        if dest.resolve() != item.local_path.resolve():
+            dest.write_bytes(item.local_path.read_bytes())
+        used.add(dest.name.casefold())
+        written.append(str(dest))
+    return "|".join(written)
+
+
+def _resolve_job_images(
+    job: GatlingBrandJob,
+    *,
+    image_resolver: GoogleDriveImageResolver | None,
+    image_dir: str | Path | None,
+    skipped: list[str],
+) -> tuple[str, int]:
+    if job.image_disabled or image_resolver is None or not (job.brand or "").strip():
+        return "", 0
+    source = f"{job.article.title}\n{job.article.body}"
+    try:
+        resolved = image_resolver.resolve_body(
+            brand=job.brand,
+            keyword=job.keyword,
+            body=source,
+            image_disabled=job.image_disabled,
+            row_number=job.row_number,
+        )
+    except Exception as exc:
+        skipped.append(f"행 {job.row_number}: 이미지 생략 ({exc})")
+        return "", 0
+    if not resolved:
+        return "", 0
+    if image_dir:
+        return collect_resolved_images(resolved, image_dir), len(resolved)
+    return "", len(resolved)
 
 
 def build_gatling_master(
     brand_path: str | Path,
     daily_path: str | Path | None = None,
     *,
-    skip_completed: bool = True,
+    skip_completed: bool = False,
     rng: random.Random | None = None,
     extra_exact_names: list[str] | tuple[str, ...] = (),
     manuscript_only: bool = False,
+    brand: str = "",
+    image_resolver: GoogleDriveImageResolver | None = None,
+    image_dir: str | Path | None = None,
+    existing_keys: set[tuple[str, str]] | None = None,
 ) -> GatlingBuildResult:
     jobs, skipped = load_gatling_brand_jobs(
         brand_path,
         skip_completed=skip_completed,
+        brand=brand,
     )
+    jobs, duplicate_skipped = drop_duplicate_manuscripts(jobs, existing_keys)
+    skipped.extend(duplicate_skipped)
     include_daily_new_post = not manuscript_only
     affiliate_jobs = [job for job in jobs if is_affiliate_cafe(job.cafe)]
     if include_daily_new_post and affiliate_jobs:
@@ -861,15 +1020,29 @@ def build_gatling_master(
         assign_daily_posts(jobs, load_daily_posts(daily_path), rng=rng)
 
     rows: list[MasterRow] = []
+    image_count = 0
     for job in jobs:
+        image_location, count = _resolve_job_images(
+            job,
+            image_resolver=image_resolver,
+            image_dir=image_dir,
+            skipped=skipped,
+        )
+        image_count += count
         rows.extend(
             build_master_rows(
                 job,
                 extra_exact_names=extra_exact_names,
                 include_daily_new_post=include_daily_new_post,
+                image_location=image_location,
             )
         )
-    return GatlingBuildResult(rows=rows, jobs=jobs, skipped=skipped)
+    return GatlingBuildResult(
+        rows=rows,
+        jobs=jobs,
+        skipped=skipped,
+        image_count=image_count,
+    )
 
 
 def create_master_template(path: str | Path) -> Path:
@@ -911,10 +1084,14 @@ def build_and_write_master(
     output_path: str | Path,
     daily_path: str | Path | None = None,
     *,
-    skip_completed: bool = True,
+    skip_completed: bool = False,
     rng: random.Random | None = None,
     extra_exact_names: list[str] | tuple[str, ...] = (),
     manuscript_only: bool = False,
+    brand: str = "",
+    image_resolver: GoogleDriveImageResolver | None = None,
+    image_dir: str | Path | None = None,
+    existing_keys: set[tuple[str, str]] | None = None,
 ) -> GatlingBuildResult:
     result = build_gatling_master(
         brand_path,
@@ -923,6 +1100,10 @@ def build_and_write_master(
         rng=rng,
         extra_exact_names=extra_exact_names,
         manuscript_only=manuscript_only,
+        brand=brand,
+        image_resolver=image_resolver,
+        image_dir=image_dir,
+        existing_keys=existing_keys,
     )
     write_master_xlsx(output_path, result.rows)
     return result
@@ -933,10 +1114,13 @@ def paste_manuscripts_into_gatling(
     gatling_path: str | Path,
     daily_path: str | Path | None = None,
     *,
-    skip_completed: bool = True,
+    skip_completed: bool = False,
     rng: random.Random | None = None,
     extra_exact_names: list[str] | tuple[str, ...] = (),
     manuscript_only: bool = True,
+    brand: str = "",
+    image_resolver: GoogleDriveImageResolver | None = None,
+    image_dir: str | Path | None = None,
 ) -> tuple[GatlingBuildResult, int]:
     """Append Google Sheet title/body/comments into a recognized 기관총 마스터."""
     result = build_gatling_master(
@@ -946,6 +1130,17 @@ def paste_manuscripts_into_gatling(
         rng=rng,
         extra_exact_names=extra_exact_names,
         manuscript_only=manuscript_only,
+        brand=brand,
+        image_resolver=image_resolver,
+        image_dir=image_dir,
+        existing_keys=load_existing_manuscript_keys(gatling_path),
     )
+    if not result.rows:
+        preview = "\n".join(result.skipped[:8])
+        extra = f"\n외 {len(result.skipped) - 8}건" if len(result.skipped) > 8 else ""
+        raise GatlingPasteError(
+            "제목·본문이 같은 원고는 이미 기관총에 있어 넣지 않았습니다."
+            + (f"\n{preview}{extra}" if preview else "")
+        )
     start_row = append_master_rows(gatling_path, result.rows)
     return result, start_row

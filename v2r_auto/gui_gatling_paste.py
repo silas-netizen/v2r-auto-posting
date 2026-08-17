@@ -4,13 +4,20 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
 
-from .daily_posts import DailyPostSheetError
+from .browser import user_facing_browser_error
+from .daily_posts import DailyPostSheetError, looks_like_daily_sheet
 from .gatling_paste import (
+    DAILY_POST_SHEET_URL,
     GatlingPasteError,
     build_gatling_master,
+    gatling_image_folder,
+    is_affiliate_cafe,
+    load_existing_manuscript_keys,
+    load_gatling_brand_jobs,
     paste_manuscripts_into_gatling,
     recognize_gatling_workbook,
 )
+from .images import GoogleDriveImageResolver, brand_from_sheet_title, load_sheet_brand
 from .gui import AutomationApp
 from .state import AnotherInstanceRunningError, InstanceLock
 
@@ -53,9 +60,16 @@ class GatlingPasteApp(AutomationApp):
             text=(
                 "구글 시트 원고의 제목, 본문, 댓글·대댓글을 기관총 .xlsm 마스터에 "
                 "자동으로 넣는 프로그램입니다. "
-                "구글 시트 주소를 쓰면 '로그인 준비'로 구글에 한 번 로그인해야 합니다. "
-                "브랜드 CSV 파일을 쓰면 로그인은 필요 없습니다. "
-                "기관총 파일은 엑셀에서 닫아 둔 .xlsm을 고르세요."
+                "제휴 카페(씨씨앙·양평맘)는 새글(일상) → 글수정(원고) → 댓글 → 대댓글 "
+                "순서로 넣습니다. 자사 카페는 새글에 원고를 바로 넣습니다. "
+                "해시태그는 원고 행에만 넣습니다. "
+                "시트에 {키워드}·{A열 키워드}·{B/A}가 있으면 사진을 고른 뒤 "
+                "{이미지}로 바꾸고, 고른 사진은 기관총 파일 옆 폴더에 모읍니다. "
+                "시트에 있는 원고는 모두 넣습니다. "
+                "엑셀 타입이 비어 있어도 새글·글수정·댓글·대댓글을 알아서 적습니다. "
+                "제목과 본문이 이미 같은 원고만 넣지 않습니다. "
+                "구글 시트 주소를 쓰면 '구글 시트 열기'로 시트를 엽니다. "
+                "V2R은 쓰지 않습니다. 기관총 파일은 엑셀에서 닫아 둔 .xlsm을 고르세요."
             ),
             wraplength=800,
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
@@ -78,7 +92,7 @@ class GatlingPasteApp(AutomationApp):
 
         actions = ttk.Frame(outer)
         actions.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(8, 10))
-        ttk.Button(actions, text="로그인 준비", command=self._open_login).pack(
+        ttk.Button(actions, text="구글 시트 열기", command=self._open_sheet).pack(
             side=tk.LEFT
         )
         ttk.Button(actions, text="기관총 확인", command=self._check_gatling).pack(
@@ -127,9 +141,12 @@ class GatlingPasteApp(AutomationApp):
         if selected:
             self.gatling_path.set(selected)
 
-    def _open_login(self) -> None:
+    def _open_sheet(self) -> None:
         sheet_url = self.sheet_url.get().strip()
-        self._run_background(lambda: self.browser.open_login_window(sheet_url))
+        if not sheet_url:
+            messagebox.showerror("입력 오류", "브랜드 시트 URL을 넣어 주세요")
+            return
+        self._run_background(lambda: self.browser.open_google_sheet(sheet_url))
 
     def _brand_path(self) -> Path:
         local_csv = self.local_csv.get().strip()
@@ -139,6 +156,39 @@ class GatlingPasteApp(AutomationApp):
         if not sheet_url:
             raise GatlingPasteError("브랜드 시트 주소 또는 CSV 파일을 넣어 주세요")
         return self.browser.download_sheet(sheet_url)
+
+    def _brand_and_daily_paths(self) -> tuple[Path, Path | None]:
+        brand_path = self._brand_path()
+        jobs, _ = load_gatling_brand_jobs(brand_path, skip_completed=False)
+        if any(is_affiliate_cafe(job.cafe) for job in jobs):
+            self.logger.info("제휴 카페용 일상 글 시트를 내려받습니다")
+            daily_path = self.browser.download_sheet(
+                DAILY_POST_SHEET_URL,
+                ignore_paths=[brand_path],
+            )
+            if not looks_like_daily_sheet(daily_path):
+                self.logger.info("일상 글 시트가 아니라 한 번 더 받습니다")
+                daily_path = self.browser.download_sheet(
+                    DAILY_POST_SHEET_URL,
+                    ignore_paths=[brand_path, daily_path],
+                )
+            return brand_path, daily_path
+        return brand_path, None
+
+    def _brand_name(self, brand_path: Path) -> str:
+        name = brand_from_sheet_title(brand_path.stem)
+        if name:
+            return name
+        url = self.sheet_url.get().strip()
+        if not url:
+            return ""
+        try:
+            return load_sheet_brand(url)
+        except Exception:
+            return ""
+
+    def _image_resolver(self) -> GoogleDriveImageResolver:
+        return GoogleDriveImageResolver(self.data_dir / "data", self.logger)
 
     def _check_gatling(self) -> None:
         path = self.gatling_path.get().strip()
@@ -156,14 +206,29 @@ class GatlingPasteApp(AutomationApp):
 
     def _check_data(self) -> None:
         def work() -> None:
-            result = build_gatling_master(self._brand_path(), manuscript_only=True)
+            brand_path, daily_path = self._brand_and_daily_paths()
+            gatling_path = self.gatling_path.get().strip()
+            existing_keys = (
+                load_existing_manuscript_keys(gatling_path) if gatling_path else None
+            )
+            result = build_gatling_master(
+                brand_path,
+                daily_path,
+                manuscript_only=False,
+                skip_completed=False,
+                brand=self._brand_name(brand_path),
+                image_resolver=self._image_resolver(),
+                existing_keys=existing_keys,
+            )
             counts = result.type_counts()
             self.logger.info(
-                "원고 확인: %s건 / 제목·본문 %s / 댓글 %s / 대댓글 %s",
+                "원고 확인: %s건 / 새글 %s / 글수정 %s / 댓글 %s / 대댓글 %s / 이미지 %s",
                 len(result.jobs),
-                counts.get("새글", 0) + counts.get("글수정", 0),
+                counts.get("새글", 0),
+                counts.get("글수정", 0),
                 counts.get("댓글", 0),
                 counts.get("대댓글", 0),
+                result.image_count,
             )
             for item in result.skipped:
                 self.logger.info("건너뜀 %s", item)
@@ -174,9 +239,11 @@ class GatlingPasteApp(AutomationApp):
                         "원고 확인",
                         (
                             f"원고 {len(result.jobs)}건\n"
-                            f"제목·본문 {counts.get('새글', 0) + counts.get('글수정', 0)} / "
+                            f"새글 {counts.get('새글', 0)} / "
+                            f"글수정 {counts.get('글수정', 0)} / "
                             f"댓글 {counts.get('댓글', 0)} / "
-                            f"대댓글 {counts.get('대댓글', 0)}\n"
+                            f"대댓글 {counts.get('대댓글', 0)} / "
+                            f"이미지 {result.image_count}장\n"
                             f"건너뜀 {len(result.skipped)}건"
                         ),
                     ),
@@ -201,12 +268,17 @@ class GatlingPasteApp(AutomationApp):
         def work() -> None:
             try:
                 self._set_progress(1, 3)
-                brand_path = self._brand_path()
+                brand_path, daily_path = self._brand_and_daily_paths()
                 self._set_progress(2, 3)
                 result, start_row = paste_manuscripts_into_gatling(
                     brand_path,
                     gatling_path,
-                    manuscript_only=True,
+                    daily_path,
+                    manuscript_only=False,
+                    skip_completed=False,
+                    brand=self._brand_name(brand_path),
+                    image_resolver=self._image_resolver(),
+                    image_dir=gatling_image_folder(gatling_path),
                 )
                 counts = result.type_counts()
                 self.logger.info(
@@ -221,23 +293,26 @@ class GatlingPasteApp(AutomationApp):
                         (
                             "넣기 완료",
                             (
-                                f"기존 글은 그대로 두고, 제목·본문이 비어 있던 "
-                                f"{start_row}행부터 새 글을 넣었습니다. "
-                                f"댓글·대댓글은 각 칸의 빈 내용부터 넣었습니다.\n"
+                                f"기존 글은 그대로 두고, 시트 원고 "
+                                f"{len(result.jobs)}건을 {start_row}행부터 넣었습니다. "
+                                f"타입이 비어 있던 칸에는 새글·글수정·댓글·대댓글을 "
+                                f"알아서 적었습니다.\n"
                                 f"전체 {len(result.rows)}줄.\n"
-                                f"제목·본문 {counts.get('새글', 0) + counts.get('글수정', 0)} / "
+                                f"새글 {counts.get('새글', 0)} / "
+                                f"글수정 {counts.get('글수정', 0)} / "
                                 f"댓글 {counts.get('댓글', 0)} / "
-                                f"대댓글 {counts.get('대댓글', 0)}"
+                                f"대댓글 {counts.get('대댓글', 0)} / "
+                                f"이미지 {result.image_count}장"
                             ),
                         ),
                     )
                 )
             except (GatlingPasteError, DailyPostSheetError) as exc:
                 self.logger.exception("기관총 붙여넣기 실패")
-                self.ui_queue.put(("error", ("붙여넣기 실패", str(exc))))
+                self.ui_queue.put(("error", ("붙여넣기 실패", user_facing_browser_error(exc))))
             except Exception as exc:
                 self.logger.exception("기관총 붙여넣기 실행 실패")
-                self.ui_queue.put(("error", ("실행 실패", str(exc))))
+                self.ui_queue.put(("error", ("실행 실패", user_facing_browser_error(exc))))
             finally:
                 self.ui_queue.put(("finished", None))
 
@@ -247,6 +322,20 @@ class GatlingPasteApp(AutomationApp):
         if hasattr(self, "instance_lock"):
             self.instance_lock.__exit__(None, None, None)
         super()._on_close()
+
+    def _run_background(self, callback) -> None:
+        if self.worker and not self.worker.done():
+            messagebox.showwarning("작업 중", "현재 작업이 끝난 뒤 다시 시도하세요")
+            return
+
+        def work() -> None:
+            try:
+                callback()
+            except Exception as exc:
+                self.logger.exception("작업 실패")
+                self.ui_queue.put(("error", ("오류", user_facing_browser_error(exc))))
+
+        self.worker = self.executor.submit(work)
 
 
 def main() -> None:

@@ -3,7 +3,8 @@ from pathlib import Path
 import pytest
 from openpyxl import Workbook, load_workbook
 
-from v2r_auto.content import parse_article
+from v2r_auto.content import CommentNode, ParsedArticle, parse_article
+from v2r_auto.images import ResolvedImage
 from v2r_auto.gatling_paste import (
     AFFILIATE_EXACT_BOARDS,
     MASTER_HEADER_ROW,
@@ -18,11 +19,14 @@ from v2r_auto.gatling_paste import (
     build_and_write_master,
     build_gatling_master,
     build_master_rows,
+    collect_resolved_images,
     create_master_template,
+    gatling_image_folder,
     exact_board_name,
     load_gatling_brand_jobs,
     paste_manuscripts_into_gatling,
     recognize_gatling_workbook,
+    replace_image_tokens,
     reply_target_value,
     require_writable_gatling,
 )
@@ -158,13 +162,15 @@ def test_affiliate_daily_goes_to_new_post_and_manuscript_goes_to_edit() -> None:
     assert rows[0].title == "일상 제목"
     assert rows[0].body == "일상 본문"
     assert rows[0].board_name == "자유 수다방"
-    assert rows[0].hashtag == "단식원 가격"
+    assert rows[0].hashtag == ""
     assert rows[0].prefix == "자유"
     assert rows[0].link is None
+    assert rows[0].image_location == ""
 
     assert rows[1].type == TYPE_EDIT_POST
     assert rows[1].title == "실제 원고 제목"
     assert rows[1].body == "실제 원고 본문"
+    assert rows[1].hashtag == "단식원 가격"
     assert rows[1].board_name == "자유 수다방"
     assert rows[1].link is None
 
@@ -198,6 +204,8 @@ def test_self_owned_manuscript_is_new_post_only() -> None:
     assert TYPE_EDIT_POST not in types
     assert rows[0].title == "실제 원고 제목"
     assert rows[0].board_name == "가입인사"
+    assert rows[0].hashtag == "단식원 가격"
+    assert all(not row.hashtag for row in rows[1:])
 
 
 def test_affiliate_without_daily_post_raises() -> None:
@@ -214,12 +222,16 @@ def test_load_brand_sheet_reads_board_and_skips_completed(tmp_path: Path) -> Non
         f'"완료키워드","제목 : 완료\n본문 : 완료본문",씨씨앙,writer,질문형,https://v2r.example/x,,,Y,자유수다방\n',
     )
 
-    jobs, skipped = load_gatling_brand_jobs(path)
+    jobs, skipped = load_gatling_brand_jobs(path, skip_completed=True)
 
     assert len(jobs) == 1
     assert jobs[0].board == "자유수다방"
     assert jobs[0].article.comments[1].children[0].children[0].label == "대대댓글2"
     assert any("완료 링크" in item for item in skipped)
+
+    kept, kept_skipped = load_gatling_brand_jobs(path)
+    assert len(kept) == 2
+    assert kept_skipped == []
 
 
 def test_build_assigns_daily_posts_and_writes_master_columns(tmp_path: Path) -> None:
@@ -309,8 +321,8 @@ def test_manuscript_only_uses_sheet_title_body_and_all_comments() -> None:
     assert [row.type for row in rows] == [
         TYPE_EDIT_POST,
         TYPE_COMMENT,
-        TYPE_REPLY,
         TYPE_COMMENT,
+        TYPE_REPLY,
         TYPE_REPLY,
         TYPE_REPLY,
         TYPE_REPLY,
@@ -319,8 +331,8 @@ def test_manuscript_only_uses_sheet_title_body_and_all_comments() -> None:
     assert rows[0].body == "실제 원고 본문"
     assert [row.body for row in rows[1:]] == [
         "첫 댓글",
-        "첫 답글",
         "둘째 댓글",
+        "첫 답글",
         "둘째 답글",
         "깊은 답글",
         "더 깊은 답글",
@@ -561,3 +573,344 @@ def test_xlsb_is_recognized_but_not_writable(tmp_path: Path) -> None:
     assert info.headers[:4] == ["링크", "타입", "제목", "내용"]
     with pytest.raises(GatlingPasteError, match="xlsb"):
         require_writable_gatling(path)
+
+
+def test_image_tokens_become_gatling_placeholder() -> None:
+    assert replace_image_tokens("사진 {키워드} 끝") == "사진 {이미지} 끝"
+    assert replace_image_tokens("{A열 키워드}\n본문") == "{이미지}\n본문"
+    assert replace_image_tokens("{A열키워드}") == "{이미지}"
+    assert replace_image_tokens("전 {B/A} 후") == "전 {이미지} 후"
+    assert replace_image_tokens("이미 {이미지} 있음") == "이미 {이미지} 있음"
+
+
+def test_image_tokens_are_rewritten_in_title_body_and_comments() -> None:
+    source = (
+        "제목 :\n제목 {키워드}\n\n본문 :\n본문 {A열 키워드}\n\n"
+        "댓글1:\n댓글 {키워드}\n대댓글1:\n답글 {A열 키워드}\n"
+    )
+    job = GatlingBrandJob(
+        row_number=2,
+        keyword="엉덩이 종기",
+        article=parse_article("엉덩이 종기", source),
+        cafe="고요한아침",
+        board="가입인사",
+        article_type="질문형",
+    )
+
+    rows = build_master_rows(job, include_daily_new_post=False)
+
+    assert rows[0].title == "제목 {이미지}"
+    assert rows[0].body == "본문 {이미지}"
+    assert rows[1].body == "댓글 {이미지}"
+    assert rows[2].body == "답글 {이미지}"
+
+
+def test_revision_order_is_daily_edit_all_comments_then_replies() -> None:
+    rows = build_master_rows(make_job(cafe="씨씨앙", board="자유수다방"))
+    types = [row.type for row in rows]
+
+    assert types[:2] == [TYPE_NEW_POST, TYPE_EDIT_POST]
+    assert TYPE_EDIT_POST not in types[2:]
+    assert types[2:] == [TYPE_COMMENT, TYPE_COMMENT] + [TYPE_REPLY] * 4
+    assert rows[0].title == "일상 제목"
+    assert rows[1].title == "실제 원고 제목"
+
+
+def test_replies_are_grouped_by_depth_like_the_template() -> None:
+    comments = []
+    for index in range(1, 4):
+        child = CommentNode(label=f"대댓글{index}", text=f"답글{index}", depth=1, index=index)
+        comments.append(
+            CommentNode(
+                label=f"댓글{index}",
+                text=f"댓글{index} 내용",
+                depth=0,
+                index=index,
+                children=[child],
+            )
+        )
+    comments[1].children[0].children.append(
+        CommentNode(label="대대댓글2", text="깊은 답글", depth=2, index=2)
+    )
+    job = GatlingBrandJob(
+        row_number=2,
+        keyword="키워드",
+        article=ParsedArticle(
+            title="원고 제목",
+            body="원고 내용",
+            keyword="키워드",
+            tag="",
+            comments=comments,
+        ),
+        cafe="씨씨앙",
+        board="자유수다방",
+        article_type="질문형",
+        daily_post=DailyPost(row_number=2, cafe="씨씨앙", title="일상 글 제목", body="일상 글 내용"),
+    )
+
+    rows = build_master_rows(job)
+    replies = [row for row in rows if row.type == TYPE_REPLY]
+
+    assert [row.type for row in rows[:5]] == [
+        TYPE_NEW_POST,
+        TYPE_EDIT_POST,
+        TYPE_COMMENT,
+        TYPE_COMMENT,
+        TYPE_COMMENT,
+    ]
+    assert [row.link for row in replies] == [1, 2, 3, 2.1]
+    assert [row.body for row in replies] == ["답글1", "답글2", "답글3", "깊은 답글"]
+
+
+def test_completed_f_column_rows_are_kept_for_gatling(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"엉덩이 종기","{QUESTION_SOURCE}",양평맘,writer,질문형,'
+        "https://v2r.daboja.im/nc/articleDetail/1,,,,이모저모이야기\n",
+    )
+
+    jobs, skipped = load_gatling_brand_jobs(brand)
+    result = build_gatling_master(brand, manuscript_only=True)
+
+    assert skipped == []
+    assert len(jobs) == 1
+    assert jobs[0].keyword == "엉덩이 종기"
+    assert jobs[0].completion_url.startswith("https://v2r.daboja.im")
+    assert result.jobs[0].keyword == "엉덩이 종기"
+
+
+def test_skip_completed_explains_why_nothing_is_left(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"엉덩이 종기","{QUESTION_SOURCE}",양평맘,writer,질문형,'
+        "https://v2r.daboja.im/nc/articleDetail/1,,,,이모저모이야기\n",
+    )
+
+    with pytest.raises(GatlingPasteError, match="F열 완료 링크"):
+        load_gatling_brand_jobs(brand, skip_completed=True)
+
+
+def test_collected_images_use_pipe_separated_paths(tmp_path: Path) -> None:
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    first = source_dir / "1.jpg"
+    second = source_dir / "31.jpg"
+    third = source_dir / "51.jpg"
+    first.write_bytes(b"one")
+    second.write_bytes(b"two")
+    third.write_bytes(b"three")
+    dest = tmp_path / "복불용_images"
+    resolved = [
+        ResolvedImage(0, "키워드", "a", "1.jpg", first),
+        ResolvedImage(1, "키워드", "b", "31.jpg", second),
+        ResolvedImage(2, "B/A", "c", "51.jpg", third),
+    ]
+
+    joined = collect_resolved_images(resolved, dest)
+
+    assert dest.joinpath("1.jpg").read_bytes() == b"one"
+    assert dest.joinpath("31.jpg").read_bytes() == b"two"
+    assert dest.joinpath("51.jpg").read_bytes() == b"three"
+    assert joined == "|".join(
+        [str(dest / "1.jpg"), str(dest / "31.jpg"), str(dest / "51.jpg")]
+    )
+
+
+def test_image_folder_sits_next_to_the_excel(tmp_path: Path) -> None:
+    path = tmp_path / "기관총 카페봇 복불용.xlsm"
+    assert gatling_image_folder(path) == tmp_path / "기관총 카페봇 복불용_images"
+
+
+def test_manuscript_row_gets_hashtag_and_image_location() -> None:
+    job = make_job(cafe="씨씨앙", board="자유수다방")
+    rows = build_master_rows(job, image_location=r"G:\image\1.jpg|G:\image\31.jpg")
+
+    assert rows[0].hashtag == ""
+    assert rows[0].image_location == ""
+    assert rows[1].hashtag == "단식원 가격"
+    assert rows[1].image_location == r"G:\image\1.jpg|G:\image\31.jpg"
+    assert rows[1].cells()[13] == r"G:\image\1.jpg|G:\image\31.jpg"
+    assert all(not row.hashtag and not row.image_location for row in rows[2:])
+
+
+def test_brand_is_read_from_sheet_filename(tmp_path: Path) -> None:
+    path = tmp_path / "카페 원고 작성 시트 (뉴더미스).csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"엉덩이 종기","{QUESTION_SOURCE}",양평맘,writer,질문형,,,,,이모저모이야기\n',
+        encoding="utf-8-sig",
+    )
+
+    jobs, _ = load_gatling_brand_jobs(path)
+    assert jobs[0].brand == "뉴더미스"
+
+
+def test_same_title_and_body_are_not_pasted_twice(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{QUESTION_SOURCE}",고요한아침,writer,질문형,,,,,가입인사\n'
+        f'"다른 키워드","{QUESTION_SOURCE}",고요한아침,writer,질문형,,,,,가입인사\n',
+    )
+    gatling = write_gatling_xlsx(tmp_path)
+
+    first, _ = paste_manuscripts_into_gatling(brand, gatling)
+    assert len(first.jobs) == 1
+    assert any("제목·본문이 이미 있어" in item for item in first.skipped)
+
+    with pytest.raises(GatlingPasteError, match="제목·본문이 같은 원고"):
+        paste_manuscripts_into_gatling(brand, gatling)
+
+
+def test_same_title_with_different_body_is_kept(tmp_path: Path) -> None:
+    other = (
+        "제목 :\n실제 원고 제목\n\n본문 :\n다른 본문\n\n댓글1:\n첫 댓글\n"
+    )
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{QUESTION_SOURCE}",고요한아침,writer,질문형,,,,,가입인사\n'
+        f'"단식원 가격","{other}",고요한아침,writer,질문형,,,,,가입인사\n',
+    )
+
+    result = build_gatling_master(brand, manuscript_only=True)
+    assert len(result.jobs) == 2
+    assert result.skipped == []
+
+
+def _simple_source(title: str, body: str, comment: str = "댓글본문") -> str:
+    return f"제목 :\n{title}\n\n본문 :\n{body}\n\n댓글1:\n{comment}\n대댓글1:\n답글본문\n"
+
+
+def test_empty_excel_type_is_filled_and_all_sheet_jobs_are_pasted(tmp_path: Path) -> None:
+    path = tmp_path / "empty-type.xlsm"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "마스터"
+    for offset, header in enumerate(("링크", "타입", "제목", "내용")):
+        sheet.cell(6, 2 + offset, header)
+    sheet.cell(7, 3, TYPE_NEW_POST)
+    sheet.cell(7, 4, "이미 있는 제목")
+    sheet.cell(7, 5, "이미 있는 본문")
+    sheet.cell(8, 3, TYPE_NEW_POST)
+    sheet.cell(9, 2, 1)
+    for row_number in range(10, 16):
+        sheet.cell(row_number, 3, None)
+    workbook.save(path)
+
+    first = _simple_source("첫째 제목", "첫째 본문", "첫째 댓글")
+    second = _simple_source("둘째 제목", "둘째 본문", "둘째 댓글")
+    third = _simple_source("셋째 제목", "셋째 본문", "셋째 댓글")
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"키워드1","{first}",고요한아침,writer,,,,,,가입인사\n'
+        f'"키워드2","{second}",고요한아침,writer,질문형,,,,,가입인사\n'
+        f'"키워드3","{third}",고요한아침,writer,후기형,,,,,가입인사\n',
+    )
+
+    result, start_row = paste_manuscripts_into_gatling(brand, path)
+    workbook = load_workbook(path)
+    sheet = workbook["마스터"]
+
+    assert len(result.jobs) == 3
+    assert start_row == 8
+    assert sheet.cell(7, 4).value == "이미 있는 제목"
+    assert sheet.cell(8, 3).value == TYPE_NEW_POST
+    assert sheet.cell(8, 4).value == "첫째 제목"
+    assert sheet.cell(8, 5).value == "첫째 본문"
+    assert sheet.cell(9, 2).value is None
+    assert sheet.cell(9, 3).value == TYPE_COMMENT
+    assert sheet.cell(9, 5).value == "첫째 댓글"
+    assert sheet.cell(10, 3).value == TYPE_REPLY
+    assert sheet.cell(10, 5).value == "답글본문"
+    assert sheet.cell(11, 3).value == TYPE_NEW_POST
+    assert sheet.cell(11, 4).value == "둘째 제목"
+    assert sheet.cell(12, 3).value == TYPE_COMMENT
+    assert sheet.cell(12, 5).value == "둘째 댓글"
+    assert sheet.cell(13, 3).value == TYPE_REPLY
+    assert sheet.cell(14, 3).value == TYPE_NEW_POST
+    assert sheet.cell(14, 4).value == "셋째 제목"
+    assert sheet.cell(15, 3).value == TYPE_COMMENT
+    assert sheet.cell(15, 5).value == "셋째 댓글"
+
+
+def test_blank_type_after_comment_block_is_used_for_next_article(tmp_path: Path) -> None:
+    path = tmp_path / "blank-after-comments.xlsm"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "마스터"
+    for offset, header in enumerate(("링크", "타입", "제목", "내용")):
+        sheet.cell(6, 2 + offset, header)
+    sheet.cell(7, 3, TYPE_NEW_POST)
+    sheet.cell(7, 4, "이미 있는 제목")
+    sheet.cell(7, 5, "이미 있는 본문")
+    sheet.cell(8, 3, TYPE_COMMENT)
+    sheet.cell(8, 5, "이미 있는 댓글")
+    sheet.cell(9, 3, None)
+    sheet.cell(10, 3, None)
+    sheet.cell(11, 3, None)
+    workbook.save(path)
+
+    info = recognize_gatling_workbook(path)
+    assert info.next_row == 9
+
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"키워드1","{_simple_source("새 제목", "새 본문")}",고요한아침,writer,질문형,,,,,가입인사\n',
+    )
+    _, start_row = paste_manuscripts_into_gatling(brand, path)
+    workbook = load_workbook(path)
+    sheet = workbook["마스터"]
+    assert start_row == 9
+    assert sheet.cell(8, 5).value == "이미 있는 댓글"
+    assert sheet.cell(9, 3).value == TYPE_NEW_POST
+    assert sheet.cell(9, 4).value == "새 제목"
+    assert sheet.cell(10, 3).value == TYPE_COMMENT
+    assert sheet.cell(11, 3).value == TYPE_REPLY
+
+
+def test_extra_manuscripts_still_append_with_types(tmp_path: Path) -> None:
+    path = write_gatling_xlsx(tmp_path)
+    first = _simple_source("첫째 제목", "첫째 본문")
+    second = _simple_source("둘째 제목", "둘째 본문")
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"키워드1","{first}",고요한아침,writer,질문형,,,,,가입인사\n'
+        f'"키워드2","{second}",고요한아침,writer,질문형,,,,,가입인사\n',
+    )
+
+    result, start_row = paste_manuscripts_into_gatling(brand, path)
+    workbook = load_workbook(path)
+    sheet = workbook["마스터"]
+    titles = [
+        sheet.cell(row_number, 3).value
+        for row_number in range(7, sheet.max_row + 1)
+        if sheet.cell(row_number, 2).value == TYPE_NEW_POST
+    ]
+
+    assert len(result.jobs) == 2
+    assert start_row == 9
+    assert "이미 있는 글" in titles
+    assert "첫째 제목" in titles
+    assert "둘째 제목" in titles
+    assert sheet.cell(9, 2).value == TYPE_NEW_POST
+    assert sheet.cell(10, 2).value == TYPE_COMMENT
+    assert sheet.cell(11, 2).value == TYPE_REPLY
+
+
+def test_load_keeps_rows_without_article_type(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{_simple_source("제목만", "본문만")}",고요한아침,writer,,,,,,가입인사\n',
+    )
+
+    jobs, skipped = load_gatling_brand_jobs(brand)
+    assert skipped == []
+    assert len(jobs) == 1
+    assert jobs[0].article.title == "제목만"

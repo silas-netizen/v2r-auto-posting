@@ -44,6 +44,34 @@ class AutomationError(RuntimeError):
     pass
 
 
+def is_browser_session_dead(exc: BaseException) -> bool:
+    name = type(exc).__name__.casefold()
+    text = str(exc).casefold()
+    blob = f"{name} {text}"
+    return any(
+        token in blob
+        for token in (
+            "invalidsessionid",
+            "invalid session id",
+            "session deleted",
+            "not connected to devtools",
+            "chrome not reachable",
+            "no such window",
+            "target window already closed",
+            "web view not found",
+        )
+    )
+
+
+def user_facing_browser_error(exc: BaseException) -> str:
+    if is_browser_session_dead(exc):
+        return (
+            "프로그램이 연 Chrome 창이 닫혀 연결이 끊겼습니다. "
+            "창을 닫지 말고 다시 시도하거나, '구글 시트 열기'를 누른 뒤 다시 눌러 주세요."
+        )
+    return str(exc)
+
+
 @dataclass(slots=True)
 class BrowserConfig:
     profile_dir: Path
@@ -101,6 +129,35 @@ class V2RBrowser:
             self._affiliate_publisher = None
             self._immediate_publisher = None
 
+    def is_alive(self) -> bool:
+        if self.driver is None:
+            return False
+        try:
+            return bool(self.driver.window_handles)
+        except Exception:
+            return False
+
+    def reset_session(self) -> None:
+        driver = self.driver
+        self.driver = None
+        self.v2r_handle = None
+        self.google_handle = None
+        self._api_capture_active = False
+        if driver is None:
+            return
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+    def ensure_browser(self) -> None:
+        if self.driver and self.is_alive():
+            return
+        if self.driver:
+            self.logger.info("크롬 창이 닫혀 다시 켭니다")
+            self.reset_session()
+        self.start()
+
     @property
     def wait(self) -> WebDriverWait:
         if not self.driver:
@@ -118,6 +175,16 @@ class V2RBrowser:
             self._navigate(sheet_url, self.google_handle)
             self.logger.info("Google Sheets 로그인 확인 탭을 열었습니다")
         self.logger.info("로그인 준비 창을 열었습니다. Google과 V2R 로그인을 확인하세요")
+
+    def open_google_sheet(self, sheet_url: str) -> None:
+        url = (sheet_url or "").strip()
+        if not url:
+            raise AutomationError("브랜드 시트 URL을 넣어 주세요")
+        self.ensure_browser()
+        assert self.driver
+        self._navigate(url, self.google_handle)
+        self.google_handle = self.driver.current_window_handle
+        self.logger.info("브랜드 시트를 열었습니다. 로그인이 필요하면 이 창에서 해 주세요")
 
     def _switch_to_handle(self, preferred: str | None = None) -> None:
         assert self.driver
@@ -150,29 +217,75 @@ class V2RBrowser:
         parsed = urlparse(sheet_url)
         gid = parse_qs(parsed.query).get("gid", ["0"])[0]
         if parsed.fragment.startswith("gid="):
-            gid = parsed.fragment.split("=", 1)[1]
+            gid = parsed.fragment.split("=", 1)[1].split("&", 1)[0]
         return (
             f"https://docs.google.com/spreadsheets/d/{match.group(1)}"
             f"/export?format=csv&gid={gid}"
         )
 
-    def download_sheet(self, sheet_url: str) -> Path:
-        self.start()
+    def _set_download_dir(self, dest: Path) -> bool:
+        assert self.driver
+        dest.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "behavior": "allow",
+            "downloadPath": str(dest.resolve()),
+        }
+        for command in ("Page.setDownloadBehavior", "Browser.setDownloadBehavior"):
+            try:
+                self.driver.execute_cdp_cmd(command, payload)
+                return True
+            except Exception:
+                continue
+        return False
+
+    def download_sheet(
+        self,
+        sheet_url: str,
+        *,
+        ignore_paths: list[Path] | tuple[Path, ...] | None = None,
+    ) -> Path:
+        ignored = {path.resolve() for path in (ignore_paths or [])}
+        self.ensure_browser()
+        try:
+            return self._download_sheet_once(sheet_url, ignore_paths=ignored)
+        except Exception as exc:
+            if not is_browser_session_dead(exc):
+                raise
+            self.logger.info("크롬 연결이 끊겨 다시 열고 한 번 더 받습니다")
+            self.reset_session()
+            self.start()
+            return self._download_sheet_once(sheet_url, ignore_paths=ignored)
+
+    def _download_sheet_once(
+        self,
+        sheet_url: str,
+        *,
+        ignore_paths: set[Path] | None = None,
+    ) -> Path:
+        self.ensure_browser()
         assert self.driver
         self._switch_to_handle(self.google_handle)
         self.google_handle = self.driver.current_window_handle
-        before = {path: path.stat().st_mtime for path in self.config.download_dir.glob("*.csv")}
+        dest_dir = self.config.download_dir / f"sheet-{time.time_ns()}"
+        if not self._set_download_dir(dest_dir):
+            dest_dir = self.config.download_dir
+        before = {path: path.stat().st_mtime for path in dest_dir.glob("*.csv")}
+        ignored = ignore_paths or set()
         self.logger.info("Google Sheets 데이터를 내려받습니다")
         request_started = time.time()
+        if "/export?" not in sheet_url:
+            self._navigate(sheet_url, self.google_handle)
         self._navigate(self._sheet_export_url(sheet_url), self.google_handle)
         deadline = time.monotonic() + self.config.timeout_seconds
         while time.monotonic() < deadline:
             candidates = sorted(
-                self.config.download_dir.glob("*.csv"),
+                dest_dir.glob("*.csv"),
                 key=lambda path: path.stat().st_mtime,
                 reverse=True,
             )
             for candidate in candidates:
+                if candidate.resolve() in ignored:
+                    continue
                 if candidate not in before or candidate.stat().st_mtime > before[candidate]:
                     related_download = candidate.with_suffix(candidate.suffix + ".crdownload")
                     if candidate.stat().st_mtime >= request_started and not related_download.exists():
@@ -181,7 +294,8 @@ class V2RBrowser:
             time.sleep(0.5)
         if "accounts.google.com" in self.driver.current_url:
             raise AutomationError(
-                "Google 로그인이 필요합니다. '로그인 준비'에서 로그인한 뒤 다시 실행하세요"
+                "Google 로그인이 필요합니다. 프로그램이 연 Chrome 창에서 "
+                "구글에 로그인한 뒤 다시 실행하세요"
             )
         raise AutomationError(
             "시트를 내려받지 못했습니다. 공유 권한 또는 Google 로그인을 확인하세요"

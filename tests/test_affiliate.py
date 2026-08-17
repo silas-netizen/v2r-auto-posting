@@ -1,9 +1,11 @@
+import json
 import logging
 import random
 import threading
-import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 from v2r_auto.affiliate_api import AffiliateApiPublisher, _content_json
 from v2r_auto.content import parse_article
@@ -107,6 +109,21 @@ def test_daily_posts_are_matched_to_cafe_without_reuse(tmp_path: Path) -> None:
     assign_daily_posts(jobs, load_daily_posts(path), random.Random(1))
 
     assert {job.daily_post.title for job in jobs if job.daily_post} == {"첫 일상", "둘 일상"}
+
+
+def test_brand_sheet_is_not_read_as_daily_posts(tmp_path: Path) -> None:
+    from v2r_auto.daily_posts import DailyPostSheetError, looks_like_daily_sheet
+
+    path = tmp_path / "brand.csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크\n"
+        '"키워드","제목 : 제목\n본문 : 본문",양평맘,writer,질문형,\n',
+        encoding="utf-8-sig",
+    )
+
+    assert looks_like_daily_sheet(path) is False
+    with pytest.raises(DailyPostSheetError, match="브랜드 원고"):
+        load_daily_posts(path)
 
 
 def test_api_content_preserves_blank_lines_as_paragraphs() -> None:
