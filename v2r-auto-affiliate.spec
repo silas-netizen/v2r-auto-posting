@@ -4,14 +4,13 @@ from PyInstaller.utils.hooks import collect_all
 
 selenium_datas, selenium_binaries, selenium_hiddenimports = collect_all("selenium")
 pillow_datas, pillow_binaries, pillow_hiddenimports = collect_all("PIL")
-pywinauto_datas, pywinauto_binaries, pywinauto_hiddenimports = collect_all("pywinauto")
 
 a = Analysis(
     ["main_affiliate.py"],
     pathex=[],
-    binaries=selenium_binaries + pillow_binaries + pywinauto_binaries,
-    datas=selenium_datas + pillow_datas + pywinauto_datas,
-    hiddenimports=selenium_hiddenimports + pillow_hiddenimports + pywinauto_hiddenimports,
+    binaries=selenium_binaries + pillow_binaries,
+    datas=selenium_datas + pillow_datas,
+    hiddenimports=selenium_hiddenimports + pillow_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
