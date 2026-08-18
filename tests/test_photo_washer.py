@@ -62,17 +62,19 @@ class FakeResolver:
         ]
 
 
-class WashingController:
+class OpeningController:
     def __init__(self):
         self.calls = 0
         self.paths: list[Path] = []
 
-    def wash(self, batch_dir: Path, image_paths: list[Path]) -> None:
+    def open_for_manual_wash(
+        self,
+        batch_dir: Path,
+        image_paths: list[Path],
+    ) -> None:
         self.calls += 1
         self.paths = list(image_paths)
         assert all(path.parent == batch_dir for path in image_paths)
-        for index, path in enumerate(image_paths, start=1):
-            write_jpeg(path, f"WashedMake{index}", f"WashedModel{index}")
 
 
 def test_camera_metadata_uses_windows_details_camera_fields(tmp_path: Path) -> None:
@@ -104,7 +106,9 @@ def test_photo_washer_path_is_saved_and_reused(tmp_path: Path) -> None:
     assert load_saved_photo_washer_executable(settings) is None
 
 
-def test_batch_selects_unique_images_and_washes_once(tmp_path: Path) -> None:
+def test_batch_selects_unique_images_and_opens_manual_wash_once(
+    tmp_path: Path,
+) -> None:
     first_path = tmp_path / "first.jpg"
     second_path = tmp_path / "second.jpg"
     write_jpeg(first_path, "Original", "One")
@@ -116,7 +120,7 @@ def test_batch_selects_unique_images_and_washes_once(tmp_path: Path) -> None:
             3: [ResolvedImage(0, "B/A", "second-id", "second.jpg", second_path)],
         }
     )
-    controller = WashingController()
+    controller = OpeningController()
 
     plan = prepare_photo_wash_plan(
         jobs,
@@ -128,14 +132,17 @@ def test_batch_selects_unique_images_and_washes_once(tmp_path: Path) -> None:
     )
 
     assert plan.selected_count == 2
-    assert plan.washed_count == 2
+    assert plan.washed_count == 0
     assert not plan.failures
     assert controller.calls == 1
     assert len({path.parent for path in controller.paths}) == 1
     assert resolver.exclusions == [set(), {"first-id"}]
 
+    for index, path in enumerate(controller.paths, start=1):
+        write_jpeg(path, f"WashedMake{index}", f"WashedModel{index}")
     reloaded = [copy.deepcopy(job) for job in jobs]
     plan.apply(reloaded)
+    assert plan.washed_count == 2
     assert all(job.photo_wash_prepared for job in reloaded)
     assert all(len(job.prepared_images) == 1 for job in reloaded)
     assert {
@@ -149,7 +156,7 @@ def test_duplicate_photo_blocks_only_later_job(tmp_path: Path) -> None:
     shared = ResolvedImage(0, "B/A", "same-id", "only.jpg", path)
     jobs = [make_job(2), make_job(3)]
     resolver = FakeResolver({2: [shared], 3: [shared]})
-    controller = WashingController()
+    controller = OpeningController()
 
     plan = prepare_photo_wash_plan(
         jobs,
@@ -162,6 +169,11 @@ def test_duplicate_photo_blocks_only_later_job(tmp_path: Path) -> None:
 
     assert photo_job_key(jobs[2 - 2]) not in plan.failures
     assert photo_job_key(jobs[1]) in plan.failures
+    write_jpeg(
+        controller.paths[0],
+        "WashedMake",
+        "WashedModel",
+    )
     reloaded = [copy.deepcopy(job) for job in jobs]
     plan.apply(reloaded)
     assert reloaded[0].status == JobStatus.PENDING
@@ -186,9 +198,7 @@ def test_unchanged_camera_metadata_blocks_article(tmp_path: Path) -> None:
         }
     )
 
-    class NoChangeController:
-        def wash(self, batch_dir: Path, image_paths: list[Path]) -> None:
-            return None
+    controller = OpeningController()
 
     plan = prepare_photo_wash_plan(
         [job],
@@ -196,11 +206,12 @@ def test_unchanged_camera_metadata_blocks_article(tmp_path: Path) -> None:
         executable=tmp_path / "main.exe",
         logger=logging.getLogger("test"),
         resolver=resolver,
-        controller=NoChangeController(),
+        controller=controller,
     )
 
-    assert photo_job_key(job) in plan.failures
+    assert photo_job_key(job) not in plan.failures
     reloaded = copy.deepcopy(job)
     plan.apply([reloaded])
+    assert photo_job_key(job) in plan.failures
     assert reloaded.status == JobStatus.FAILED
     assert "카메라 정보가 변경되지 않아" in reloaded.message

@@ -263,11 +263,10 @@ class ImmediateAutomationApp(AutomationApp):
             errors = sum(bool(job.validate()) for job in jobs)
             self.logger.info(
                 "즉시 발행 데이터 확인: %s건 / 형식 오류 %s건 / "
-                "사진 선택 %s개 / 세탁 성공 %s개",
+                "사진 선택 %s개 / 수동 세탁 대기",
                 len(jobs),
                 errors,
                 self.photo_wash_plan.selected_count,
-                self.photo_wash_plan.washed_count,
             )
             self.ui_queue.put(
                 (
@@ -277,8 +276,10 @@ class ImmediateAutomationApp(AutomationApp):
                         f"처리 대상 {len(jobs)}건\n"
                         f"형식 오류 {errors}건\n"
                         f"사진 선택 {self.photo_wash_plan.selected_count}개\n"
-                        f"세탁 성공 {self.photo_wash_plan.washed_count}개\n"
-                        f"사진 실패 원고 {len(self.photo_wash_plan.failures)}건",
+                        f"사진 준비 실패 원고 "
+                        f"{len(self.photo_wash_plan.failures)}건\n\n"
+                        "열린 폴더의 사진을 포토워셔로 드래그해 "
+                        "전체 사진 세척 후 예약 발행 시작을 누르세요",
                     ),
                 )
             )
@@ -306,7 +307,10 @@ class ImmediateAutomationApp(AutomationApp):
             try:
                 jobs, sheet_url = self._load_immediate_jobs()
                 if self.photo_wash_plan is not None:
-                    self.photo_wash_plan.apply(jobs)
+                    self.photo_wash_plan.apply(
+                        jobs,
+                        logger=self.logger,
+                    )
                 elif any(needs_photo_wash(job) for job in jobs):
                     raise ValueError(
                         "사진 세탁 준비가 없습니다. "

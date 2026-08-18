@@ -202,11 +202,10 @@ class AffiliateAutomationApp(AutomationApp):
             )
             self.logger.info(
                 "처리 대상 확인 완료: 원고 %s건 / 일상 글 %s건 / "
-                "사진 선택 %s개 / 세탁 성공 %s개",
+                "사진 선택 %s개 / 수동 세탁 대기",
                 len(jobs),
                 len(daily_posts),
                 self.photo_wash_plan.selected_count,
-                self.photo_wash_plan.washed_count,
             )
             self.ui_queue.put(
                 (
@@ -216,8 +215,10 @@ class AffiliateAutomationApp(AutomationApp):
                         f"A~E열이 모두 채워진 원고 {len(jobs)}건\n"
                         f"제휴 일상 글 {len(daily_posts)}건\n"
                         f"사진 선택 {self.photo_wash_plan.selected_count}개\n"
-                        f"세탁 성공 {self.photo_wash_plan.washed_count}개\n"
-                        f"사진 실패 원고 {len(self.photo_wash_plan.failures)}건",
+                        f"사진 준비 실패 원고 "
+                        f"{len(self.photo_wash_plan.failures)}건\n\n"
+                        "열린 폴더의 사진을 포토워셔로 드래그해 "
+                        "전체 사진 세척 후 수정 발행 시작을 누르세요",
                     ),
                 )
             )
@@ -263,7 +264,10 @@ class AffiliateAutomationApp(AutomationApp):
             try:
                 jobs, daily_posts = self._load_affiliate_jobs(sheet_url)
                 if self.photo_wash_plan is not None:
-                    self.photo_wash_plan.apply(jobs)
+                    self.photo_wash_plan.apply(
+                        jobs,
+                        logger=self.logger,
+                    )
                 elif any(needs_photo_wash(job) for job in jobs):
                     raise ValueError(
                         "사진 세탁 준비가 없습니다. "

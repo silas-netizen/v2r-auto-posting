@@ -196,6 +196,39 @@ class PhotoWasherController:
                     f"포토워셔 필수 파일이 없습니다: {companion}"
                 )
 
+    def open_for_manual_wash(
+        self,
+        batch_dir: Path,
+        image_paths: list[Path],
+    ) -> None:
+        self._validate_installation()
+        if not image_paths:
+            return
+        if not batch_dir.is_dir():
+            raise PhotoWashError(
+                f"포토워셔 배치 폴더가 없습니다: {batch_dir}"
+            )
+        try:
+            subprocess.Popen(
+                [str(self.executable)],
+                cwd=str(self.executable.parent),
+            )
+            time.sleep(1)
+            subprocess.Popen(["explorer.exe", str(batch_dir)])
+        except OSError as exc:
+            raise PhotoWashError(
+                f"포토워셔 또는 배치 폴더를 열지 못했습니다: {exc}"
+            ) from exc
+        self.logger.info(
+            "포토워셔와 배치 폴더를 열었습니다: 사진 %s개 / %s",
+            len(image_paths),
+            batch_dir,
+        )
+        self.logger.info(
+            "사진을 포토워셔로 드래그해 전체 사진 세척 후 "
+            "프로그램의 발행 시작 버튼을 누르세요"
+        )
+
     @staticmethod
     def _wait_for_window_text(window, text: str, timeout: int) -> None:
         deadline = time.monotonic() + timeout
@@ -514,11 +547,44 @@ class PhotoWasherController:
 @dataclass(slots=True)
 class PhotoWashPlan:
     prepared_images: dict[str, list[ResolvedImage]] = field(default_factory=dict)
+    pending_images: dict[str, list[ResolvedImage]] = field(default_factory=dict)
+    metadata_before: dict[str, dict[str, str]] = field(default_factory=dict)
     failures: dict[str, str] = field(default_factory=dict)
     selected_count: int = 0
     washed_count: int = 0
 
-    def apply(self, jobs: Iterable[Any]) -> None:
+    def apply(self, jobs: Iterable[Any], logger=None) -> None:
+        self.washed_count = 0
+        for key, images in self.pending_images.items():
+            self.failures.pop(key, None)
+            self.prepared_images.pop(key, None)
+            successful = True
+            for image in images:
+                try:
+                    after = camera_metadata(image.local_path)
+                except PhotoWashError as exc:
+                    self.failures[key] = str(exc)
+                    successful = False
+                    break
+                before = self.metadata_before.get(image.file_id, {})
+                if not camera_metadata_changed(before, after):
+                    self.failures[key] = (
+                        "카메라 정보가 변경되지 않아 세탁하지 않은 사진으로 "
+                        f"판단합니다: {image.local_path.name}"
+                    )
+                    successful = False
+                    break
+            if successful:
+                self.prepared_images[key] = list(images)
+                self.washed_count += len(images)
+                if logger:
+                    logger.info(
+                        "수동 포토워셔 세탁 확인 성공: %s",
+                        ", ".join(image.local_path.name for image in images),
+                    )
+            elif logger:
+                logger.error(self.failures[key])
+
         missing: list[int] = []
         for job in jobs:
             key = photo_job_key(job)
@@ -553,7 +619,6 @@ def prepare_photo_wash_plan(
     resolver = resolver or GoogleDriveImageResolver(download_dir, logger)
     used_file_ids: set[str] = set()
     selected_by_job: dict[str, list[ResolvedImage]] = {}
-    owner_by_file_id: dict[str, str] = {}
     for job in jobs:
         key = photo_job_key(job)
         if not needs_photo_wash(job):
@@ -579,7 +644,6 @@ def prepare_photo_wash_plan(
         )
         for item in resolved:
             used_file_ids.add(item.file_id)
-            owner_by_file_id[item.file_id] = key
 
     all_selected = [
         item
@@ -622,51 +686,29 @@ def prepare_photo_wash_plan(
 
     controller = controller or PhotoWasherController(executable, logger)
     logger.info(
-        "포토워셔 일괄 세탁 시작: 원고 %s건 / 사진 %s개",
+        "수동 포토워셔 준비 시작: 원고 %s건 / 사진 %s개",
         len(selected_by_job),
         len(all_selected),
     )
     try:
-        controller.wash(
+        controller.open_for_manual_wash(
             batch_dir,
             [moved[item.file_id].local_path for item in all_selected],
         )
     except Exception as exc:
-        message = f"포토워셔 세탁 실패로 발행하지 않습니다: {exc}"
+        message = f"포토워셔 또는 배치 폴더 열기 실패: {exc}"
         logger.error(message)
         for key in selected_by_job:
             plan.failures[key] = message
         return plan
 
-    successful_ids: set[str] = set()
-    for item in all_selected:
-        washed = moved[item.file_id]
-        try:
-            after = camera_metadata(washed.local_path)
-        except PhotoWashError as exc:
-            plan.failures[owner_by_file_id[item.file_id]] = str(exc)
-            continue
-        if not camera_metadata_changed(before[item.file_id], after):
-            message = (
-                f"카메라 정보가 변경되지 않아 세탁 실패로 처리합니다: "
-                f"{washed.local_path.name}"
-            )
-            logger.error(message)
-            plan.failures[owner_by_file_id[item.file_id]] = message
-            continue
-        successful_ids.add(item.file_id)
-        logger.info(
-            "포토워셔 세탁 확인 성공: %s",
-            washed.local_path.name,
-        )
-
     for key, items in selected_by_job.items():
         if key in plan.failures:
             continue
         washed_items = [moved[item.file_id] for item in items]
-        if not all(item.file_id in successful_ids for item in washed_items):
-            plan.failures[key] = "사진 세탁 확인 실패로 발행하지 않습니다"
-            continue
-        plan.prepared_images[key] = washed_items
-        plan.washed_count += len(washed_items)
+        plan.pending_images[key] = washed_items
+    plan.metadata_before = before
+    logger.info(
+        "포토워셔와 사진 폴더가 열렸습니다. 수동 세탁 후 발행 시작을 누르세요"
+    )
     return plan
