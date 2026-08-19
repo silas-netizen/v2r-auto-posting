@@ -6,11 +6,13 @@ import json
 import logging
 import random
 import re
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import urlopen
 
 from selenium import webdriver
@@ -18,8 +20,10 @@ from selenium.common.exceptions import (
     NoAlertPresentException,
     NoSuchElementException,
     NoSuchWindowException,
+    StaleElementReferenceException,
     TimeoutException,
     UnexpectedAlertPresentException,
+    WebDriverException,
 )
 from selenium.webdriver import ChromeOptions
 from selenium.webdriver.common.action_chains import ActionChains
@@ -119,8 +123,22 @@ class V2RBrowser:
             self.logger.info("Google Sheets 로그인 확인 탭을 열었습니다")
         self.logger.info("로그인 준비 창을 열었습니다. Google과 V2R 로그인을 확인하세요")
 
+    def _ensure_browser_alive(self) -> None:
+        if not self.driver:
+            raise AutomationError("브라우저가 시작되지 않았습니다")
+        try:
+            handles = self.driver.window_handles
+        except (NoSuchWindowException, WebDriverException) as exc:
+            raise AutomationError(
+                "Chrome 창이 닫혔거나 연결이 끊겼습니다. "
+                "프로그램을 다시 실행하고 로그인 준비 후 표시하기를 누르세요"
+            ) from exc
+        if not handles:
+            raise AutomationError("열려 있는 Chrome 창이 없습니다")
+
     def _switch_to_handle(self, preferred: str | None = None) -> None:
         assert self.driver
+        self._ensure_browser_alive()
         handles = self.driver.window_handles
         if not handles:
             raise AutomationError("열려 있는 Chrome 창이 없습니다")
@@ -128,7 +146,12 @@ class V2RBrowser:
         try:
             self.driver.switch_to.window(target)
         except NoSuchWindowException:
-            self.driver.switch_to.window(self.driver.window_handles[0])
+            remaining = self.driver.window_handles
+            if not remaining:
+                raise AutomationError(
+                    "Chrome 창이 닫혔습니다. 로그인 준비 후 다시 실행하세요"
+                )
+            self.driver.switch_to.window(remaining[0])
 
     def _navigate(self, url: str, preferred_handle: str | None = None) -> None:
         assert self.driver
@@ -143,17 +166,48 @@ class V2RBrowser:
             self.driver.get(url)
 
     @staticmethod
-    def _sheet_export_url(sheet_url: str) -> str:
+    def _sheet_id_and_gid(sheet_url: str) -> tuple[str, str]:
         match = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", sheet_url)
         if not match:
             raise AutomationError("올바른 Google Sheets 주소가 아닙니다")
         parsed = urlparse(sheet_url)
         gid = parse_qs(parsed.query).get("gid", ["0"])[0]
         if parsed.fragment.startswith("gid="):
-            gid = parsed.fragment.split("=", 1)[1]
+            gid = parsed.fragment.split("=", 1)[1].split("&", 1)[0]
+        return match.group(1), gid
+
+    @staticmethod
+    def _sheet_export_url(sheet_url: str) -> str:
+        sheet_id, gid = V2RBrowser._sheet_id_and_gid(sheet_url)
         return (
-            f"https://docs.google.com/spreadsheets/d/{match.group(1)}"
+            f"https://docs.google.com/spreadsheets/d/{sheet_id}"
             f"/export?format=csv&gid={gid}"
+        )
+
+    @staticmethod
+    def _sheet_range_url(
+        sheet_url: str,
+        column: str,
+        row_number: int,
+        *,
+        reload_token: str | None = None,
+    ) -> str:
+        column = column.upper()
+        if not re.fullmatch(r"[A-Z]+", column):
+            raise AutomationError(f"올바르지 않은 시트 열입니다: {column}")
+        if row_number < 1:
+            raise AutomationError(f"올바르지 않은 시트 행입니다: {row_number}")
+        parsed = urlparse(sheet_url)
+        _, gid = V2RBrowser._sheet_id_and_gid(sheet_url)
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        query.pop("join_nav", None)
+        if reload_token:
+            query["join_nav"] = [reload_token]
+        encoded = urlencode(query, doseq=True)
+        return (
+            f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            f"{'?' + encoded if encoded else ''}"
+            f"#gid={gid}&range={column}{row_number}"
         )
 
     def download_sheet(self, sheet_url: str) -> Path:
@@ -186,6 +240,575 @@ class V2RBrowser:
         raise AutomationError(
             "시트를 내려받지 못했습니다. 공유 권한 또는 Google 로그인을 확인하세요"
         )
+
+    @staticmethod
+    def _clipboard_windows_bytes(text: str) -> bytes:
+        """UTF-16LE without BOM.
+
+        `text.encode("utf-16")` starts with FF FE. Windows `clip` then pastes
+        U+FEFF into the first cell of every chunk (rows 2, 402, 802, ...).
+        """
+        return text.encode("utf-16le")
+
+    @staticmethod
+    def _set_clipboard_windows(text: str) -> None:
+        """Put Unicode text on the Windows clipboard without a leading BOM."""
+        import ctypes
+        from ctypes import wintypes
+
+        cf_unicodetext = 13
+        gmem_moveable = 0x0002
+        payload = V2RBrowser._clipboard_windows_bytes(text) + b"\x00\x00"
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+        kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+        kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalFree.argtypes = [wintypes.HGLOBAL]
+        user32.OpenClipboard.argtypes = [wintypes.HWND]
+        user32.OpenClipboard.restype = wintypes.BOOL
+        user32.EmptyClipboard.restype = wintypes.BOOL
+        user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+        user32.SetClipboardData.restype = wintypes.HANDLE
+        user32.CloseClipboard.restype = wintypes.BOOL
+
+        opened = False
+        for _ in range(10):
+            if user32.OpenClipboard(None):
+                opened = True
+                break
+            time.sleep(0.05)
+        if not opened:
+            raise OSError("OpenClipboard failed")
+        try:
+            user32.EmptyClipboard()
+            handle = kernel32.GlobalAlloc(gmem_moveable, len(payload))
+            if not handle:
+                raise OSError("GlobalAlloc failed")
+            locked = kernel32.GlobalLock(handle)
+            if not locked:
+                kernel32.GlobalFree(handle)
+                raise OSError("GlobalLock failed")
+            ctypes.memmove(locked, payload, len(payload))
+            kernel32.GlobalUnlock(handle)
+            if not user32.SetClipboardData(cf_unicodetext, handle):
+                kernel32.GlobalFree(handle)
+                raise OSError("SetClipboardData failed")
+        finally:
+            user32.CloseClipboard()
+
+    @staticmethod
+    def _set_clipboard_windows_powershell(text: str) -> None:
+        import base64
+
+        escaped = text.replace("'", "''")
+        script = f"Set-Clipboard -Value '{escaped}'"
+        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        subprocess.run(
+            ["powershell", "-NoProfile", "-EncodedCommand", encoded],
+            check=True,
+        )
+
+    @staticmethod
+    def _set_clipboard_text(text: str) -> None:
+        """Put TSV on the OS clipboard so Sheets can paste a whole range at once."""
+        encoded = text.encode("utf-8")
+        if sys.platform == "win32":
+            try:
+                V2RBrowser._set_clipboard_windows(text)
+                return
+            except OSError:
+                pass
+            try:
+                V2RBrowser._set_clipboard_windows_powershell(text)
+                return
+            except (FileNotFoundError, OSError, subprocess.CalledProcessError):
+                pass
+            raise AutomationError("클립보드에 값을 넣지 못했습니다")
+        for command in (
+            ["xclip", "-selection", "clipboard"],
+            ["xsel", "--clipboard", "--input"],
+            ["pbcopy"],
+        ):
+            try:
+                subprocess.run(command, input=encoded, check=True)
+                return
+            except (FileNotFoundError, subprocess.CalledProcessError):
+                continue
+        raise AutomationError("클립보드에 값을 넣지 못했습니다")
+
+    def _sheet_document_open(self, sheet_url: str) -> bool:
+        assert self.driver
+        current = self.driver.current_url or ""
+        try:
+            sheet_id, _gid = self._sheet_id_and_gid(sheet_url)
+        except AutomationError:
+            return False
+        if sheet_id not in current:
+            return False
+        if "/export" in current or "format=csv" in current:
+            return False
+        return "docs.google.com/spreadsheets" in current
+
+    def _wait_for_sheet_grid(self) -> None:
+        assert self.driver
+        try:
+            self.wait.until(
+                lambda driver: driver.execute_script("return document.readyState")
+                == "complete"
+            )
+            current = self.driver.current_url or ""
+            if "accounts.google.com" in current:
+                raise AutomationError(
+                    "Google 로그인이 필요합니다. '로그인 준비'에서 로그인한 뒤 다시 실행하세요"
+                )
+            self.wait.until(
+                EC.presence_of_element_located((By.ID, "waffle-rich-text-editor"))
+            )
+        except TimeoutException as exc:
+            raise AutomationError(
+                "시트 화면을 기다리다 시간이 초과했습니다. "
+                "인터넷과 Google 로그인을 확인하세요"
+            ) from exc
+        self.driver.execute_script("window.focus();")
+
+    def _sheet_focus_role(self) -> str:
+        """Where keyboard input will go: name_box, formula_bar, or grid."""
+        assert self.driver
+        try:
+            role = self.driver.execute_script(
+                """
+                const el = document.activeElement;
+                if (!el) return "unknown";
+                const id = el.id || "";
+                const cls = String(el.className || "");
+                if (id === "t-name-box" || cls.includes("name-box")) return "name_box";
+                if (id === "waffle-rich-text-editor") return "formula_bar";
+                return "grid";
+                """
+            )
+        except WebDriverException:
+            return "unknown"
+        return str(role or "unknown")
+
+    def _name_box_value(self) -> str:
+        assert self.driver
+        try:
+            value = self.driver.execute_script(
+                """
+                const el = document.querySelector("#t-name-box, input#t-name-box");
+                if (!el) return "";
+                return el.value || "";
+                """
+            )
+        except WebDriverException:
+            return ""
+        return str(value or "").replace("$", "").strip()
+
+    @staticmethod
+    def name_box_matches_cell(value: str, column: str, row_number: int) -> bool:
+        wanted = f"{column.upper()}{row_number}".casefold()
+        current = (value or "").replace("$", "").strip().casefold().split(":", 1)[0]
+        return current == wanted
+
+    def _name_box_shows_cell(self, column: str, row_number: int) -> bool:
+        return self.name_box_matches_cell(self._name_box_value(), column, row_number)
+
+    def _sheet_appears_filtered(self) -> bool:
+        assert self.driver
+        try:
+            return bool(
+                self.driver.execute_script(
+                    """
+                    const checked = document.querySelector(
+                        ".docs-sheet-filter-button.goog-toolbar-button-checked"
+                    );
+                    if (checked) return true;
+                    const chips = document.querySelectorAll(
+                        ".waffle-filter-chip, .docs-sheet-filter-chip"
+                    );
+                    for (const chip of chips) {
+                        if (chip.offsetParent) return true;
+                    }
+                    return false;
+                    """
+                )
+            )
+        except WebDriverException:
+            return False
+
+    def _leave_sheet_edit_widgets(self) -> None:
+        """Close the name box / cell editor so Ctrl+V lands on the grid."""
+        assert self.driver
+        for _ in range(6):
+            role = self._sheet_focus_role()
+            ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+            time.sleep(0.08)
+            try:
+                self.driver.execute_script(
+                    """
+                    const box = document.querySelector("#t-name-box, input#t-name-box");
+                    if (box) box.blur();
+                    const grid = document.querySelector(".grid-container")
+                        || document.querySelector("#docs-editor");
+                    if (grid && grid.focus) grid.focus();
+                    """
+                )
+            except WebDriverException:
+                pass
+            if role != "name_box" and self._sheet_focus_role() != "name_box":
+                break
+
+    def _select_sheet_cell(self, column: str, row_number: int) -> None:
+        """Move to a cell by clearing the name box, then typing the address.
+
+        Ctrl+A often fails after a large paste, so leftover addresses like
+        Q399 stay in the box. Backspace clears whatever is there.
+        """
+        assert self.driver
+        column = column.upper()
+        target = f"{column}{row_number}"
+        last_seen = ""
+        for _attempt in range(1, 5):
+            ActionChains(self.driver).send_keys(Keys.ESCAPE).send_keys(Keys.ESCAPE).perform()
+            time.sleep(0.15)
+            name_boxes = [
+                element
+                for element in self.driver.find_elements(
+                    By.CSS_SELECTOR,
+                    "#t-name-box, input#t-name-box, .docs-sheet-name-box",
+                )
+                if element.is_displayed()
+            ]
+            if not name_boxes:
+                time.sleep(0.2)
+                continue
+            box = name_boxes[0]
+            try:
+                self.driver.execute_script("arguments[0].focus();", box)
+                box.click()
+                for _ in range(24):
+                    box.send_keys(Keys.BACKSPACE)
+                box.send_keys(target)
+                box.send_keys(Keys.ENTER)
+            except (StaleElementReferenceException, WebDriverException):
+                time.sleep(0.2)
+                continue
+            time.sleep(0.3)
+            last_seen = self._name_box_value()
+            if self._name_box_shows_cell(column, row_number):
+                self._leave_sheet_edit_widgets()
+                if self._sheet_focus_role() != "name_box":
+                    return
+        raise AutomationError(
+            f"시트에서 {target} 칸을 선택하지 못했습니다"
+            + (f" (이름 상자: {last_seen})" if last_seen else "")
+            + ". 시트 화면을 가리지 말고 다시 실행하세요"
+        )
+
+    def _force_open_sheet_cell(self, sheet_url: str, column: str, row_number: int) -> None:
+        """Reload the sheet at one cell. Hash-only jumps are ignored by Chrome."""
+        self.start()
+        assert self.driver
+        self._ensure_browser_alive()
+        column = column.upper()
+        target = self._sheet_range_url(
+            sheet_url,
+            column,
+            row_number,
+            reload_token=str(time.time_ns()),
+        )
+        self._navigate(target, self.google_handle)
+        self.google_handle = self.driver.current_window_handle
+        self._wait_for_sheet_grid()
+        time.sleep(0.5)
+        ActionChains(self.driver).send_keys(Keys.ESCAPE).send_keys(Keys.ESCAPE).perform()
+        if self._sheet_appears_filtered():
+            self.logger.warning(
+                "시트 필터가 켜져 있으면 붙여넣기 위치가 어긋날 수 있습니다. 필터를 끄세요"
+            )
+        if self._name_box_shows_cell(column, row_number):
+            self._leave_sheet_edit_widgets()
+            return
+        self._select_sheet_cell(column, row_number)
+
+    def _commit_sheet_paste(self) -> None:
+        assert self.driver
+        ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+        try:
+            ActionChains(self.driver).key_down(Keys.CONTROL).send_keys("s").key_up(
+                Keys.CONTROL
+            ).perform()
+        except WebDriverException:
+            pass
+
+    def paste_sheet_columns(
+        self,
+        sheet_url: str,
+        start_column: str,
+        start_row: int,
+        tsv: str,
+    ) -> None:
+        """Paste a TSV block into the grid. Do not click the cell editor."""
+        self.start()
+        assert self.driver
+        start_column = start_column.upper()
+        row_count = tsv.count("\n") or (1 if tsv else 0)
+        self._force_open_sheet_cell(sheet_url, start_column, start_row)
+        if self._sheet_focus_role() == "name_box":
+            self._leave_sheet_edit_widgets()
+        if self._sheet_focus_role() == "name_box":
+            raise AutomationError(
+                f"시트 {start_column}{start_row} 이름 상자가 열린 채라 붙여넣기를 하지 않았습니다"
+            )
+        self._set_clipboard_text(tsv)
+        ActionChains(self.driver).key_down(Keys.CONTROL).send_keys("v").key_up(
+            Keys.CONTROL
+        ).perform()
+        time.sleep(0.4)
+        leaked = self._name_box_value()
+        if "\t" in leaked or "\n" in leaked or len(leaked) > 24:
+            ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+            raise AutomationError(
+                f"붙여넣기가 표가 아니라 이름 상자({start_column}{start_row})로 들어갔습니다"
+            )
+        self._commit_sheet_paste()
+        time.sleep(4)
+        self.logger.info(
+            "시트 %s%s에 %s줄을 한 번에 붙여넣었습니다",
+            start_column,
+            start_row,
+            row_count,
+        )
+
+    def load_join_membership(self) -> dict[str, set[str]]:
+        from .affiliate_api import AffiliateApiError
+        from .join_marker import fetch_membership
+
+        try:
+            publisher = self._get_affiliate_publisher()
+            publisher._capture_authorization()
+            return fetch_membership(publisher._request)
+        except AffiliateApiError as exc:
+            raise AutomationError(str(exc)) from exc
+
+    def _download_join_sheet_rows(self, sheet_url: str):
+        from .join_marker import load_account_rows
+
+        path = self.download_sheet(sheet_url)
+        return load_account_rows(path)
+
+    def _verify_join_plan(
+        self,
+        sheet_url: str,
+        plan,
+        *,
+        start_row: int | None = None,
+        end_row: int | None = None,
+        downloads: int = 3,
+    ) -> list[str]:
+        from .join_marker import plan_matches_sheet
+
+        last_errors: list[str] = []
+        for attempt in range(1, downloads + 1):
+            if attempt > 1:
+                time.sleep(1.5)
+            headers, rows = self._download_join_sheet_rows(sheet_url)
+            last_errors = plan_matches_sheet(
+                headers,
+                rows,
+                plan,
+                start_row=start_row,
+                end_row=end_row,
+            )
+            if not last_errors:
+                return []
+            self.logger.warning(
+                "시트 확인 재시도 (%s/%s): %s",
+                attempt,
+                downloads,
+                last_errors[0],
+            )
+        return last_errors
+
+    def _write_one_join_cell(
+        self,
+        sheet_url: str,
+        column: str,
+        row_number: int,
+        value: str,
+    ) -> None:
+        """Write one cafe cell after reloading that exact cell."""
+        column = column.upper()
+        self._force_open_sheet_cell(sheet_url, column, row_number)
+        if self._sheet_focus_role() == "name_box":
+            self._leave_sheet_edit_widgets()
+        if value:
+            self._set_clipboard_text(value)
+            ActionChains(self.driver).key_down(Keys.CONTROL).send_keys("v").key_up(
+                Keys.CONTROL
+            ).perform()
+        else:
+            ActionChains(self.driver).send_keys(Keys.DELETE).perform()
+        time.sleep(0.2)
+        self._commit_sheet_paste()
+        time.sleep(0.8)
+        self.logger.info(
+            "시트 %s%s에 %s를 다시 적었습니다",
+            column,
+            row_number,
+            value or "빈칸",
+        )
+
+    def _fill_join_cells(self, sheet_url: str, plan) -> None:
+        from .join_marker import (
+            JOIN_CELL_FILL_MAX,
+            JOIN_CELL_FILL_ROUNDS,
+            format_locked_sheet_error,
+            plan_mismatch_cells,
+        )
+
+        for round_number in range(1, JOIN_CELL_FILL_ROUNDS + 1):
+            headers, rows = self._download_join_sheet_rows(sheet_url)
+            if headers != plan.headers:
+                raise AutomationError("시트 열 이름이 바뀌었습니다. 다시 실행하세요")
+            cells = plan_mismatch_cells(headers, rows, plan)
+            if not cells:
+                return
+            if len(cells) > JOIN_CELL_FILL_MAX:
+                raise AutomationError(
+                    format_locked_sheet_error(
+                        [f"빈 칸이 {len(cells)}개입니다. 필터를 끄고 다시 실행하세요"]
+                    )
+                )
+            self.logger.info(
+                "틀린 칸 %s개만 다시 적습니다 (%s/%s)",
+                len(cells),
+                round_number,
+                JOIN_CELL_FILL_ROUNDS,
+            )
+            for index, cell in enumerate(cells, start=1):
+                try:
+                    self._write_one_join_cell(
+                        sheet_url,
+                        cell.column,
+                        cell.row_number,
+                        cell.value,
+                    )
+                except AutomationError as exc:
+                    self.logger.warning(
+                        "칸 %s%s 다시 쓰기 실패: %s",
+                        cell.column,
+                        cell.row_number,
+                        exc,
+                    )
+                if index == len(cells) or index % 5 == 0:
+                    self.logger.info("틀린 칸 적기 %s/%s", index, len(cells))
+
+    def _open_sheet_edit(self, sheet_url: str) -> None:
+        """Open the editable tab so Chrome has a live Google session."""
+        self.start()
+        assert self.driver
+        self._ensure_browser_alive()
+        target = self._sheet_range_url(sheet_url, "A", 1, reload_token=str(time.time_ns()))
+        self._navigate(target, self.google_handle)
+        self.google_handle = self.driver.current_window_handle
+        self._wait_for_sheet_grid()
+
+    def _google_sheet_auth(self) -> tuple[str, str, str]:
+        """Reuse the open Chrome Google login. Never log the token."""
+        from .sheets_write import cookie_header_and_sapisid, extract_bearer_tokens
+
+        assert self.driver
+        bearer = ""
+        try:
+            entries = []
+            for item in self.driver.get_log("performance"):
+                if isinstance(item, dict):
+                    entries.append(item)
+            tokens = extract_bearer_tokens(entries)
+            if tokens:
+                bearer = tokens[-1]
+        except WebDriverException:
+            bearer = ""
+        cookie_header, sapisid = cookie_header_and_sapisid(self.driver.get_cookies())
+        return bearer, cookie_header, sapisid
+
+    def _write_join_via_sheets_api(self, sheet_url: str, plan) -> bool:
+        from .sheets_write import (
+            build_join_batch_update,
+            post_sheets_batch_update,
+            sheet_gid_from_url,
+            spreadsheet_id_from_url,
+        )
+
+        payload = build_join_batch_update(plan, sheet_gid_from_url(sheet_url))
+        if not payload.get("requests"):
+            return True
+        spreadsheet_id = spreadsheet_id_from_url(sheet_url)
+        self._open_sheet_edit(sheet_url)
+        time.sleep(1.2)
+        bearer, cookie_header, sapisid = self._google_sheet_auth()
+        errors: list[str] = []
+        if bearer:
+            try:
+                post_sheets_batch_update(spreadsheet_id, payload, bearer=bearer)
+                return True
+            except Exception as exc:
+                errors.append(str(exc))
+        if sapisid:
+            try:
+                post_sheets_batch_update(
+                    spreadsheet_id,
+                    payload,
+                    cookie_header=cookie_header,
+                    sapisid=sapisid,
+                )
+                return True
+            except Exception as exc:
+                errors.append(str(exc))
+        if errors:
+            self.logger.warning("시트 바로 저장 실패: %s", errors[-1][:180])
+        else:
+            self.logger.warning("시트 바로 저장에 쓸 Google 권한이 없습니다")
+        return False
+
+    def write_join_marks(self, sheet_url: str, plan) -> None:
+        from .join_marker import format_cafe_formula_error, format_locked_sheet_error
+
+        self._ensure_browser_alive()
+        if plan.formula_cells:
+            raise AutomationError(format_cafe_formula_error(plan.formula_cells))
+
+        saved = self._write_join_via_sheets_api(sheet_url, plan)
+        if saved:
+            self.logger.info("씨씨앙·양평맘 열을 시트에 바로 저장했습니다")
+        else:
+            self.logger.info("바로 저장이 안 되어 한 번만 붙여넣습니다")
+            for group in plan.contiguous_cafe_groups():
+                start_column, start_row = plan.start_cell(group[0])
+                self.paste_sheet_columns(
+                    sheet_url,
+                    start_column,
+                    start_row,
+                    plan.tsv_for_headers(group),
+                )
+
+        last_errors = self._verify_join_plan(sheet_url, plan, downloads=4)
+        if last_errors and not saved:
+            self.logger.info("붙여넣기 확인이 안 되어 바로 저장을 다시 시도합니다")
+            if self._write_join_via_sheets_api(sheet_url, plan):
+                last_errors = self._verify_join_plan(sheet_url, plan, downloads=4)
+        elif last_errors and saved:
+            self.logger.info("저장 확인이 안 되어 한 번 더 바로 저장합니다")
+            if self._write_join_via_sheets_api(sheet_url, plan):
+                last_errors = self._verify_join_plan(sheet_url, plan, downloads=4)
+        if last_errors:
+            raise AutomationError(format_locked_sheet_error(last_errors))
+        self.logger.info("시트 가입 표시를 확인했습니다")
 
     def update_completion_link(
         self,
