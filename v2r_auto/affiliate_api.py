@@ -599,6 +599,30 @@ class AffiliateApiPublisher:
             job.account = replacement
         return replacement
 
+    def reset_deleted_sources(
+        self,
+        job: AffiliateJob,
+        resume: dict[str, Any],
+    ) -> None:
+        source_ids = {
+            str(resume.get("daily_source_id") or ""),
+            str(resume.get("revision_source_id") or ""),
+        }
+        for source_id in source_ids - {""}:
+            self._delete_source(source_id)
+        resume.clear()
+        resume.update(
+            {
+                "stage": "ACCOUNT_ASSIGNED",
+                "account": job.account,
+                "daily_source_id": "",
+                "daily_scheduled_at": "",
+                "revision_source_id": "",
+            }
+        )
+        job.daily_scheduled_at = None
+        job.daily_written_at = None
+
     @staticmethod
     def classify_failure(error: Exception) -> tuple[str, bool]:
         text = str(error)

@@ -1575,6 +1575,9 @@ class V2RBrowser:
     def replace_failed_affiliate_account(self, job: AffiliateJob) -> str:
         return self._get_affiliate_publisher().replace_failed_account(job)
 
+    def reset_deleted_affiliate_sources(self, job, resume) -> None:
+        self._get_affiliate_publisher().reset_deleted_sources(job, resume)
+
     def _get_immediate_publisher(self):
         from .immediate_api import ImmediateApiPublisher
 
@@ -1596,3 +1599,6 @@ class V2RBrowser:
 
     def consume_failed_immediate_urls(self) -> set[str]:
         return self._get_immediate_publisher().consume_failed_source_urls()
+
+    def is_deleted_immediate_url(self, url: str) -> bool:
+        return self._get_immediate_publisher().is_deleted_source_url(url)

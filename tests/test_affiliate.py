@@ -827,3 +827,67 @@ def test_affiliate_runner_retries_with_replacement_account(tmp_path: Path) -> No
     assert result.succeeded == 1
     assert browser.calls == 2
     assert browser.sheet_updates == [("D", 2, "replacement")]
+
+
+def test_affiliate_runner_recreates_deleted_source_pair(
+    tmp_path: Path,
+) -> None:
+    job = load_affiliate_jobs(
+        write_affiliate_csv(tmp_path),
+        selected_row_number=2,
+    )[0]
+
+    class DeletedSourceBrowser(FakeAffiliateBrowser):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+            self.resets = 0
+
+        def publish_affiliate_revision(
+            self,
+            job,
+            dry_run: bool,
+            resume=None,
+            checkpoint=None,
+            wait_control=None,
+        ) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                resume.update(
+                    {
+                        "daily_source_id": "deleted-daily",
+                        "revision_source_id": "deleted-revision",
+                    }
+                )
+                raise RuntimeError(
+                    "code=36 reason=DELETED_NAVER_CAFE_ARTICLE_SOURCE"
+                )
+            return "https://v2r.example/new-revision"
+
+        def reset_deleted_affiliate_sources(self, job, resume):
+            self.resets += 1
+            resume.clear()
+            job.daily_scheduled_at = None
+            job.daily_written_at = None
+
+    browser = DeletedSourceBrowser()
+    runner = AffiliateRunner(
+        browser=browser,  # type: ignore[arg-type]
+        report_dir=tmp_path,
+        logger=logging.getLogger("test"),
+    )
+    result, _report = runner.run(
+        jobs=[job],
+        email="",
+        password="",
+        dry_run=True,
+        stop_event=threading.Event(),
+        progress=lambda current, total: None,
+        daily_posts=[DailyPost(2, "양평맘", "일상", "내용")],
+        source_sheet_url="https://sheet.example",
+    )
+
+    assert result.succeeded == 1
+    assert browser.calls == 2
+    assert browser.resets == 1
+    assert job.daily_scheduled_at is not None

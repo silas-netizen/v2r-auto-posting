@@ -830,6 +830,69 @@ def test_previous_account_test_success_still_publishes_new_test(
     }
 
 
+def test_deleted_brand_source_is_removed_and_republished(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "brand.csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,"
+        "말머리,계정유형,이미지 없음,게시판명\n"
+        '"키워드","제목 : 제목\n본문 : 본문",고요한아침,writer-a,'
+        "후기형,https://v2r.example/nc/articleDetail/deleted-source,"
+        ",실명,Y,가입인사\n",
+        encoding="utf-8-sig",
+    )
+    job = load_brand_immediate_jobs(path, brand="브랜드")[0]
+    assert job.status == JobStatus.SKIPPED
+
+    class DeletedBrandBrowser:
+        published = 0
+        sheet_updates = []
+
+        def ensure_v2r_login(self, _email, _password):
+            return None
+
+        def is_deleted_immediate_url(self, url):
+            assert url.endswith("deleted-source")
+            return True
+
+        def prepare_immediate_jobs(self, jobs):
+            jobs[0].cafe_id = 14567700
+            jobs[0].menu_id = 34
+            jobs[0].canonical_cafe_name = "고요한 아침"
+            jobs[0].canonical_board_name = "가입인사"
+
+        def consume_failed_immediate_urls(self):
+            return set()
+
+        def publish_immediate(self, job, dry_run):
+            self.published += 1
+            return "https://v2r.example/nc/articleDetail/new-source"
+
+        def update_sheet_cell(self, url, column, row, value, **kwargs):
+            self.sheet_updates.append((column, row, value))
+
+    browser = DeletedBrandBrowser()
+    runner = ImmediateRunner(
+        browser=browser,
+        history_path=tmp_path / "history.json",
+        report_dir=tmp_path,
+        logger=logging.getLogger("deleted-brand-test"),
+    )
+    result, _report = runner.run(
+        [job],
+        dry_run=False,
+        stop_event=threading.Event(),
+        progress=lambda _current, _total: None,
+        source_sheet_url="https://sheet.example",
+    )
+
+    assert browser.published == 1
+    assert result.jobs[0].status == JobStatus.RESERVED
+    assert result.jobs[0].post_url.endswith("new-source")
+    assert ("F", 2, result.jobs[0].post_url) in browser.sheet_updates
+
+
 def test_account_test_results_write_to_dynamic_header_columns(
     tmp_path: Path,
 ) -> None:

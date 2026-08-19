@@ -447,6 +447,39 @@ class AffiliateRunner:
                     job.message = "사용자가 중지함"
                     break
                 except Exception as exc:
+                    if "DELETED_NAVER_CAFE_ARTICLE_SOURCE" in str(exc):
+                        self.browser.reset_deleted_affiliate_sources(
+                            job,
+                            resume,
+                        )
+                        assign_next_affiliate_daily_schedule(
+                            job,
+                            last_daily_scheduled,
+                            now=datetime.now(timezone.utc),
+                        )
+                        serialized = (
+                            job.daily_scheduled_at.isoformat()
+                            .replace("+00:00", "Z")
+                        )
+                        resume["daily_scheduled_at"] = serialized
+                        if self.state and job_key:
+                            self.state.reset_sources(
+                                job_key,
+                                job.account,
+                                "V2R에서 삭제된 source 자동 초기화",
+                            )
+                            self.state.update(
+                                job_key,
+                                daily_scheduled_at=serialized,
+                            )
+                        retry_count += 1
+                        emit_status()
+                        self.logger.warning(
+                            "행 %s 삭제된 과거 source를 초기화하고 "
+                            "새 예약 쌍으로 재시도합니다",
+                            job.row_number,
+                        )
+                        continue
                     if "NOT_START_AT_PAST_TIME" in str(exc):
                         previous_schedule = job.daily_scheduled_at
                         assign_next_affiliate_daily_schedule(
@@ -619,6 +652,38 @@ class ImmediateRunner:
                     "2. 데이터 확인부터 다시 실행하세요"
                 )
         self.browser.ensure_v2r_login("", "")
+        if not dry_run:
+            for job in jobs:
+                if job.source_kind == "account_test":
+                    continue
+                history_record = self.history.get(job) or {}
+                saved_url = (
+                    job.completion_url
+                    or history_record.get("url", "")
+                )
+                if not saved_url:
+                    continue
+                try:
+                    deleted = self.browser.is_deleted_immediate_url(
+                        saved_url
+                    )
+                except Exception as exc:
+                    self.logger.warning(
+                        "행 %s 저장된 V2R 링크 확인 실패로 기존 중복 방지를 유지합니다: %s",
+                        job.row_number,
+                        exc,
+                    )
+                    continue
+                if not deleted:
+                    continue
+                self.history.remove_urls({saved_url})
+                job.completion_url = ""
+                job.status = JobStatus.PENDING
+                job.message = ""
+                self.logger.warning(
+                    "행 %s V2R에서 삭제된 과거 링크를 제거하고 새로 발행합니다",
+                    job.row_number,
+                )
         self.browser.prepare_immediate_jobs(jobs)
         removed_failures = self.history.remove_urls(
             self.browser.consume_failed_immediate_urls()

@@ -505,6 +505,23 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         self.failed_source_urls.clear()
         return failed
 
+    def is_deleted_source_url(self, url: str) -> bool:
+        match = re.search(r"/nc/articleDetail/([0-9A-Za-z_-]+)", url or "")
+        if not match:
+            return False
+        self._capture_authorization()
+        try:
+            self._request(
+                "GET",
+                "/naver_cafe_articles/article",
+                query={"source_id": match.group(1)},
+            )
+        except AffiliateApiError as exc:
+            if "DELETED_NAVER_CAFE_ARTICLE_SOURCE" in str(exc):
+                return True
+            raise
+        return False
+
     def classify_failure(self, error: Exception) -> tuple[str, bool]:
         text = str(error)
         if "27000" in text or "게시글 작성 및 카페" in text:
