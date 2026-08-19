@@ -147,7 +147,7 @@ class JoinMarkerApp(AutomationApp):
                     raise JoinMarkerError(format_cafe_formula_error(plan.formula_cells))
                 if self.stop_event.is_set():
                     return
-                self.logger.info("씨씨앙·양평맘 열을 한 번에 붙입니다. 빈 칸만 따로 고칩니다")
+                self.logger.info("씨씨앙·양평맘 열을 시트에 바로 저장합니다")
                 self.browser.write_join_marks(sheet_url, plan)
                 self._set_progress(3, 3)
                 self.ui_queue.put(("info", ("표시 완료", plan.summary())))

@@ -708,45 +708,104 @@ class V2RBrowser:
                 if index == len(cells) or index % 5 == 0:
                     self.logger.info("틀린 칸 적기 %s/%s", index, len(cells))
 
-    def write_join_marks(self, sheet_url: str, plan) -> None:
-        from .join_marker import (
-            JOIN_CELL_FILL_MAX,
-            format_cafe_formula_error,
-            format_locked_sheet_error,
-            plan_mismatch_cells,
+    def _open_sheet_edit(self, sheet_url: str) -> None:
+        """Open the editable tab so Chrome has a live Google session."""
+        self.start()
+        assert self.driver
+        self._ensure_browser_alive()
+        target = self._sheet_range_url(sheet_url, "A", 1, reload_token=str(time.time_ns()))
+        self._navigate(target, self.google_handle)
+        self.google_handle = self.driver.current_window_handle
+        self._wait_for_sheet_grid()
+
+    def _google_sheet_auth(self) -> tuple[str, str, str]:
+        """Reuse the open Chrome Google login. Never log the token."""
+        from .sheets_write import cookie_header_and_sapisid, extract_bearer_tokens
+
+        assert self.driver
+        bearer = ""
+        try:
+            entries = []
+            for item in self.driver.get_log("performance"):
+                if isinstance(item, dict):
+                    entries.append(item)
+            tokens = extract_bearer_tokens(entries)
+            if tokens:
+                bearer = tokens[-1]
+        except WebDriverException:
+            bearer = ""
+        cookie_header, sapisid = cookie_header_and_sapisid(self.driver.get_cookies())
+        return bearer, cookie_header, sapisid
+
+    def _write_join_via_sheets_api(self, sheet_url: str, plan) -> bool:
+        from .sheets_write import (
+            build_join_batch_update,
+            post_sheets_batch_update,
+            sheet_gid_from_url,
+            spreadsheet_id_from_url,
         )
+
+        payload = build_join_batch_update(plan, sheet_gid_from_url(sheet_url))
+        if not payload.get("requests"):
+            return True
+        spreadsheet_id = spreadsheet_id_from_url(sheet_url)
+        self._open_sheet_edit(sheet_url)
+        time.sleep(1.2)
+        bearer, cookie_header, sapisid = self._google_sheet_auth()
+        errors: list[str] = []
+        if bearer:
+            try:
+                post_sheets_batch_update(spreadsheet_id, payload, bearer=bearer)
+                return True
+            except Exception as exc:
+                errors.append(str(exc))
+        if sapisid:
+            try:
+                post_sheets_batch_update(
+                    spreadsheet_id,
+                    payload,
+                    cookie_header=cookie_header,
+                    sapisid=sapisid,
+                )
+                return True
+            except Exception as exc:
+                errors.append(str(exc))
+        if errors:
+            self.logger.warning("시트 바로 저장 실패: %s", errors[-1][:180])
+        else:
+            self.logger.warning("시트 바로 저장에 쓸 Google 권한이 없습니다")
+        return False
+
+    def write_join_marks(self, sheet_url: str, plan) -> None:
+        from .join_marker import format_cafe_formula_error, format_locked_sheet_error
 
         self._ensure_browser_alive()
         if plan.formula_cells:
             raise AutomationError(format_cafe_formula_error(plan.formula_cells))
 
-        for group in plan.contiguous_cafe_groups():
-            start_column, start_row = plan.start_cell(group[0])
-            tsv = plan.tsv_for_headers(group)
-            for attempt in range(1, 3):
-                try:
-                    self.paste_sheet_columns(sheet_url, start_column, start_row, tsv)
-                except AutomationError as exc:
-                    self.logger.warning("한 번 붙여넣기 실패 (%s/2): %s", attempt, exc)
-                    continue
-                last_errors = self._verify_join_plan(sheet_url, plan, downloads=3)
-                if not last_errors:
-                    break
-                headers, rows = self._download_join_sheet_rows(sheet_url)
-                leftover = plan_mismatch_cells(headers, rows, plan)
-                if leftover and len(leftover) <= JOIN_CELL_FILL_MAX:
-                    break
-                self.logger.warning(
-                    "시트 확인 실패 (%s/2): %s",
-                    attempt,
-                    last_errors[0],
+        saved = self._write_join_via_sheets_api(sheet_url, plan)
+        if saved:
+            self.logger.info("씨씨앙·양평맘 열을 시트에 바로 저장했습니다")
+        else:
+            self.logger.info("바로 저장이 안 되어 한 번만 붙여넣습니다")
+            for group in plan.contiguous_cafe_groups():
+                start_column, start_row = plan.start_cell(group[0])
+                self.paste_sheet_columns(
+                    sheet_url,
+                    start_column,
+                    start_row,
+                    plan.tsv_for_headers(group),
                 )
 
-        last_errors = self._verify_join_plan(sheet_url, plan, downloads=3)
-        if last_errors:
-            self.logger.info("한 번에 안 들어간 칸만 다시 적습니다")
-            self._fill_join_cells(sheet_url, plan)
-            last_errors = self._verify_join_plan(sheet_url, plan, downloads=4)
+        last_errors = self._verify_join_plan(sheet_url, plan, downloads=4)
+        if last_errors and not saved:
+            self.logger.info("붙여넣기 확인이 안 되어 바로 저장을 다시 시도합니다")
+            if self._write_join_via_sheets_api(sheet_url, plan):
+                last_errors = self._verify_join_plan(sheet_url, plan, downloads=4)
+        elif last_errors and saved:
+            self.logger.info("저장 확인이 안 되어 한 번 더 바로 저장합니다")
+            if self._write_join_via_sheets_api(sheet_url, plan):
+                last_errors = self._verify_join_plan(sheet_url, plan, downloads=4)
         if last_errors:
             raise AutomationError(format_locked_sheet_error(last_errors))
         self.logger.info("시트 가입 표시를 확인했습니다")
