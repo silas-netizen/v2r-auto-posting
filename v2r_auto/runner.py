@@ -702,12 +702,14 @@ class ImmediateRunner:
                 if job.status == JobStatus.SUCCESS
                 else job.message
             )
-            values = {"H": result_text}
+            values = {
+                job.account_test_result_column: result_text
+            }
             if job.status == JobStatus.SUCCESS:
                 values.update(
                     {
-                        "I": job.post_url,
-                        "J": datetime.now().astimezone().strftime(
+                        job.account_test_link_column: job.post_url,
+                        job.account_test_time_column: datetime.now().astimezone().strftime(
                             "%Y-%m-%d %H:%M:%S"
                         ),
                     }

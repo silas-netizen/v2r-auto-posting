@@ -139,6 +139,49 @@ def test_loads_only_checked_one_line_account_tests(tmp_path: Path) -> None:
     assert jobs[0].validate() == []
 
 
+def test_account_test_columns_follow_headers_beyond_z(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "account-tests-wide.csv"
+    extra_headers = [f"추가열{index}" for index in range(1, 21)]
+    headers = [
+        "번호",
+        "ID",
+        *extra_headers,
+        "작업 구분",
+        "연동",
+        "가아사 조건",
+        "실/비실",
+        "테스트 선택",
+        "테스트 결과",
+        "테스트 링크",
+        "테스트 일시",
+    ]
+    values = [
+        "12",
+        "test-id",
+        *([""] * len(extra_headers)),
+        "",
+        "",
+        "",
+        "",
+        "TRUE",
+        "",
+        "",
+        "",
+    ]
+    path.write_text(
+        ",".join(headers) + "\n" + ",".join(values) + "\n",
+        encoding="utf-8-sig",
+    )
+
+    job = load_account_test_jobs(path)[0]
+
+    assert job.account_test_result_column == "AB"
+    assert job.account_test_link_column == "AC"
+    assert job.account_test_time_column == "AD"
+
+
 def test_formats_punctuation_free_daily_body_into_two_sentence_paragraphs() -> None:
     body = (
         "어제 남편과 드라이브를 다녀왔어요 "
@@ -785,6 +828,92 @@ def test_previous_account_test_success_still_publishes_new_test(
         "I",
         "J",
     }
+
+
+def test_account_test_results_write_to_dynamic_header_columns(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "account-tests-wide.csv"
+    extra_headers = [f"추가열{index}" for index in range(1, 21)]
+    headers = [
+        "번호",
+        "ID",
+        *extra_headers,
+        "작업 구분",
+        "연동",
+        "가아사 조건",
+        "실/비실",
+        "테스트 선택",
+        "테스트 결과",
+        "테스트 링크",
+        "테스트 일시",
+    ]
+    values = [
+        "12",
+        "test-id",
+        *([""] * len(extra_headers)),
+        "",
+        "",
+        "",
+        "",
+        "TRUE",
+        "",
+        "",
+        "",
+    ]
+    path.write_text(
+        ",".join(headers) + "\n" + ",".join(values) + "\n",
+        encoding="utf-8-sig",
+    )
+    job = load_account_test_jobs(path)[0]
+
+    class DynamicColumnBrowser:
+        sheet_updates = []
+
+        def ensure_v2r_login(self, _email, _password):
+            return None
+
+        def prepare_immediate_jobs(self, jobs):
+            jobs[0].cafe = "태극마케팅센터"
+            jobs[0].cafe_id = 31670254
+            jobs[0].menu_id = 1
+            jobs[0].canonical_cafe_name = "태극마케팅센터"
+            jobs[0].canonical_board_name = "자유게시판"
+
+        def consume_failed_immediate_urls(self):
+            return set()
+
+        def publish_immediate(self, _job, _dry_run):
+            return "https://v2r.example/new"
+
+        def update_sheet_cell(
+            self,
+            _url,
+            column,
+            row,
+            value,
+            **_kwargs,
+        ):
+            self.sheet_updates.append((column, row, value))
+
+    browser = DynamicColumnBrowser()
+    runner = ImmediateRunner(
+        browser=browser,
+        history_path=tmp_path / "history.json",
+        report_dir=tmp_path,
+        logger=logging.getLogger("dynamic-column-test"),
+    )
+    runner.run(
+        [job],
+        dry_run=False,
+        stop_event=threading.Event(),
+        progress=lambda _current, _total: None,
+        source_sheet_url="https://docs.google.com/spreadsheets/d/example/edit?gid=0",
+    )
+
+    assert {
+        column for column, _row, _value in browser.sheet_updates
+    } == {"AB", "AC", "AD"}
 
 
 def test_failed_account_test_writes_only_result_column(tmp_path: Path) -> None:

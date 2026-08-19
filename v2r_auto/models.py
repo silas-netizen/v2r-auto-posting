@@ -140,6 +140,9 @@ class ImmediateJob:
     prepared_image_count: int = 0
     photo_wash_prepared: bool = False
     prepared_images: list[Any] = field(default_factory=list)
+    account_test_result_column: str = "H"
+    account_test_link_column: str = "I"
+    account_test_time_column: str = "J"
 
     @property
     def keyword(self) -> str:

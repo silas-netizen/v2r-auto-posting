@@ -98,6 +98,15 @@ def _find_header(headers: list[str], candidates: set[str]) -> str:
     return next((header for header in headers if header.strip() in candidates), "")
 
 
+def _column_letter(zero_based_index: int) -> str:
+    value = zero_based_index + 1
+    letters = ""
+    while value:
+        value, remainder = divmod(value - 1, 26)
+        letters = chr(ord("A") + remainder) + letters
+    return letters
+
+
 def is_informational_sheet(sheet_url: str) -> bool:
     return (
         f"/d/{INFORMATIONAL_SHEET_ID}/" in sheet_url
@@ -158,7 +167,8 @@ def load_brand_immediate_jobs(
     csv_path = Path(path)
     with csv_path.open("r", encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream)
-        headers = [header for header in (reader.fieldnames or []) if header]
+        raw_headers = list(reader.fieldnames or [])
+        headers = [header for header in raw_headers if header]
         missing = [
             header
             for header in BRAND_REQUIRED_COLUMNS.values()
@@ -296,6 +306,25 @@ def load_account_test_jobs(path: str | Path) -> list[ImmediateJob]:
             raise SheetSchemaError(
                 "한줄테스트 시트 열을 찾지 못했습니다: " + ", ".join(missing)
             )
+        duplicates = [
+            header
+            for header in ACCOUNT_TEST_HEADERS.values()
+            if raw_headers.count(header) > 1
+        ]
+        if duplicates:
+            raise SheetSchemaError(
+                "한줄테스트 시트 열 이름이 중복됩니다: "
+                + ", ".join(duplicates)
+            )
+        result_column = _column_letter(
+            raw_headers.index(ACCOUNT_TEST_HEADERS["result"])
+        )
+        link_column = _column_letter(
+            raw_headers.index(ACCOUNT_TEST_HEADERS["link"])
+        )
+        tested_at_column = _column_letter(
+            raw_headers.index(ACCOUNT_TEST_HEADERS["tested_at"])
+        )
         jobs: list[ImmediateJob] = []
         for row_number, row in enumerate(reader, start=2):
             selected = _cell(row.get(ACCOUNT_TEST_HEADERS["selected"])).casefold()
@@ -323,6 +352,9 @@ def load_account_test_jobs(path: str | Path) -> list[ImmediateJob]:
                     source_kind="account_test",
                     source_name=csv_path.name,
                     use_comment_ai=False,
+                    account_test_result_column=result_column,
+                    account_test_link_column=link_column,
+                    account_test_time_column=tested_at_column,
                 )
             )
     if not jobs:
