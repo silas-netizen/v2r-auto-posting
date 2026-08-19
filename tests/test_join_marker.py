@@ -186,6 +186,17 @@ def test_sheet_range_url_starts_at_requested_cell() -> None:
     assert "abc_123" in url
 
 
+def test_sheet_range_url_can_force_a_real_reload() -> None:
+    url = V2RBrowser._sheet_range_url(
+        "https://docs.google.com/spreadsheets/d/abc_123/edit?gid=9#gid=9",
+        "Q",
+        5,
+        reload_token="99",
+    )
+    assert "join_nav=99" in url
+    assert url.endswith("#gid=9&range=Q5")
+
+
 def test_clean_cell_treats_bom_as_empty() -> None:
     assert clean_cell("\ufeff") == ""
     assert clean_cell("\ufeff가입") == "가입"

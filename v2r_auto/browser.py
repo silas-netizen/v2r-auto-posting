@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import urlopen
 
 from selenium import webdriver
@@ -185,7 +185,13 @@ class V2RBrowser:
         )
 
     @staticmethod
-    def _sheet_range_url(sheet_url: str, column: str, row_number: int) -> str:
+    def _sheet_range_url(
+        sheet_url: str,
+        column: str,
+        row_number: int,
+        *,
+        reload_token: str | None = None,
+    ) -> str:
         column = column.upper()
         if not re.fullmatch(r"[A-Z]+", column):
             raise AutomationError(f"올바르지 않은 시트 열입니다: {column}")
@@ -193,10 +199,14 @@ class V2RBrowser:
             raise AutomationError(f"올바르지 않은 시트 행입니다: {row_number}")
         parsed = urlparse(sheet_url)
         _, gid = V2RBrowser._sheet_id_and_gid(sheet_url)
-        query = parsed.query
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        query.pop("join_nav", None)
+        if reload_token:
+            query["join_nav"] = [reload_token]
+        encoded = urlencode(query, doseq=True)
         return (
             f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-            f"{'?' + query if query else ''}"
+            f"{'?' + encoded if encoded else ''}"
             f"#gid={gid}&range={column}{row_number}"
         )
 
@@ -453,12 +463,16 @@ class V2RBrowser:
                 break
 
     def _select_sheet_cell(self, column: str, row_number: int) -> None:
-        """Select a grid cell without opening the formula editor."""
+        """Move to a cell by clearing the name box, then typing the address.
+
+        Ctrl+A often fails after a large paste, so leftover addresses like
+        Q399 stay in the box. Backspace clears whatever is there.
+        """
         assert self.driver
         column = column.upper()
         target = f"{column}{row_number}"
         last_seen = ""
-        for attempt in range(1, 6):
+        for _attempt in range(1, 5):
             ActionChains(self.driver).send_keys(Keys.ESCAPE).send_keys(Keys.ESCAPE).perform()
             time.sleep(0.15)
             name_boxes = [
@@ -470,32 +484,24 @@ class V2RBrowser:
                 if element.is_displayed()
             ]
             if not name_boxes:
-                time.sleep(0.2 * attempt)
+                time.sleep(0.2)
                 continue
             box = name_boxes[0]
             try:
+                self.driver.execute_script("arguments[0].focus();", box)
                 box.click()
-                box.send_keys(Keys.CONTROL, "a")
+                for _ in range(24):
+                    box.send_keys(Keys.BACKSPACE)
                 box.send_keys(target)
                 box.send_keys(Keys.ENTER)
             except (StaleElementReferenceException, WebDriverException):
-                try:
-                    self.driver.execute_script(
-                        "arguments[0].focus(); arguments[0].select();",
-                        box,
-                    )
-                    box.send_keys(target)
-                    box.send_keys(Keys.ENTER)
-                except (StaleElementReferenceException, WebDriverException):
-                    time.sleep(0.2 * attempt)
-                    continue
-            time.sleep(0.25)
+                time.sleep(0.2)
+                continue
+            time.sleep(0.3)
             last_seen = self._name_box_value()
             if self._name_box_shows_cell(column, row_number):
                 self._leave_sheet_edit_widgets()
-                if self._sheet_focus_role() == "name_box":
-                    continue
-                if self._name_box_shows_cell(column, row_number):
+                if self._sheet_focus_role() != "name_box":
                     return
         raise AutomationError(
             f"시트에서 {target} 칸을 선택하지 못했습니다"
@@ -503,24 +509,41 @@ class V2RBrowser:
             + ". 시트 화면을 가리지 말고 다시 실행하세요"
         )
 
-    def _open_sheet_for_paste(self, sheet_url: str, column: str, row_number: int) -> None:
-        """Open the editable sheet. Skip hash-only reloads that drop unsaved cells."""
+    def _force_open_sheet_cell(self, sheet_url: str, column: str, row_number: int) -> None:
+        """Reload the sheet at one cell. Hash-only jumps are ignored by Chrome."""
         self.start()
         assert self.driver
         self._ensure_browser_alive()
-        if not self._sheet_document_open(sheet_url):
-            target = self._sheet_range_url(sheet_url, column, row_number)
-            self._navigate(target, self.google_handle)
-            self.google_handle = self.driver.current_window_handle
-            self._wait_for_sheet_grid()
-        else:
-            self._switch_to_handle(self.google_handle)
-            self.google_handle = self.driver.current_window_handle
-            self.driver.execute_script("window.focus();")
+        column = column.upper()
+        target = self._sheet_range_url(
+            sheet_url,
+            column,
+            row_number,
+            reload_token=str(time.time_ns()),
+        )
+        self._navigate(target, self.google_handle)
+        self.google_handle = self.driver.current_window_handle
+        self._wait_for_sheet_grid()
+        time.sleep(0.5)
+        ActionChains(self.driver).send_keys(Keys.ESCAPE).send_keys(Keys.ESCAPE).perform()
         if self._sheet_appears_filtered():
             self.logger.warning(
                 "시트 필터가 켜져 있으면 붙여넣기 위치가 어긋날 수 있습니다. 필터를 끄세요"
             )
+        if self._name_box_shows_cell(column, row_number):
+            self._leave_sheet_edit_widgets()
+            return
+        self._select_sheet_cell(column, row_number)
+
+    def _commit_sheet_paste(self) -> None:
+        assert self.driver
+        ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+        try:
+            ActionChains(self.driver).key_down(Keys.CONTROL).send_keys("s").key_up(
+                Keys.CONTROL
+            ).perform()
+        except WebDriverException:
+            pass
 
     def paste_sheet_columns(
         self,
@@ -534,10 +557,9 @@ class V2RBrowser:
         assert self.driver
         start_column = start_column.upper()
         row_count = tsv.count("\n") or (1 if tsv else 0)
-        self._open_sheet_for_paste(sheet_url, start_column, start_row)
-        # The formula editor must stay closed. Clicking it pastes all rows
-        # into one cell, so 433행 같은 칸은 비어 있게 됩니다.
-        self._select_sheet_cell(start_column, start_row)
+        self._force_open_sheet_cell(sheet_url, start_column, start_row)
+        if self._sheet_focus_role() == "name_box":
+            self._leave_sheet_edit_widgets()
         if self._sheet_focus_role() == "name_box":
             raise AutomationError(
                 f"시트 {start_column}{start_row} 이름 상자가 열린 채라 붙여넣기를 하지 않았습니다"
@@ -553,16 +575,10 @@ class V2RBrowser:
             raise AutomationError(
                 f"붙여넣기가 표가 아니라 이름 상자({start_column}{start_row})로 들어갔습니다"
             )
-        ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
-        try:
-            ActionChains(self.driver).key_down(Keys.CONTROL).send_keys("s").key_up(
-                Keys.CONTROL
-            ).perform()
-        except WebDriverException:
-            pass
-        time.sleep(3.5)
+        self._commit_sheet_paste()
+        time.sleep(4)
         self.logger.info(
-            "시트 %s%s에 %s줄 붙여넣기를 시도했습니다",
+            "시트 %s%s에 %s줄을 한 번에 붙여넣었습니다",
             start_column,
             start_row,
             row_count,
@@ -625,10 +641,9 @@ class V2RBrowser:
         row_number: int,
         value: str,
     ) -> None:
-        """Type one cafe cell via clipboard so Korean 가입 does not depend on IME."""
+        """Write one cafe cell after reloading that exact cell."""
         column = column.upper()
-        self._open_sheet_for_paste(sheet_url, column, row_number)
-        self._select_sheet_cell(column, row_number)
+        self._force_open_sheet_cell(sheet_url, column, row_number)
         if self._sheet_focus_role() == "name_box":
             self._leave_sheet_edit_widgets()
         if value:
@@ -639,13 +654,7 @@ class V2RBrowser:
         else:
             ActionChains(self.driver).send_keys(Keys.DELETE).perform()
         time.sleep(0.2)
-        ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
-        try:
-            ActionChains(self.driver).key_down(Keys.CONTROL).send_keys("s").key_up(
-                Keys.CONTROL
-            ).perform()
-        except WebDriverException:
-            pass
+        self._commit_sheet_paste()
         time.sleep(0.8)
         self.logger.info(
             "시트 %s%s에 %s를 다시 적었습니다",
@@ -654,31 +663,29 @@ class V2RBrowser:
             value or "빈칸",
         )
 
-    def _fill_join_cells(
-        self,
-        sheet_url: str,
-        plan,
-        *,
-        start_row: int | None = None,
-        end_row: int | None = None,
-    ) -> None:
-        from .join_marker import JOIN_CELL_FILL_ROUNDS, plan_mismatch_cells
+    def _fill_join_cells(self, sheet_url: str, plan) -> None:
+        from .join_marker import (
+            JOIN_CELL_FILL_MAX,
+            JOIN_CELL_FILL_ROUNDS,
+            format_locked_sheet_error,
+            plan_mismatch_cells,
+        )
 
         for round_number in range(1, JOIN_CELL_FILL_ROUNDS + 1):
             headers, rows = self._download_join_sheet_rows(sheet_url)
             if headers != plan.headers:
                 raise AutomationError("시트 열 이름이 바뀌었습니다. 다시 실행하세요")
-            cells = plan_mismatch_cells(
-                headers,
-                rows,
-                plan,
-                start_row=start_row,
-                end_row=end_row,
-            )
+            cells = plan_mismatch_cells(headers, rows, plan)
             if not cells:
                 return
+            if len(cells) > JOIN_CELL_FILL_MAX:
+                raise AutomationError(
+                    format_locked_sheet_error(
+                        [f"빈 칸이 {len(cells)}개입니다. 필터를 끄고 다시 실행하세요"]
+                    )
+                )
             self.logger.info(
-                "안 적힌 칸 %s개를 하나씩 다시 적습니다 (%s/%s)",
+                "틀린 칸 %s개만 다시 적습니다 (%s/%s)",
                 len(cells),
                 round_number,
                 JOIN_CELL_FILL_ROUNDS,
@@ -698,103 +705,15 @@ class V2RBrowser:
                         cell.row_number,
                         exc,
                     )
-                if index % 10 == 0 or index == len(cells):
-                    self.logger.info("하나씩 적기 %s/%s", index, len(cells))
-
-    def _write_join_chunk(
-        self,
-        sheet_url: str,
-        plan,
-        group: list[str],
-        start_column: str,
-        start_row: int,
-        tsv: str,
-    ) -> None:
-        from .join_marker import (
-            JOIN_SPLIT_CHUNK_SIZE,
-            paste_chunk_end_row,
-        )
-
-        end_row = paste_chunk_end_row(start_row, tsv)
-        row_count = tsv.count("\n")
-        last_errors: list[str] = []
-        for attempt in range(1, 4):
-            try:
-                self.paste_sheet_columns(sheet_url, start_column, start_row, tsv)
-            except AutomationError as exc:
-                last_errors = [str(exc)]
-                self.logger.warning(
-                    "구간 붙여넣기 실패 (%s/3) %s~%s행: %s",
-                    attempt,
-                    start_row,
-                    end_row,
-                    exc,
-                )
-                continue
-            last_errors = self._verify_join_plan(
-                sheet_url,
-                plan,
-                start_row=start_row,
-                end_row=end_row,
-            )
-            if not last_errors:
-                self.logger.info(
-                    "시트 %s~%s행 표시를 확인했습니다",
-                    start_row,
-                    end_row,
-                )
-                return
-            self.logger.warning(
-                "구간 붙여넣기 재시도 (%s/3) %s~%s행: %s",
-                attempt,
-                start_row,
-                end_row,
-                last_errors[0],
-            )
-        if row_count > JOIN_SPLIT_CHUNK_SIZE:
-            next_size = JOIN_SPLIT_CHUNK_SIZE
-        elif row_count > 1:
-            next_size = 1
-        else:
-            next_size = 0
-        if next_size:
-            self.logger.info(
-                "%s~%s행을 %s줄씩 나눠 다시 붙입니다",
-                start_row,
-                end_row,
-                next_size,
-            )
-            for small_start, small_tsv in plan.paste_chunks(
-                group,
-                chunk_size=next_size,
-                start_row=start_row,
-                end_row=end_row,
-            ):
-                self._write_join_chunk(
-                    sheet_url,
-                    plan,
-                    group,
-                    start_column,
-                    small_start,
-                    small_tsv,
-                )
-            return
-        self.logger.info(
-            "%s~%s행이 한 번에 안 붙어 칸을 하나씩 적습니다",
-            start_row,
-            end_row,
-        )
-        self._fill_join_cells(
-            sheet_url,
-            plan,
-            start_row=start_row,
-            end_row=end_row,
-        )
+                if index == len(cells) or index % 5 == 0:
+                    self.logger.info("틀린 칸 적기 %s/%s", index, len(cells))
 
     def write_join_marks(self, sheet_url: str, plan) -> None:
         from .join_marker import (
+            JOIN_CELL_FILL_MAX,
             format_cafe_formula_error,
             format_locked_sheet_error,
+            plan_mismatch_cells,
         )
 
         self._ensure_browser_alive()
@@ -802,30 +721,32 @@ class V2RBrowser:
             raise AutomationError(format_cafe_formula_error(plan.formula_cells))
 
         for group in plan.contiguous_cafe_groups():
-            start_column, _ = plan.start_cell(group[0])
-            for start_row, tsv in plan.paste_chunks(group):
-                self._write_join_chunk(
-                    sheet_url,
-                    plan,
-                    group,
-                    start_column,
-                    start_row,
-                    tsv,
+            start_column, start_row = plan.start_cell(group[0])
+            tsv = plan.tsv_for_headers(group)
+            for attempt in range(1, 3):
+                try:
+                    self.paste_sheet_columns(sheet_url, start_column, start_row, tsv)
+                except AutomationError as exc:
+                    self.logger.warning("한 번 붙여넣기 실패 (%s/2): %s", attempt, exc)
+                    continue
+                last_errors = self._verify_join_plan(sheet_url, plan, downloads=3)
+                if not last_errors:
+                    break
+                headers, rows = self._download_join_sheet_rows(sheet_url)
+                leftover = plan_mismatch_cells(headers, rows, plan)
+                if leftover and len(leftover) <= JOIN_CELL_FILL_MAX:
+                    break
+                self.logger.warning(
+                    "시트 확인 실패 (%s/2): %s",
+                    attempt,
+                    last_errors[0],
                 )
 
-        last_errors = self._verify_join_plan(
-            sheet_url,
-            plan,
-            downloads=4,
-        )
+        last_errors = self._verify_join_plan(sheet_url, plan, downloads=3)
         if last_errors:
-            self.logger.info("아직 빈 칸이 있어 하나씩 다시 적습니다")
+            self.logger.info("한 번에 안 들어간 칸만 다시 적습니다")
             self._fill_join_cells(sheet_url, plan)
-            last_errors = self._verify_join_plan(
-                sheet_url,
-                plan,
-                downloads=4,
-            )
+            last_errors = self._verify_join_plan(sheet_url, plan, downloads=4)
         if last_errors:
             raise AutomationError(format_locked_sheet_error(last_errors))
         self.logger.info("시트 가입 표시를 확인했습니다")
