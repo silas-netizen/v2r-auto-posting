@@ -157,8 +157,26 @@ class AffiliateAutomationApp(AutomationApp):
         if not sheet_url:
             raise ValueError("Google 시트 URL을 입력하세요")
         source_csv = self._get_csv_path("", sheet_url)
-        daily_csv = self.browser.download_sheet(DAILY_POST_SHEET_URL)
         jobs = load_affiliate_jobs(source_csv)
+        daily_posts = None
+        for attempt in range(1, 4):
+            try:
+                daily_csv = self.browser.download_sheet(
+                    DAILY_POST_SHEET_URL,
+                    required_headers={"내용", "카페"},
+                )
+                daily_posts = load_daily_posts(daily_csv)
+                break
+            except Exception as exc:
+                if attempt == 3:
+                    raise
+                self.logger.warning(
+                    "일상 글 시트 다운로드·헤더 확인 재시도 (%s/3): %s",
+                    attempt + 1,
+                    exc,
+                )
+                time.sleep(attempt)
+        assert daily_posts is not None
         try:
             brand = load_sheet_brand(sheet_url)
         except Exception as exc:
@@ -170,7 +188,7 @@ class AffiliateAutomationApp(AutomationApp):
         for job in jobs:
             job.brand = brand
         self.logger.info("이미지 브랜드 확인: %s", brand or "미확인")
-        return jobs, load_daily_posts(daily_csv)
+        return jobs, daily_posts
 
     def _check_data(self) -> None:
         try:

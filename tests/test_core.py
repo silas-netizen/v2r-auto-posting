@@ -36,6 +36,24 @@ def test_google_sheet_export_url() -> None:
     assert url == "https://docs.google.com/spreadsheets/d/abc_123/export?format=csv&gid=987"
 
 
+def test_downloaded_csv_must_contain_expected_sheet_headers(
+    tmp_path: Path,
+) -> None:
+    daily = tmp_path / "daily.csv"
+    daily.write_text(
+        "번호,제목,내용,카페\n1,분류,본문,씨씨앙\n",
+        encoding="utf-8-sig",
+    )
+    wrong = tmp_path / "brand.csv"
+    wrong.write_text(
+        "키워드,본문,카페명\n키워드,본문,씨씨앙\n",
+        encoding="utf-8-sig",
+    )
+
+    assert V2RBrowser._csv_has_headers(daily, {"내용", "카페"})
+    assert not V2RBrowser._csv_has_headers(wrong, {"내용", "카페"})
+
+
 def test_se_one_uses_direct_v2r_url() -> None:
     assert V2R_SE_ONE_URL == "https://v2r.daboja.im/nc/seone"
 

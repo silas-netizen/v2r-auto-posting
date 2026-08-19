@@ -157,7 +157,27 @@ class V2RBrowser:
             f"/export?format=csv&gid={gid}"
         )
 
-    def download_sheet(self, sheet_url: str) -> Path:
+    @staticmethod
+    def _csv_has_headers(path: Path, required_headers: set[str]) -> bool:
+        try:
+            with path.open(
+                "r",
+                encoding="utf-8-sig",
+                newline="",
+            ) as stream:
+                headers = next(csv.reader(stream), [])
+        except (OSError, UnicodeError, csv.Error):
+            return False
+        return required_headers.issubset(
+            {header.strip() for header in headers if header}
+        )
+
+    def download_sheet(
+        self,
+        sheet_url: str,
+        *,
+        required_headers: set[str] | None = None,
+    ) -> Path:
         self.start()
         assert self.driver
         self._switch_to_handle(self.google_handle)
@@ -165,6 +185,7 @@ class V2RBrowser:
         before = {path: path.stat().st_mtime for path in self.config.download_dir.glob("*.csv")}
         self.logger.info("Google Sheets 데이터를 내려받습니다")
         request_started = time.time()
+        rejected_files: set[str] = set()
         self._navigate(self._sheet_export_url(sheet_url), self.google_handle)
         deadline = time.monotonic() + self.config.timeout_seconds
         while time.monotonic() < deadline:
@@ -177,12 +198,38 @@ class V2RBrowser:
                 if candidate not in before or candidate.stat().st_mtime > before[candidate]:
                     related_download = candidate.with_suffix(candidate.suffix + ".crdownload")
                     if candidate.stat().st_mtime >= request_started and not related_download.exists():
+                        if (
+                            required_headers
+                            and not self._csv_has_headers(
+                                candidate,
+                                required_headers,
+                            )
+                        ):
+                            signature = (
+                                f"{candidate.name}:"
+                                f"{candidate.stat().st_mtime_ns}"
+                            )
+                            if signature not in rejected_files:
+                                self.logger.warning(
+                                    "다운로드 CSV 헤더가 대상 시트와 달라 "
+                                    "사용하지 않고 계속 기다립니다: %s / 필요 %s",
+                                    candidate.name,
+                                    ", ".join(sorted(required_headers)),
+                                )
+                                rejected_files.add(signature)
+                            before[candidate] = candidate.stat().st_mtime
+                            continue
                         self.logger.info("Google Sheets 다운로드 완료: %s", candidate.name)
                         return candidate
             time.sleep(0.5)
         if "accounts.google.com" in self.driver.current_url:
             raise AutomationError(
                 "Google 로그인이 필요합니다. '로그인 준비'에서 로그인한 뒤 다시 실행하세요"
+            )
+        if required_headers and rejected_files:
+            raise AutomationError(
+                "시트 CSV는 내려받았지만 필수 헤더를 확인하지 못했습니다: "
+                + ", ".join(sorted(required_headers))
             )
         raise AutomationError(
             "시트를 내려받지 못했습니다. 공유 권한 또는 Google 로그인을 확인하세요"
