@@ -714,7 +714,7 @@ def test_sheet_write_failure_does_not_block_v2r_publish(tmp_path: Path) -> None:
     assert "F열 완료 링크 저장 실패" in result.jobs[0].message
 
 
-def test_previous_account_test_success_restores_sheet_without_republish(
+def test_previous_account_test_success_still_publishes_new_test(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "account-tests.csv"
@@ -776,10 +776,10 @@ def test_previous_account_test_success_restores_sheet_without_republish(
         source_sheet_url="https://docs.google.com/spreadsheets/d/example/edit?gid=0",
     )
 
-    assert browser.published == 0
+    assert browser.published == 1
     assert result.jobs[0].status == JobStatus.SUCCESS
-    assert result.jobs[0].post_url == old_job.post_url
-    assert ("I", 2, old_job.post_url) in browser.sheet_updates
+    assert result.jobs[0].post_url == "https://v2r.example/new"
+    assert ("I", 2, "https://v2r.example/new") in browser.sheet_updates
     assert {column for column, _row, _value in browser.sheet_updates} == {
         "H",
         "I",
