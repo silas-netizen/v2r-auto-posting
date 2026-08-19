@@ -296,7 +296,8 @@ def load_account_test_jobs(path: str | Path) -> list[ImmediateJob]:
     csv_path = Path(path)
     with csv_path.open("r", encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream)
-        headers = [header for header in (reader.fieldnames or []) if header]
+        raw_headers = list(reader.fieldnames or [])
+        headers = [header for header in raw_headers if header]
         missing = [
             header
             for header in ACCOUNT_TEST_HEADERS.values()
