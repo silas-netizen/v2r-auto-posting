@@ -3,13 +3,18 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from .affiliate_api import AffiliateApiError
+from .browser import AutomationError
 from .gui import AutomationApp
 from .join_marker import (
     ACCOUNT_TEST_SHEET_URL,
     CAFE_LABELS,
     JoinMarkerError,
     build_plan,
+    format_cafe_formula_error,
     load_account_rows,
+    require_membership,
+    user_facing_join_error,
 )
 from .state import AnotherInstanceRunningError, InstanceLock
 
@@ -123,6 +128,7 @@ class JoinMarkerApp(AutomationApp):
             try:
                 self.logger.info("V2R 카페 가입 아이디를 조회합니다")
                 membership = self.browser.load_join_membership()
+                require_membership(membership)
                 for label in CAFE_LABELS:
                     self.logger.info("%s 가입 %s명", label, len(membership.get(label, set())))
                 self._set_progress(1, 3)
@@ -137,17 +143,21 @@ class JoinMarkerApp(AutomationApp):
                 if preview_only:
                     self.ui_queue.put(("info", ("미리보기", plan.summary())))
                     return
+                if plan.formula_cells:
+                    raise JoinMarkerError(format_cafe_formula_error(plan.formula_cells))
                 if self.stop_event.is_set():
                     return
-                self.logger.info("씨씨앙·양평맘 열을 한 번에 붙여넣습니다")
+                self.logger.info("씨씨앙·양평맘 열을 구간마다 붙여넣고 바로 확인합니다")
                 self.browser.write_join_marks(sheet_url, plan)
                 self._set_progress(3, 3)
                 self.ui_queue.put(("info", ("표시 완료", plan.summary())))
-            except JoinMarkerError as exc:
-                self.ui_queue.put(("error", ("시트 열 확인", str(exc))))
+            except (JoinMarkerError, AutomationError, AffiliateApiError) as exc:
+                message = user_facing_join_error(exc)
+                self.logger.error("%s", message)
+                self.ui_queue.put(("error", ("확인 필요", message)))
             except Exception as exc:
                 self.logger.exception("가입 표시 실패")
-                self.ui_queue.put(("error", ("실행 실패", str(exc))))
+                self.ui_queue.put(("error", ("실행 실패", user_facing_join_error(exc))))
             finally:
                 self.ui_queue.put(("finished", None))
 

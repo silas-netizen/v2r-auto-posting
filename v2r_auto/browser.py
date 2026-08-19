@@ -20,8 +20,10 @@ from selenium.common.exceptions import (
     NoAlertPresentException,
     NoSuchElementException,
     NoSuchWindowException,
+    StaleElementReferenceException,
     TimeoutException,
     UnexpectedAlertPresentException,
+    WebDriverException,
 )
 from selenium.webdriver import ChromeOptions
 from selenium.webdriver.common.action_chains import ActionChains
@@ -121,8 +123,22 @@ class V2RBrowser:
             self.logger.info("Google Sheets 로그인 확인 탭을 열었습니다")
         self.logger.info("로그인 준비 창을 열었습니다. Google과 V2R 로그인을 확인하세요")
 
+    def _ensure_browser_alive(self) -> None:
+        if not self.driver:
+            raise AutomationError("브라우저가 시작되지 않았습니다")
+        try:
+            handles = self.driver.window_handles
+        except (NoSuchWindowException, WebDriverException) as exc:
+            raise AutomationError(
+                "Chrome 창이 닫혔거나 연결이 끊겼습니다. "
+                "프로그램을 다시 실행하고 로그인 준비 후 표시하기를 누르세요"
+            ) from exc
+        if not handles:
+            raise AutomationError("열려 있는 Chrome 창이 없습니다")
+
     def _switch_to_handle(self, preferred: str | None = None) -> None:
         assert self.driver
+        self._ensure_browser_alive()
         handles = self.driver.window_handles
         if not handles:
             raise AutomationError("열려 있는 Chrome 창이 없습니다")
@@ -130,7 +146,12 @@ class V2RBrowser:
         try:
             self.driver.switch_to.window(target)
         except NoSuchWindowException:
-            self.driver.switch_to.window(self.driver.window_handles[0])
+            remaining = self.driver.window_handles
+            if not remaining:
+                raise AutomationError(
+                    "Chrome 창이 닫혔습니다. 로그인 준비 후 다시 실행하세요"
+                )
+            self.driver.switch_to.window(remaining[0])
 
     def _navigate(self, url: str, preferred_handle: str | None = None) -> None:
         assert self.driver
@@ -309,27 +330,197 @@ class V2RBrowser:
                 continue
         raise AutomationError("클립보드에 값을 넣지 못했습니다")
 
+    def _sheet_document_open(self, sheet_url: str) -> bool:
+        assert self.driver
+        current = self.driver.current_url or ""
+        try:
+            sheet_id, _gid = self._sheet_id_and_gid(sheet_url)
+        except AutomationError:
+            return False
+        if sheet_id not in current:
+            return False
+        if "/export" in current or "format=csv" in current:
+            return False
+        return "docs.google.com/spreadsheets" in current
+
+    def _wait_for_sheet_grid(self) -> None:
+        assert self.driver
+        try:
+            self.wait.until(
+                lambda driver: driver.execute_script("return document.readyState")
+                == "complete"
+            )
+            current = self.driver.current_url or ""
+            if "accounts.google.com" in current:
+                raise AutomationError(
+                    "Google 로그인이 필요합니다. '로그인 준비'에서 로그인한 뒤 다시 실행하세요"
+                )
+            self.wait.until(
+                EC.presence_of_element_located((By.ID, "waffle-rich-text-editor"))
+            )
+        except TimeoutException as exc:
+            raise AutomationError(
+                "시트 화면을 기다리다 시간이 초과했습니다. "
+                "인터넷과 Google 로그인을 확인하세요"
+            ) from exc
+        self.driver.execute_script("window.focus();")
+
+    def _sheet_focus_role(self) -> str:
+        """Where keyboard input will go: name_box, formula_bar, or grid."""
+        assert self.driver
+        try:
+            role = self.driver.execute_script(
+                """
+                const el = document.activeElement;
+                if (!el) return "unknown";
+                const id = el.id || "";
+                const cls = String(el.className || "");
+                if (id === "t-name-box" || cls.includes("name-box")) return "name_box";
+                if (id === "waffle-rich-text-editor") return "formula_bar";
+                return "grid";
+                """
+            )
+        except WebDriverException:
+            return "unknown"
+        return str(role or "unknown")
+
+    def _name_box_value(self) -> str:
+        assert self.driver
+        try:
+            value = self.driver.execute_script(
+                """
+                const el = document.querySelector("#t-name-box, input#t-name-box");
+                if (!el) return "";
+                return el.value || "";
+                """
+            )
+        except WebDriverException:
+            return ""
+        return str(value or "").replace("$", "").strip()
+
+    @staticmethod
+    def name_box_matches_cell(value: str, column: str, row_number: int) -> bool:
+        wanted = f"{column.upper()}{row_number}".casefold()
+        current = (value or "").replace("$", "").strip().casefold().split(":", 1)[0]
+        return current == wanted
+
+    def _name_box_shows_cell(self, column: str, row_number: int) -> bool:
+        return self.name_box_matches_cell(self._name_box_value(), column, row_number)
+
+    def _sheet_appears_filtered(self) -> bool:
+        assert self.driver
+        try:
+            return bool(
+                self.driver.execute_script(
+                    """
+                    const checked = document.querySelector(
+                        ".docs-sheet-filter-button.goog-toolbar-button-checked"
+                    );
+                    if (checked) return true;
+                    const chips = document.querySelectorAll(
+                        ".waffle-filter-chip, .docs-sheet-filter-chip"
+                    );
+                    for (const chip of chips) {
+                        if (chip.offsetParent) return true;
+                    }
+                    return false;
+                    """
+                )
+            )
+        except WebDriverException:
+            return False
+
+    def _leave_sheet_edit_widgets(self) -> None:
+        """Close the name box / cell editor so Ctrl+V lands on the grid."""
+        assert self.driver
+        for _ in range(6):
+            role = self._sheet_focus_role()
+            ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+            time.sleep(0.08)
+            try:
+                self.driver.execute_script(
+                    """
+                    const box = document.querySelector("#t-name-box, input#t-name-box");
+                    if (box) box.blur();
+                    const grid = document.querySelector(".grid-container")
+                        || document.querySelector("#docs-editor");
+                    if (grid && grid.focus) grid.focus();
+                    """
+                )
+            except WebDriverException:
+                pass
+            if role != "name_box" and self._sheet_focus_role() != "name_box":
+                break
+
     def _select_sheet_cell(self, column: str, row_number: int) -> None:
         """Select a grid cell without opening the formula editor."""
         assert self.driver
-        ActionChains(self.driver).send_keys(Keys.ESCAPE).send_keys(Keys.ESCAPE).perform()
-        time.sleep(0.2)
-        name_boxes = [
-            element
-            for element in self.driver.find_elements(
-                By.CSS_SELECTOR,
-                "#t-name-box, input#t-name-box, .docs-sheet-name-box",
-            )
-            if element.is_displayed()
-        ]
-        if name_boxes:
+        column = column.upper()
+        target = f"{column}{row_number}"
+        last_seen = ""
+        for attempt in range(1, 6):
+            ActionChains(self.driver).send_keys(Keys.ESCAPE).send_keys(Keys.ESCAPE).perform()
+            time.sleep(0.15)
+            name_boxes = [
+                element
+                for element in self.driver.find_elements(
+                    By.CSS_SELECTOR,
+                    "#t-name-box, input#t-name-box, .docs-sheet-name-box",
+                )
+                if element.is_displayed()
+            ]
+            if not name_boxes:
+                time.sleep(0.2 * attempt)
+                continue
             box = name_boxes[0]
-            box.click()
-            box.send_keys(Keys.CONTROL, "a")
-            box.send_keys(f"{column}{row_number}")
-            box.send_keys(Keys.ENTER)
-            time.sleep(0.2)
-        ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+            try:
+                box.click()
+                box.send_keys(Keys.CONTROL, "a")
+                box.send_keys(target)
+                box.send_keys(Keys.ENTER)
+            except (StaleElementReferenceException, WebDriverException):
+                try:
+                    self.driver.execute_script(
+                        "arguments[0].focus(); arguments[0].select();",
+                        box,
+                    )
+                    box.send_keys(target)
+                    box.send_keys(Keys.ENTER)
+                except (StaleElementReferenceException, WebDriverException):
+                    time.sleep(0.2 * attempt)
+                    continue
+            time.sleep(0.25)
+            last_seen = self._name_box_value()
+            if self._name_box_shows_cell(column, row_number):
+                self._leave_sheet_edit_widgets()
+                if self._sheet_focus_role() == "name_box":
+                    continue
+                if self._name_box_shows_cell(column, row_number):
+                    return
+        raise AutomationError(
+            f"시트에서 {target} 칸을 선택하지 못했습니다"
+            + (f" (이름 상자: {last_seen})" if last_seen else "")
+            + ". 시트 화면을 가리지 말고 다시 실행하세요"
+        )
+
+    def _open_sheet_for_paste(self, sheet_url: str, column: str, row_number: int) -> None:
+        """Open the editable sheet. Skip hash-only reloads that drop unsaved cells."""
+        self.start()
+        assert self.driver
+        self._ensure_browser_alive()
+        if not self._sheet_document_open(sheet_url):
+            target = self._sheet_range_url(sheet_url, column, row_number)
+            self._navigate(target, self.google_handle)
+            self.google_handle = self.driver.current_window_handle
+            self._wait_for_sheet_grid()
+        else:
+            self._switch_to_handle(self.google_handle)
+            self.google_handle = self.driver.current_window_handle
+            self.driver.execute_script("window.focus();")
+        if self._sheet_appears_filtered():
+            self.logger.warning(
+                "시트 필터가 켜져 있으면 붙여넣기 위치가 어긋날 수 있습니다. 필터를 끄세요"
+            )
 
     def paste_sheet_columns(
         self,
@@ -342,60 +533,197 @@ class V2RBrowser:
         self.start()
         assert self.driver
         start_column = start_column.upper()
-        target = self._sheet_range_url(sheet_url, start_column, start_row)
-        self._navigate(target, self.google_handle)
-        self.google_handle = self.driver.current_window_handle
-        self.wait.until(
-            lambda driver: driver.execute_script("return document.readyState") == "complete"
-        )
-        self.wait.until(EC.presence_of_element_located((By.ID, "waffle-rich-text-editor")))
-        self.driver.execute_script("window.focus();")
+        row_count = tsv.count("\n") or (1 if tsv else 0)
+        self._open_sheet_for_paste(sheet_url, start_column, start_row)
         # The formula editor must stay closed. Clicking it pastes all rows
         # into one cell, so 433행 같은 칸은 비어 있게 됩니다.
         self._select_sheet_cell(start_column, start_row)
+        if self._sheet_focus_role() == "name_box":
+            raise AutomationError(
+                f"시트 {start_column}{start_row} 이름 상자가 열린 채라 붙여넣기를 하지 않았습니다"
+            )
         self._set_clipboard_text(tsv)
         ActionChains(self.driver).key_down(Keys.CONTROL).send_keys("v").key_up(
             Keys.CONTROL
         ).perform()
-        time.sleep(2)
+        time.sleep(0.4)
+        leaked = self._name_box_value()
+        if "\t" in leaked or "\n" in leaked or len(leaked) > 24:
+            ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+            raise AutomationError(
+                f"붙여넣기가 표가 아니라 이름 상자({start_column}{start_row})로 들어갔습니다"
+            )
+        ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+        try:
+            ActionChains(self.driver).key_down(Keys.CONTROL).send_keys("s").key_up(
+                Keys.CONTROL
+            ).perform()
+        except WebDriverException:
+            pass
+        time.sleep(3.5)
         self.logger.info(
-            "시트 %s%s에 %s줄을 한 번에 붙여넣었습니다",
+            "시트 %s%s에 %s줄 붙여넣기를 시도했습니다",
             start_column,
             start_row,
-            tsv.count("\n") or (1 if tsv else 0),
+            row_count,
         )
 
     def load_join_membership(self) -> dict[str, set[str]]:
+        from .affiliate_api import AffiliateApiError
         from .join_marker import fetch_membership
 
-        publisher = self._get_affiliate_publisher()
-        publisher._capture_authorization()
-        return fetch_membership(publisher._request)
+        try:
+            publisher = self._get_affiliate_publisher()
+            publisher._capture_authorization()
+            return fetch_membership(publisher._request)
+        except AffiliateApiError as exc:
+            raise AutomationError(str(exc)) from exc
+
+    def _download_join_sheet_rows(self, sheet_url: str):
+        from .join_marker import load_account_rows
+
+        path = self.download_sheet(sheet_url)
+        return load_account_rows(path)
+
+    def _verify_join_plan(
+        self,
+        sheet_url: str,
+        plan,
+        *,
+        start_row: int | None = None,
+        end_row: int | None = None,
+        downloads: int = 3,
+    ) -> list[str]:
+        from .join_marker import plan_matches_sheet
+
+        last_errors: list[str] = []
+        for attempt in range(1, downloads + 1):
+            if attempt > 1:
+                time.sleep(1.5)
+            headers, rows = self._download_join_sheet_rows(sheet_url)
+            last_errors = plan_matches_sheet(
+                headers,
+                rows,
+                plan,
+                start_row=start_row,
+                end_row=end_row,
+            )
+            if not last_errors:
+                return []
+            self.logger.warning(
+                "시트 확인 재시도 (%s/%s): %s",
+                attempt,
+                downloads,
+                last_errors[0],
+            )
+        return last_errors
+
+    def _write_join_chunk(
+        self,
+        sheet_url: str,
+        plan,
+        group: list[str],
+        start_column: str,
+        start_row: int,
+        tsv: str,
+        *,
+        allow_split: bool,
+    ) -> None:
+        from .join_marker import (
+            JOIN_SPLIT_CHUNK_SIZE,
+            format_join_write_failure,
+            paste_chunk_end_row,
+            should_split_failed_chunk,
+        )
+
+        end_row = paste_chunk_end_row(start_row, tsv)
+        start_cell = f"{start_column}{start_row}"
+        last_errors: list[str] = []
+        for attempt in range(1, 4):
+            self.paste_sheet_columns(sheet_url, start_column, start_row, tsv)
+            last_errors = self._verify_join_plan(
+                sheet_url,
+                plan,
+                start_row=start_row,
+                end_row=end_row,
+            )
+            if not last_errors:
+                self.logger.info(
+                    "시트 %s~%s행 표시를 확인했습니다",
+                    start_row,
+                    end_row,
+                )
+                return
+            self.logger.warning(
+                "구간 붙여넣기 재시도 (%s/3) %s~%s행: %s",
+                attempt,
+                start_row,
+                end_row,
+                last_errors[0],
+            )
+        if allow_split and should_split_failed_chunk(tsv, JOIN_SPLIT_CHUNK_SIZE):
+            self.logger.info(
+                "%s~%s행을 %s줄씩 나눠 다시 붙입니다",
+                start_row,
+                end_row,
+                JOIN_SPLIT_CHUNK_SIZE,
+            )
+            for small_start, small_tsv in plan.paste_chunks(
+                group,
+                chunk_size=JOIN_SPLIT_CHUNK_SIZE,
+                start_row=start_row,
+                end_row=end_row,
+            ):
+                self._write_join_chunk(
+                    sheet_url,
+                    plan,
+                    group,
+                    start_column,
+                    small_start,
+                    small_tsv,
+                    allow_split=False,
+                )
+            return
+        raise AutomationError(
+            format_join_write_failure(
+                last_errors,
+                start_cell=start_cell,
+                start_row=start_row,
+                end_row=end_row,
+            )
+        )
 
     def write_join_marks(self, sheet_url: str, plan) -> None:
-        from .join_marker import plan_matches_sheet, load_account_rows
+        from .join_marker import (
+            format_cafe_formula_error,
+            format_join_write_failure,
+        )
+
+        self._ensure_browser_alive()
+        if plan.formula_cells:
+            raise AutomationError(format_cafe_formula_error(plan.formula_cells))
 
         for group in plan.contiguous_cafe_groups():
             start_column, _ = plan.start_cell(group[0])
             for start_row, tsv in plan.paste_chunks(group):
-                self.paste_sheet_columns(sheet_url, start_column, start_row, tsv)
-        last_errors: list[str] = []
-        for attempt in range(1, 7):
-            time.sleep(1.5)
-            path = self.download_sheet(sheet_url)
-            headers, rows = load_account_rows(path)
-            last_errors = plan_matches_sheet(headers, rows, plan)
-            if not last_errors:
-                self.logger.info("시트 가입 표시를 확인했습니다")
-                return
-            self.logger.warning(
-                "시트 확인 재시도 (%s/6): %s",
-                attempt,
-                last_errors[0],
-            )
-        raise AutomationError(
-            "시트 표시를 확인하지 못했습니다: " + "; ".join(last_errors[:5])
+                self._write_join_chunk(
+                    sheet_url,
+                    plan,
+                    group,
+                    start_column,
+                    start_row,
+                    tsv,
+                    allow_split=True,
+                )
+
+        last_errors = self._verify_join_plan(
+            sheet_url,
+            plan,
+            downloads=4,
         )
+        if last_errors:
+            raise AutomationError(format_join_write_failure(last_errors))
+        self.logger.info("시트 가입 표시를 확인했습니다")
 
     def update_completion_link(
         self,

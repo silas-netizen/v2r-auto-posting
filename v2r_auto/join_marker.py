@@ -14,6 +14,9 @@ MARK_VALUE = "가입"
 ID_HEADERS = ("ID", "아이디", "계정", "login_id")
 CAFE_LABELS = ("씨씨앙", "양평맘")
 PROTECTED_HEADERS = ("김천kb보험",)
+JOIN_PASTE_CHUNK_SIZE = 400
+JOIN_SPLIT_CHUNK_SIZE = 50
+JOIN_MISMATCH_LIMIT = 8
 ACCOUNT_TEST_SHEET_URL = (
     "https://docs.google.com/spreadsheets/d/"
     "1UgcAvHFCpC5N9joC9T5WCATK834F3XAtRrepFv6XbEs/"
@@ -105,12 +108,32 @@ def load_account_rows(path: str | Path) -> tuple[list[str], list[dict[str, str]]
     return headers, rows
 
 
+def sheet_row_number(row: dict[str, str]) -> int | None:
+    raw = clean_cell(row.get("__row"))
+    if not raw.isdigit():
+        return None
+    return int(raw)
+
+
+def paste_chunk_end_row(start_row: int, tsv: str) -> int:
+    """Inclusive sheet row covered by a trailing-newline TSV block."""
+    rows = tsv.count("\n")
+    if rows < 1:
+        return start_row
+    return start_row + rows - 1
+
+
+def should_split_failed_chunk(tsv: str, min_rows: int = JOIN_SPLIT_CHUNK_SIZE) -> bool:
+    return tsv.count("\n") > min_rows
+
+
 @dataclass(slots=True)
 class JoinMarkPlan:
     headers: list[str]
     id_header: str
     cafe_headers: dict[str, str]
     rows: list[dict[str, str]] = field(default_factory=list)
+    formula_cells: tuple[str, ...] = ()
 
     def marked_count(self, label: str) -> int:
         header = self.cafe_headers[label]
@@ -147,15 +170,25 @@ class JoinMarkPlan:
     def paste_chunks(
         self,
         headers: list[str],
-        chunk_size: int = 400,
+        chunk_size: int = JOIN_PASTE_CHUNK_SIZE,
+        *,
+        start_row: int = 2,
+        end_row: int | None = None,
     ) -> list[tuple[int, str]]:
-        """Split a column paste into start-row + TSV chunks."""
+        """Split a column paste into start-row + TSV chunks.
+
+        `start_row` / `end_row` are 1-based sheet rows, inclusive.
+        Data rows begin at sheet row 2.
+        """
         if chunk_size < 1:
             raise JoinMarkerError("붙여넣기 묶음 크기가 올바르지 않습니다")
+        first_index = max(0, start_row - 2)
+        slice_end = len(self.rows) if end_row is None else min(len(self.rows), max(0, end_row - 1))
+        selected = self.rows[first_index:slice_end]
         chunks: list[tuple[int, str]] = []
-        for start in range(0, len(self.rows), chunk_size):
-            piece = self.rows[start : start + chunk_size]
-            chunks.append((2 + start, self.tsv_for_headers(headers, piece)))
+        for offset in range(0, len(selected), chunk_size):
+            piece = selected[offset : offset + chunk_size]
+            chunks.append((2 + first_index + offset, self.tsv_for_headers(headers, piece)))
         return chunks
 
     def contiguous_cafe_groups(self) -> list[list[str]]:
@@ -184,6 +217,10 @@ class JoinMarkPlan:
         if len(self.cafe_headers) >= 2:
             lines.append(f"두 카페 모두 가입 {self.both_count()}칸")
         lines.append("아이디가 없는 행은 비웁니다. 김천kb보험 열은 건드리지 않습니다.")
+        if self.formula_cells:
+            lines.append(
+                "주의: 씨씨앙·양평맘 열에 수식이 있어 붙여넣기가 지워질 수 있습니다"
+            )
         return "\n".join(lines)
 
 
@@ -201,6 +238,7 @@ def build_plan(
         cafe_headers[label] = _find_header(headers, (label,))
 
     planned: list[dict[str, str]] = []
+    formula_cells = tuple(collect_cafe_formulas(rows, cafe_headers))
     for row in rows:
         account = clean_cell(row.get(id_header))
         key = account.casefold()
@@ -214,29 +252,155 @@ def build_plan(
         id_header=id_header,
         cafe_headers=cafe_headers,
         rows=planned,
+        formula_cells=formula_cells,
     )
+
+
+def collect_cafe_formulas(
+    rows: list[dict[str, str]],
+    cafe_headers: dict[str, str],
+) -> list[str]:
+    """Describe cafe cells that start with `=`, which Sheets will recalc over a paste."""
+    hits: list[str] = []
+    for row in rows:
+        row_number = row.get("__row", "?")
+        for header in cafe_headers.values():
+            value = clean_cell(row.get(header))
+            if value.startswith("="):
+                preview = value if len(value) <= 40 else value[:37] + "..."
+                hits.append(f"{row_number}행 {header}: {preview}")
+    return hits
+
+
+def require_membership(membership: dict[str, set[str]]) -> None:
+    """Refuse to blank the sheet when V2R returned no cafe members at all."""
+    joined = sum(len(membership.get(label, set()) or set()) for label in CAFE_LABELS)
+    if joined == 0:
+        raise JoinMarkerError(
+            "V2R에서 씨씨앙·양평맘 가입 아이디를 하나도 읽지 못했습니다. "
+            "로그인 준비에서 V2R에 로그인한 뒤 다시 실행하세요. "
+            "시트의 가입 표시는 바꾸지 않았습니다."
+        )
+
+
+def format_cafe_formula_error(formula_cells: Iterable[str]) -> str:
+    samples = ", ".join(list(formula_cells)[:5])
+    return (
+        "씨씨앙·양평맘 열에 수식(=로 시작)이 있어 붙여넣기를 하지 않았습니다. "
+        "수식을 지우고 일반 글자만 남긴 뒤 다시 실행하세요. "
+        f"예: {samples}"
+    )
+
+
+def mismatches_look_like_missed_paste(errors: list[str]) -> bool:
+    if not errors:
+        return False
+    wanted_mark = False
+    for error in errors:
+        if "시트 열 이름" in error or "행 수" in error:
+            return False
+        if "실제 ''" not in error and '실제 ""' not in error:
+            return False
+        if f"기대 '{MARK_VALUE}'" in error:
+            wanted_mark = True
+    return wanted_mark
+
+
+def format_join_write_failure(
+    errors: list[str],
+    *,
+    start_cell: str = "",
+    start_row: int | None = None,
+    end_row: int | None = None,
+) -> str:
+    lines = ["시트에 가입 표시가 반영되지 않았습니다."]
+    if start_cell and start_row is not None and end_row is not None:
+        lines.append(f"문제 구간: {start_cell}부터 {end_row}행까지.")
+    elif start_row is not None and end_row is not None:
+        lines.append(f"문제 구간: {start_row}행부터 {end_row}행까지.")
+    if errors:
+        lines.append("확인된 칸: " + "; ".join(errors[:5]))
+    lines.append("")
+    lines.append("이렇게 해 주세요:")
+    lines.append("- 시트 필터(깔때기)가 켜져 있으면 끄고 다시 실행하세요.")
+    lines.append("- 씨씨앙·양평맘 칸이 수정 불가(보호)이면 보호를 해제한 뒤 다시 실행하세요.")
+    lines.append("- Chrome 창을 닫지 말고, 실행 중에 시트 칸을 클릭하지 마세요.")
+    lines.append("- 로그인 준비에서 Google 시트 편집 권한을 확인하세요.")
+    if mismatches_look_like_missed_paste(errors):
+        lines.append(
+            "- 붙여넣기가 표가 아니라 위쪽 이름 상자로 들어간 경우가 많습니다. "
+            "프로그램을 한 번 더 실행하면 됩니다."
+        )
+    return "\n".join(lines)
+
+
+def user_facing_join_error(exc: BaseException) -> str:
+    """Turn browser/API exceptions into short Korean instructions."""
+    if isinstance(exc, JoinMarkerError):
+        return str(exc).strip()
+    text = str(exc).strip()
+    lowered = f"{type(exc).__name__}: {text}".casefold()
+    session_dead = (
+        "invalid session",
+        "no such window",
+        "not connected to devtools",
+        "chrome not reachable",
+        "disconnected",
+        "target window already closed",
+        "web view not found",
+    )
+    if any(token in lowered for token in session_dead):
+        return (
+            "Chrome 창이 닫혔거나 연결이 끊겼습니다. "
+            "프로그램을 다시 실행하고 로그인 준비 후 표시하기를 누르세요."
+        )
+    if "timeout" in lowered or "timed out" in lowered:
+        return "페이지가 너무 오래 걸렸습니다. 인터넷 상태를 확인하고 다시 실행하세요."
+    if "accounts.google.com" in lowered or "google 로그인" in lowered:
+        return (
+            "Google 로그인이 필요합니다. "
+            "로그인 준비에서 Google에 로그인한 뒤 다시 실행하세요."
+        )
+    if "클립보드" in text:
+        return "클립보드에 값을 넣지 못했습니다. 다른 프로그램의 클립보드 사용을 끄고 다시 실행하세요."
+    if text:
+        return text
+    return "알 수 없는 오류가 났습니다. 진행 기록을 확인하세요."
 
 
 def plan_matches_sheet(
     headers: list[str],
     rows: list[dict[str, str]],
     plan: JoinMarkPlan,
+    *,
+    start_row: int | None = None,
+    end_row: int | None = None,
+    limit: int = JOIN_MISMATCH_LIMIT,
 ) -> list[str]:
-    """Return human-readable mismatches after a write."""
+    """Return human-readable mismatches after a write.
+
+    When `start_row` / `end_row` are set, only those 1-based sheet rows are
+    compared. This lets a 400-row paste be checked before the next paste.
+    """
     errors: list[str] = []
     if headers != plan.headers:
         errors.append("시트 열 이름이 바뀌었습니다. 다시 실행하세요")
         return errors
-    if len(rows) < len(plan.rows):
+    if start_row is None and len(rows) < len(plan.rows):
         errors.append("시트 행 수가 계획보다 적습니다")
     for expected, actual in zip(plan.rows, rows, strict=False):
-        row_number = expected.get("__row", "?")
+        row_number = sheet_row_number(expected)
+        label = expected.get("__row", "?")
+        if start_row is not None and (row_number is None or row_number < start_row):
+            continue
+        if end_row is not None and (row_number is None or row_number > end_row):
+            continue
         for header in plan.cafe_headers.values():
             if clean_cell(actual.get(header)) != clean_cell(expected.get(header)):
                 errors.append(
-                    f"{row_number}행 {header}: 기대 '{clean_cell(expected.get(header))}' / "
+                    f"{label}행 {header}: 기대 '{clean_cell(expected.get(header))}' / "
                     f"실제 '{clean_cell(actual.get(header))}'"
                 )
-                if len(errors) >= 8:
+                if len(errors) >= limit:
                     return errors
     return errors
