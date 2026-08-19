@@ -618,6 +618,89 @@ class V2RBrowser:
             )
         return last_errors
 
+    def _write_one_join_cell(
+        self,
+        sheet_url: str,
+        column: str,
+        row_number: int,
+        value: str,
+    ) -> None:
+        """Type one cafe cell via clipboard so Korean 가입 does not depend on IME."""
+        column = column.upper()
+        self._open_sheet_for_paste(sheet_url, column, row_number)
+        self._select_sheet_cell(column, row_number)
+        if self._sheet_focus_role() == "name_box":
+            self._leave_sheet_edit_widgets()
+        if value:
+            self._set_clipboard_text(value)
+            ActionChains(self.driver).key_down(Keys.CONTROL).send_keys("v").key_up(
+                Keys.CONTROL
+            ).perform()
+        else:
+            ActionChains(self.driver).send_keys(Keys.DELETE).perform()
+        time.sleep(0.2)
+        ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+        try:
+            ActionChains(self.driver).key_down(Keys.CONTROL).send_keys("s").key_up(
+                Keys.CONTROL
+            ).perform()
+        except WebDriverException:
+            pass
+        time.sleep(0.8)
+        self.logger.info(
+            "시트 %s%s에 %s를 다시 적었습니다",
+            column,
+            row_number,
+            value or "빈칸",
+        )
+
+    def _fill_join_cells(
+        self,
+        sheet_url: str,
+        plan,
+        *,
+        start_row: int | None = None,
+        end_row: int | None = None,
+    ) -> None:
+        from .join_marker import JOIN_CELL_FILL_ROUNDS, plan_mismatch_cells
+
+        for round_number in range(1, JOIN_CELL_FILL_ROUNDS + 1):
+            headers, rows = self._download_join_sheet_rows(sheet_url)
+            if headers != plan.headers:
+                raise AutomationError("시트 열 이름이 바뀌었습니다. 다시 실행하세요")
+            cells = plan_mismatch_cells(
+                headers,
+                rows,
+                plan,
+                start_row=start_row,
+                end_row=end_row,
+            )
+            if not cells:
+                return
+            self.logger.info(
+                "안 적힌 칸 %s개를 하나씩 다시 적습니다 (%s/%s)",
+                len(cells),
+                round_number,
+                JOIN_CELL_FILL_ROUNDS,
+            )
+            for index, cell in enumerate(cells, start=1):
+                try:
+                    self._write_one_join_cell(
+                        sheet_url,
+                        cell.column,
+                        cell.row_number,
+                        cell.value,
+                    )
+                except AutomationError as exc:
+                    self.logger.warning(
+                        "칸 %s%s 다시 쓰기 실패: %s",
+                        cell.column,
+                        cell.row_number,
+                        exc,
+                    )
+                if index % 10 == 0 or index == len(cells):
+                    self.logger.info("하나씩 적기 %s/%s", index, len(cells))
+
     def _write_join_chunk(
         self,
         sheet_url: str,
@@ -626,21 +709,28 @@ class V2RBrowser:
         start_column: str,
         start_row: int,
         tsv: str,
-        *,
-        allow_split: bool,
     ) -> None:
         from .join_marker import (
             JOIN_SPLIT_CHUNK_SIZE,
-            format_join_write_failure,
             paste_chunk_end_row,
-            should_split_failed_chunk,
         )
 
         end_row = paste_chunk_end_row(start_row, tsv)
-        start_cell = f"{start_column}{start_row}"
+        row_count = tsv.count("\n")
         last_errors: list[str] = []
         for attempt in range(1, 4):
-            self.paste_sheet_columns(sheet_url, start_column, start_row, tsv)
+            try:
+                self.paste_sheet_columns(sheet_url, start_column, start_row, tsv)
+            except AutomationError as exc:
+                last_errors = [str(exc)]
+                self.logger.warning(
+                    "구간 붙여넣기 실패 (%s/3) %s~%s행: %s",
+                    attempt,
+                    start_row,
+                    end_row,
+                    exc,
+                )
+                continue
             last_errors = self._verify_join_plan(
                 sheet_url,
                 plan,
@@ -661,16 +751,22 @@ class V2RBrowser:
                 end_row,
                 last_errors[0],
             )
-        if allow_split and should_split_failed_chunk(tsv, JOIN_SPLIT_CHUNK_SIZE):
+        if row_count > JOIN_SPLIT_CHUNK_SIZE:
+            next_size = JOIN_SPLIT_CHUNK_SIZE
+        elif row_count > 1:
+            next_size = 1
+        else:
+            next_size = 0
+        if next_size:
             self.logger.info(
                 "%s~%s행을 %s줄씩 나눠 다시 붙입니다",
                 start_row,
                 end_row,
-                JOIN_SPLIT_CHUNK_SIZE,
+                next_size,
             )
             for small_start, small_tsv in plan.paste_chunks(
                 group,
-                chunk_size=JOIN_SPLIT_CHUNK_SIZE,
+                chunk_size=next_size,
                 start_row=start_row,
                 end_row=end_row,
             ):
@@ -681,22 +777,24 @@ class V2RBrowser:
                     start_column,
                     small_start,
                     small_tsv,
-                    allow_split=False,
                 )
             return
-        raise AutomationError(
-            format_join_write_failure(
-                last_errors,
-                start_cell=start_cell,
-                start_row=start_row,
-                end_row=end_row,
-            )
+        self.logger.info(
+            "%s~%s행이 한 번에 안 붙어 칸을 하나씩 적습니다",
+            start_row,
+            end_row,
+        )
+        self._fill_join_cells(
+            sheet_url,
+            plan,
+            start_row=start_row,
+            end_row=end_row,
         )
 
     def write_join_marks(self, sheet_url: str, plan) -> None:
         from .join_marker import (
             format_cafe_formula_error,
-            format_join_write_failure,
+            format_locked_sheet_error,
         )
 
         self._ensure_browser_alive()
@@ -713,7 +811,6 @@ class V2RBrowser:
                     start_column,
                     start_row,
                     tsv,
-                    allow_split=True,
                 )
 
         last_errors = self._verify_join_plan(
@@ -722,7 +819,15 @@ class V2RBrowser:
             downloads=4,
         )
         if last_errors:
-            raise AutomationError(format_join_write_failure(last_errors))
+            self.logger.info("아직 빈 칸이 있어 하나씩 다시 적습니다")
+            self._fill_join_cells(sheet_url, plan)
+            last_errors = self._verify_join_plan(
+                sheet_url,
+                plan,
+                downloads=4,
+            )
+        if last_errors:
+            raise AutomationError(format_locked_sheet_error(last_errors))
         self.logger.info("시트 가입 표시를 확인했습니다")
 
     def update_completion_link(

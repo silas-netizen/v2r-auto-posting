@@ -12,10 +12,12 @@ from v2r_auto.join_marker import (
     extract_joined_ids,
     format_cafe_formula_error,
     format_join_write_failure,
+    format_locked_sheet_error,
     load_account_rows,
     mismatches_look_like_missed_paste,
     paste_chunk_end_row,
     plan_matches_sheet,
+    plan_mismatch_cells,
     require_membership,
     should_split_failed_chunk,
     user_facing_join_error,
@@ -306,6 +308,46 @@ def test_plan_matches_sheet_can_check_one_paste_chunk() -> None:
     assert "7행" in second_chunk[0]
     assert "기대 '가입'" in second_chunk[0]
     assert "실제 ''" in second_chunk[0]
+
+
+def test_plan_mismatch_cells_lists_empty_가입_cells() -> None:
+    rows = [
+        {"__row": "2", "ID": "a", "씨씨앙": "", "양평맘": ""},
+        {"__row": "3", "ID": "b", "씨씨앙": "", "양평맘": ""},
+        {"__row": "4", "ID": "c", "씨씨앙": "", "양평맘": ""},
+    ]
+    plan = build_plan(
+        ["ID", "씨씨앙", "양평맘"],
+        rows,
+        {"씨씨앙": {"b", "c"}, "양평맘": {"c"}},
+    )
+    actual = [
+        {"ID": "a", "씨씨앙": "", "양평맘": ""},
+        {"ID": "b", "씨씨앙": "", "양평맘": ""},
+        {"ID": "c", "씨씨앙": "가입", "양평맘": ""},
+    ]
+
+    cells = plan_mismatch_cells(["ID", "씨씨앙", "양평맘"], actual, plan)
+    assert [(cell.row_number, cell.header, cell.value) for cell in cells] == [
+        (3, "씨씨앙", "가입"),
+        (4, "양평맘", "가입"),
+    ]
+    assert cells[0].column == "B"
+    only_third = plan_mismatch_cells(
+        ["ID", "씨씨앙", "양평맘"],
+        actual,
+        plan,
+        start_row=4,
+        end_row=4,
+    )
+    assert len(only_third) == 1
+    assert only_third[0].header == "양평맘"
+
+
+def test_locked_sheet_error_is_plain_korean() -> None:
+    message = format_locked_sheet_error(["468행 씨씨앙: 기대 '가입' / 실제 ''"])
+    assert "잠겨" in message
+    assert "468행" in message
 
 
 def test_build_plan_records_cafe_formulas() -> None:

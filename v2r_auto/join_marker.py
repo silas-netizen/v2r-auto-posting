@@ -17,6 +17,7 @@ PROTECTED_HEADERS = ("김천kb보험",)
 JOIN_PASTE_CHUNK_SIZE = 400
 JOIN_SPLIT_CHUNK_SIZE = 50
 JOIN_MISMATCH_LIMIT = 8
+JOIN_CELL_FILL_ROUNDS = 3
 ACCOUNT_TEST_SHEET_URL = (
     "https://docs.google.com/spreadsheets/d/"
     "1UgcAvHFCpC5N9joC9T5WCATK834F3XAtRrepFv6XbEs/"
@@ -125,6 +126,14 @@ def paste_chunk_end_row(start_row: int, tsv: str) -> int:
 
 def should_split_failed_chunk(tsv: str, min_rows: int = JOIN_SPLIT_CHUNK_SIZE) -> bool:
     return tsv.count("\n") > min_rows
+
+
+@dataclass(frozen=True, slots=True)
+class JoinCellWrite:
+    row_number: int
+    column: str
+    header: str
+    value: str
 
 
 @dataclass(slots=True)
@@ -366,6 +375,49 @@ def user_facing_join_error(exc: BaseException) -> str:
     if text:
         return text
     return "알 수 없는 오류가 났습니다. 진행 기록을 확인하세요."
+
+
+def plan_mismatch_cells(
+    headers: list[str],
+    rows: list[dict[str, str]],
+    plan: JoinMarkPlan,
+    *,
+    start_row: int | None = None,
+    end_row: int | None = None,
+) -> list[JoinCellWrite]:
+    """Every cafe cell that still does not match the plan."""
+    cells: list[JoinCellWrite] = []
+    if headers != plan.headers:
+        return cells
+    for expected, actual in zip(plan.rows, rows, strict=False):
+        row_number = sheet_row_number(expected)
+        if row_number is None:
+            continue
+        if start_row is not None and row_number < start_row:
+            continue
+        if end_row is not None and row_number > end_row:
+            continue
+        for header in plan.cafe_headers.values():
+            wanted = clean_cell(expected.get(header))
+            if wanted != clean_cell(actual.get(header)):
+                cells.append(
+                    JoinCellWrite(
+                        row_number=row_number,
+                        column=column_letter(plan.column_index(header)),
+                        header=header,
+                        value=wanted,
+                    )
+                )
+    return cells
+
+
+def format_locked_sheet_error(errors: list[str]) -> str:
+    samples = "; ".join(errors[:5]) if errors else ""
+    return (
+        "시트가 잠겨 있거나 수정 권한이 없어 글을 남길 수 없습니다. "
+        "필터를 끄고, 씨씨앙·양평맘 칸 보호를 해제한 뒤 다시 실행하세요."
+        + (f" 확인된 칸: {samples}" if samples else "")
+    )
 
 
 def plan_matches_sheet(
