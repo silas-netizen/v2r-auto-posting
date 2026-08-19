@@ -221,7 +221,7 @@ def load_affiliate_jobs(
                 article = parse_article(keyword, source)
             except ContentFormatError as exc:
                 raise SheetSchemaError(
-                    f"시트 행 {selected_row_number} 원고 형식 오류: {exc}"
+                    f"시트 행 {row_number} 원고 형식 오류: {exc}"
                 ) from exc
 
             job = AffiliateJob(

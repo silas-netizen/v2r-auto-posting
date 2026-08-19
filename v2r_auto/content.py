@@ -34,6 +34,11 @@ SECTION_PATTERN = re.compile(
     rf"(제목|본문)\s*{MARKDOWN_LABEL_DECORATION}\s*:\s*"
     rf"{MARKDOWN_LABEL_DECORATION}\s*(.*)$"
 )
+SECTION_HEADING_PATTERN = re.compile(
+    rf"^\s*{MARKDOWN_HEADING_PREFIX}"
+    rf"{MARKDOWN_LABEL_DECORATION}\s*"
+    rf"(제목|본문)\s*{MARKDOWN_LABEL_DECORATION}\s*$"
+)
 COMMENT_PATTERN = re.compile(
     rf"^\s*{MARKDOWN_HEADING_PREFIX}"
     rf"{MARKDOWN_LABEL_DECORATION}\s*"
@@ -64,9 +69,15 @@ def parse_article(keyword: str, source: str) -> ParsedArticle:
         if MARKDOWN_SEPARATOR_PATTERN.match(raw_line):
             continue
         section_match = SECTION_PATTERN.match(raw_line)
+        if section_match is None:
+            section_match = SECTION_HEADING_PATTERN.match(raw_line)
         if section_match:
             current = section_match.group(1)
-            initial = section_match.group(2).strip()
+            initial = (
+                section_match.group(2).strip()
+                if section_match.lastindex and section_match.lastindex >= 2
+                else ""
+            )
             if initial:
                 sections[current].append(initial)
             continue

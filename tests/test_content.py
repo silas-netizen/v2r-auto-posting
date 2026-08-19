@@ -125,3 +125,24 @@ def test_parses_bold_sections_and_unnumbered_comment_labels() -> None:
         article.comments[1].children[0].children[0].children[0].label
         == "대대대댓글2"
     )
+
+
+def test_parses_markdown_section_headings_without_colons() -> None:
+    article = parse_article(
+        "투비컷",
+        """# 제목
+투비컷 후기
+
+## 본문
+본문 첫 줄
+본문 둘째 줄
+
+## 댓글1:
+댓글
+### 대댓글1:
+답글""",
+    )
+
+    assert article.title == "투비컷 후기"
+    assert article.body == "본문 첫 줄\n본문 둘째 줄"
+    assert article.comments[0].label == "댓글1"
