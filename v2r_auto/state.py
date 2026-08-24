@@ -173,6 +173,7 @@ class JobStateStore:
             stage="ACCOUNT_ASSIGNED",
             account=account,
             daily_source_id="",
+            daily_scheduled_at="",
             revision_source_id="",
             last_error=error,
         )

@@ -5,6 +5,7 @@ import random
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
@@ -237,6 +238,8 @@ class AffiliateApiPublisher:
         query: dict[str, Any] | None = None,
         *,
         retry_auth: bool = True,
+        max_attempts: int = 5,
+        request_timeout: float = 30,
     ) -> Any:
         url = API_ROOT + path
         if query:
@@ -252,9 +255,9 @@ class AffiliateApiPublisher:
             },
         )
         delays = (10, 30, 120, 300)
-        for attempt in range(5):
+        for attempt in range(max_attempts):
             try:
-                with urlopen(request, timeout=30) as response:
+                with urlopen(request, timeout=request_timeout) as response:
                     raw = response.read()
                 break
             except HTTPError as exc:
@@ -274,13 +277,17 @@ class AffiliateApiPublisher:
                         query,
                         retry_auth=False,
                     )
-                if (exc.code == 429 or exc.code >= 500) and attempt < 4:
+                if (
+                    (exc.code == 429 or exc.code >= 500)
+                    and attempt < max_attempts - 1
+                ):
                     delay = delays[attempt]
                     self.logger.warning(
-                        "V2R 일시 오류 %s: %s초 후 재시도 (%s/5)",
+                        "V2R 일시 오류 %s: %s초 후 재시도 (%s/%s)",
                         exc.code,
                         delay,
                         attempt + 2,
+                        max_attempts,
                     )
                     time.sleep(delay)
                     continue
@@ -288,12 +295,13 @@ class AffiliateApiPublisher:
                     f"V2R 요청 실패 ({exc.code}): {path} - {detail[:300]}"
                 ) from exc
             except (URLError, TimeoutError) as exc:
-                if attempt < 4:
+                if attempt < max_attempts - 1:
                     delay = delays[attempt]
                     self.logger.warning(
-                        "네트워크 오류: %s초 후 재시도 (%s/5)",
+                        "네트워크 오류: %s초 후 재시도 (%s/%s)",
                         delay,
                         attempt + 2,
+                        max_attempts,
                     )
                     time.sleep(delay)
                     continue
@@ -301,6 +309,44 @@ class AffiliateApiPublisher:
         else:
             raise AffiliateApiError(f"V2R 요청 재시도 실패: {path}")
         return json.loads(raw) if raw else None
+
+    @staticmethod
+    def _source_id_from_url(url: str) -> str:
+        match = re.search(r"/nc/articleDetail/([0-9A-Za-z_-]+)", url or "")
+        return match.group(1) if match else ""
+
+    def _probe_source_url(self, url: str) -> bool | None:
+        """Return True for deleted, False for present, and None if uncertain."""
+        source_id = self._source_id_from_url(url)
+        if not source_id:
+            return None
+        try:
+            self._request(
+                "GET",
+                "/naver_cafe_articles/article",
+                query={"source_id": source_id},
+                retry_auth=False,
+                max_attempts=1,
+                request_timeout=4,
+            )
+        except AffiliateApiError as exc:
+            if "DELETED_NAVER_CAFE_ARTICLE_SOURCE" in str(exc):
+                return True
+            return None
+        except Exception:
+            return None
+        return False
+
+    def probe_source_urls(self, urls: set[str]) -> dict[str, bool | None]:
+        """Check saved links concurrently without delaying normal API retries."""
+        unique_urls = {url for url in urls if self._source_id_from_url(url)}
+        if not unique_urls:
+            return {}
+        self._capture_authorization()
+        worker_count = min(6, len(unique_urls))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            statuses = executor.map(self._probe_source_url, unique_urls)
+            return dict(zip(unique_urls, statuses))
 
     @staticmethod
     def _field(item: dict[str, Any], *names: str) -> Any:

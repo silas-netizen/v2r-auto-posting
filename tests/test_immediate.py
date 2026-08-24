@@ -616,6 +616,9 @@ def test_duplicate_skip_reason_is_written_to_live_log(
         def ensure_v2r_login(self, _email, _password):
             return None
 
+        def probe_v2r_source_urls(self, urls):
+            return {url: False for url in urls}
+
         def prepare_immediate_jobs(self, jobs):
             jobs[0].cafe_id = 14567700
             jobs[0].menu_id = 34
@@ -852,9 +855,9 @@ def test_deleted_brand_source_is_removed_and_republished(
         def ensure_v2r_login(self, _email, _password):
             return None
 
-        def is_deleted_immediate_url(self, url):
-            assert url.endswith("deleted-source")
-            return True
+        def probe_v2r_source_urls(self, urls):
+            assert next(iter(urls)).endswith("deleted-source")
+            return {url: True for url in urls}
 
         def prepare_immediate_jobs(self, jobs):
             jobs[0].cafe_id = 14567700

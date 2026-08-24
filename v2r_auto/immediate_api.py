@@ -506,21 +506,10 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         return failed
 
     def is_deleted_source_url(self, url: str) -> bool:
-        match = re.search(r"/nc/articleDetail/([0-9A-Za-z_-]+)", url or "")
-        if not match:
-            return False
-        self._capture_authorization()
-        try:
-            self._request(
-                "GET",
-                "/naver_cafe_articles/article",
-                query={"source_id": match.group(1)},
-            )
-        except AffiliateApiError as exc:
-            if "DELETED_NAVER_CAFE_ARTICLE_SOURCE" in str(exc):
-                return True
-            raise
-        return False
+        status = self.probe_source_urls({url}).get(url)
+        if status is None:
+            raise AffiliateApiError("저장된 V2R 링크 상태를 확인하지 못했습니다")
+        return status
 
     def classify_failure(self, error: Exception) -> tuple[str, bool]:
         text = str(error)

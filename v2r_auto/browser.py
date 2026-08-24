@@ -1625,6 +1625,11 @@ class V2RBrowser:
     def reset_deleted_affiliate_sources(self, job, resume) -> None:
         self._get_affiliate_publisher().reset_deleted_sources(job, resume)
 
+    def probe_v2r_source_urls(
+        self, urls: set[str]
+    ) -> dict[str, bool | None]:
+        return self._get_affiliate_publisher().probe_source_urls(urls)
+
     def _get_immediate_publisher(self):
         from .immediate_api import ImmediateApiPublisher
 

@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from v2r_auto.affiliate_api import (
+    AffiliateApiError,
     AffiliateApiPublisher,
     AffiliateDailyPending,
     CAFE_DELAYS,
@@ -472,6 +473,41 @@ class FakeAffiliateBrowser:
         return ""
 
 
+def test_saved_source_probes_run_in_parallel_with_unknowns_preserved() -> None:
+    class ProbePublisher(AffiliateApiPublisher):
+        def __init__(self):
+            super().__init__(None, logging.getLogger("probe-simulation"))
+            self.authorization = "token"
+
+        def _request(self, method, path, payload=None, query=None, **kwargs):
+            time.sleep(0.06)
+            source_id = query["source_id"]
+            if source_id == "deleted":
+                raise AffiliateApiError(
+                    "code=36 reason=DELETED_NAVER_CAFE_ARTICLE_SOURCE"
+                )
+            if source_id == "uncertain":
+                raise AffiliateApiError("V2R 네트워크 요청 실패")
+            return {"source_id": source_id}
+
+    urls = {
+        f"https://v2r.daboja.im/nc/articleDetail/source-{index}"
+        for index in range(22)
+    }
+    deleted_url = "https://v2r.daboja.im/nc/articleDetail/deleted"
+    uncertain_url = "https://v2r.daboja.im/nc/articleDetail/uncertain"
+    urls.update({deleted_url, uncertain_url})
+
+    started = time.monotonic()
+    results = ProbePublisher().probe_source_urls(urls)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.75
+    assert results[deleted_url] is True
+    assert results[uncertain_url] is None
+    assert sum(value is False for value in results.values()) == 22
+
+
 def test_affiliate_runner_uses_single_revision_flow(tmp_path: Path) -> None:
     job = load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0]
     browser = FakeAffiliateBrowser()
@@ -891,3 +927,72 @@ def test_affiliate_runner_recreates_deleted_source_pair(
     assert browser.calls == 2
     assert browser.resets == 1
     assert job.daily_scheduled_at is not None
+
+
+def test_completed_affiliate_source_is_probed_then_republished(
+    tmp_path: Path,
+) -> None:
+    old_url = "https://v2r.daboja.im/nc/articleDetail/deleted-revision"
+    job = load_affiliate_jobs(
+        write_affiliate_csv(tmp_path, completion_url=old_url),
+        selected_row_number=2,
+    )[0]
+    sheet_url = "https://sheet.example"
+    state_path = tmp_path / "jobs.db"
+    store = JobStateStore(state_path)
+    record = store.load_or_create(sheet_url, job)
+    store.update(
+        record["job_key"],
+        stage="COMPLETED",
+        daily_source_id="deleted-daily",
+        daily_scheduled_at="2026-08-24T10:00:00Z",
+        revision_source_id="deleted-revision",
+    )
+    store.close()
+
+    class CompletedDeletedBrowser(FakeAffiliateBrowser):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def probe_v2r_source_urls(self, urls):
+            assert urls == {old_url}
+            return {old_url: True}
+
+        def publish_affiliate_revision(
+            self,
+            job,
+            dry_run,
+            resume=None,
+            checkpoint=None,
+            wait_control=None,
+        ):
+            assert not dry_run
+            assert not resume.get("daily_source_id")
+            self.calls += 1
+            return "https://v2r.daboja.im/nc/articleDetail/new-revision"
+
+        def update_completion_link(self, sheet_url, row_number, url):
+            return None
+
+    browser = CompletedDeletedBrowser()
+    runner = AffiliateRunner(
+        browser=browser,  # type: ignore[arg-type]
+        report_dir=tmp_path,
+        logger=logging.getLogger("completed-deleted-test"),
+        state_path=state_path,
+    )
+    result, _report = runner.run(
+        jobs=[job],
+        email="",
+        password="",
+        dry_run=False,
+        stop_event=threading.Event(),
+        progress=lambda current, total: None,
+        daily_posts=[DailyPost(2, "양평맘", "일상", "내용")],
+        source_sheet_url=sheet_url,
+    )
+
+    assert browser.calls == 1
+    assert result.jobs[0].status == JobStatus.SUCCESS
+    assert result.jobs[0].revision_url.endswith("new-revision")

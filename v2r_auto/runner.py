@@ -213,13 +213,19 @@ class AffiliateRunner:
                     "2. 데이터 확인부터 다시 실행하세요"
                 )
         state_records: dict[int, tuple[str, dict]] = {}
+        saved_affiliate_urls: dict[int, str] = {}
         if self.state and not dry_run:
             for job in jobs:
                 record = self.state.load_or_create(source_sheet_url, job)
                 state_records[id(job)] = (record["job_key"], record)
                 if record["stage"] == "COMPLETED":
-                    job.status = JobStatus.SKIPPED
-                    job.message = "작업 DB에서 이미 완료됨"
+                    saved_affiliate_urls[id(job)] = (
+                        job.completion_url
+                        or (
+                            "https://v2r.daboja.im/nc/articleDetail/"
+                            + str(record.get("revision_source_id") or "")
+                        )
+                    )
                 elif record.get("account") and not job.account:
                     job.account = record["account"]
                 if record.get("daily_scheduled_at"):
@@ -228,6 +234,60 @@ class AffiliateRunner:
                     )
 
         self.browser.ensure_v2r_login(email, password)
+        if not dry_run:
+            for job in jobs:
+                if job.completion_url:
+                    saved_affiliate_urls.setdefault(id(job), job.completion_url)
+            probe_results = (
+                self.browser.probe_v2r_source_urls(
+                    set(saved_affiliate_urls.values())
+                )
+                if saved_affiliate_urls
+                else {}
+            )
+            for job in jobs:
+                saved_url = saved_affiliate_urls.get(id(job), "")
+                if not saved_url:
+                    continue
+                deleted = probe_results.get(saved_url)
+                record_info = state_records.get(id(job))
+                if deleted is True:
+                    if self.state and record_info:
+                        self.state.reset_sources(
+                            record_info[0],
+                            job.account,
+                            "V2R에서 삭제된 완료 글 자동 초기화",
+                        )
+                        record_info[1].update(
+                            {
+                                "stage": "ACCOUNT_ASSIGNED",
+                                "daily_source_id": "",
+                                "daily_scheduled_at": "",
+                                "revision_source_id": "",
+                            }
+                        )
+                    job.completion_url = ""
+                    job.revision_url = ""
+                    job.daily_scheduled_at = None
+                    job.daily_written_at = None
+                    job.status = JobStatus.PENDING
+                    job.message = ""
+                    self.logger.warning(
+                        "행 %s V2R에서 삭제된 완료 기록을 초기화하고 재발행합니다",
+                        job.row_number,
+                    )
+                    continue
+                job.status = JobStatus.SKIPPED
+                if deleted is None:
+                    job.message = (
+                        "V2R 링크 확인 지연으로 기존 완료 기록 유지"
+                    )
+                    self.logger.warning(
+                        "행 %s 링크를 4초 안에 확인하지 못해 중복 방지를 유지합니다",
+                        job.row_number,
+                    )
+                else:
+                    job.message = "작업 DB에서 이미 완료됨"
         self.browser.start_affiliate_api_run(jobs)
         assigned_jobs = self.browser.assign_affiliate_accounts(jobs)
         for job in assigned_jobs:
@@ -653,6 +713,7 @@ class ImmediateRunner:
                 )
         self.browser.ensure_v2r_login("", "")
         if not dry_run:
+            saved_urls_by_job: dict[int, str] = {}
             for job in jobs:
                 if job.source_kind == "account_test":
                     continue
@@ -663,15 +724,23 @@ class ImmediateRunner:
                 )
                 if not saved_url:
                     continue
-                try:
-                    deleted = self.browser.is_deleted_immediate_url(
-                        saved_url
-                    )
-                except Exception as exc:
+                saved_urls_by_job[id(job)] = saved_url
+            probe_results = (
+                self.browser.probe_v2r_source_urls(
+                    set(saved_urls_by_job.values())
+                )
+                if saved_urls_by_job
+                else {}
+            )
+            for job in jobs:
+                saved_url = saved_urls_by_job.get(id(job), "")
+                if not saved_url:
+                    continue
+                deleted = probe_results.get(saved_url)
+                if deleted is None:
                     self.logger.warning(
-                        "행 %s 저장된 V2R 링크 확인 실패로 기존 중복 방지를 유지합니다: %s",
+                        "행 %s 링크를 4초 안에 확인하지 못해 기존 중복 방지를 유지합니다",
                         job.row_number,
-                        exc,
                     )
                     continue
                 if not deleted:
