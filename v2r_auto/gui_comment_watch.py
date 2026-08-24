@@ -3,11 +3,14 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from .affiliate_api import AffiliateApiError
 from .comment_watch import (
     DEFAULT_SHEET_URL,
     CommentWatchError,
     build_plan,
     load_watch_rows,
+    user_facing_watch_error,
+    v2r_article_is_gone,
 )
 from .gui import AutomationApp
 from .state import AnotherInstanceRunningError, InstanceLock
@@ -162,10 +165,15 @@ class CommentWatchApp(AutomationApp):
                 self.ui_queue.put(("info", ("확인 완료", plan.summary())))
             except CommentWatchError as exc:
                 title = "시트 열 확인" if "열을 찾지" in str(exc) else "확인 실패"
+                self.logger.error("%s", exc)
                 self.ui_queue.put(("error", (title, str(exc))))
             except Exception as exc:
-                self.logger.exception("댓글 확인 실패")
-                self.ui_queue.put(("error", ("실행 실패", str(exc))))
+                message = user_facing_watch_error(exc)
+                if v2r_article_is_gone(exc) or isinstance(exc, AffiliateApiError):
+                    self.logger.error(message)
+                else:
+                    self.logger.exception("댓글 확인 실패")
+                self.ui_queue.put(("error", ("확인 실패", message)))
             finally:
                 self.ui_queue.put(("finished", None))
 

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import csv
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .join_marker import clean_cell, column_letter, normalize_header
+
+logger = logging.getLogger(__name__)
 
 
 SOURCE_ID_PATTERN = re.compile(r"/articleDetail/([0-9A-Za-z]+)")
@@ -17,7 +20,7 @@ MARK_HEADERS = ("일상 글에 댓글", "일상글에댓글")
 PUBLISHED_STATUSES = {"SUCCESS", "DONE"}
 DEFAULT_SHEET_URL = (
     "https://docs.google.com/spreadsheets/d/"
-    "1J8Nq-UQxLzrt3fOqIkZ2HRskZJTFQlOjmFjIh3wlzBs/"
+    "1OwR_LSjO1ofOojldtSIqoxv0gieNSMx_t35_5G1VTCc/"
     "edit?gid=0#gid=0"
 )
 CAFE_HOME_URL = "https://cafe.naver.com"
@@ -54,6 +57,41 @@ COMMENT_LIST_ITEM_PATTERN = re.compile(
 
 class CommentWatchError(ValueError):
     pass
+
+
+def v2r_article_is_gone(exc: BaseException) -> bool:
+    """True when V2R says that cafe article source no longer exists."""
+    text = str(exc)
+    markers = (
+        "DELETED_NAVER_CAFE_ARTICLE_SOURCE",
+        "DELETED_NAVER_CAFE_ARTICLE",
+        "NAVER_CAFE_ARTICLE_NOT_FOUND",
+        "ARTICLE_SOURCE_NOT_FOUND",
+        "NAVER_CAFE_ARTICLE_SOURCE_NOT_FOUND",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _is_login_error(exc: BaseException) -> bool:
+    text = str(exc)
+    return (
+        "네이버 로그인 화면이 열렸습니다" in text
+        or "NAVER_LOGIN_REQUIRED" in text
+        or "로그인이 풀렸" in text
+    )
+
+
+def user_facing_watch_error(exc: BaseException) -> str:
+    if v2r_article_is_gone(exc):
+        return "V2R에서 이미 지워진 글이 있어 이 줄은 건너뛰고 나머지를 확인합니다"
+    text = str(exc)
+    if "TOKEN_ERROR" in text or "로그인 정보" in text:
+        return "V2R 로그인이 풀렸습니다. 다시 로그인한 뒤 확인해 주세요"
+    if "네트워크" in text:
+        return "V2R 연결이 불안정합니다. 잠시 후 다시 확인해 주세요"
+    if isinstance(exc, CommentWatchError):
+        return text
+    return "댓글을 확인하는 중 문제가 났습니다. 잠시 후 다시 확인해 주세요"
 
 
 def source_id_from_url(url: str) -> str:
@@ -236,7 +274,7 @@ def inspect_rows(
 ) -> list[dict[str, str]]:
     """Fill K-column values by opening the daily cafe post."""
     updated: list[dict[str, str]] = []
-    parent_cache: dict[str, ArticleView] = {}
+    parent_cache: dict[str, ArticleView | None] = {}
     for row in rows:
         if should_stop and should_stop():
             raise CommentWatchError("확인을 중지했습니다")
@@ -246,15 +284,59 @@ def inspect_rows(
         if item.get("__skip_reason"):
             updated.append(item)
             continue
-        revision = parse_article_view(fetch_article(item["__source_id"]))
+        try:
+            revision = parse_article_view(fetch_article(item["__source_id"]))
+        except Exception as exc:
+            if v2r_article_is_gone(exc):
+                item["__action"] = "skip"
+                item["__reason"] = "V2R에서 글이 삭제됨"
+                logger.info(
+                    "완료 링크 글이 V2R에서 삭제되어 이 줄은 건너뜁니다: %s",
+                    item["__source_id"],
+                )
+                updated.append(item)
+                continue
+            raise
         decision = decide_row(revision)
         if decision.action == "need_parent":
             parent_id = revision.parent_source_id
             if parent_id not in parent_cache:
-                parent_cache[parent_id] = parse_article_view(fetch_article(parent_id))
-            decision = decide_row(revision, parent_cache[parent_id])
+                try:
+                    parent_cache[parent_id] = parse_article_view(
+                        fetch_article(parent_id)
+                    )
+                except Exception as exc:
+                    if v2r_article_is_gone(exc):
+                        parent_cache[parent_id] = None
+                    else:
+                        raise
+            parent = parent_cache[parent_id]
+            if parent is None:
+                item["__action"] = "skip"
+                item["__reason"] = "V2R에서 원글이 삭제됨"
+                item["__title"] = revision.title
+                logger.info(
+                    "완료 링크의 원글이 V2R에서 삭제되어 이 줄은 건너뜁니다: %s",
+                    parent_id,
+                )
+                updated.append(item)
+                continue
+            decision = decide_row(revision, parent)
         if decision.action == "open_cafe" and decision.cafe_id and decision.article_id:
-            other_count = check_cafe_comments(decision.cafe_id, decision.article_id)
+            try:
+                other_count = check_cafe_comments(decision.cafe_id, decision.article_id)
+            except Exception as exc:
+                if _is_login_error(exc):
+                    raise
+                item["__action"] = "skip"
+                item["__reason"] = "카페 글을 열 수 없음"
+                item["__title"] = revision.title
+                logger.info(
+                    "카페 글 %s를 열 수 없어 이 줄은 건너뜁니다",
+                    decision.article_id,
+                )
+                updated.append(item)
+                continue
             decision = apply_cafe_result(decision, other_count)
         item[mark_header] = decision.cafe_url
         item["__action"] = decision.action

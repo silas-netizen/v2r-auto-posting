@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from v2r_auto.comment_watch import (
+    DEFAULT_SHEET_URL,
     CommentWatchError,
     apply_cafe_result,
     build_plan,
@@ -14,6 +15,8 @@ from v2r_auto.comment_watch import (
     parse_article_view,
     plan_matches_sheet,
     source_id_from_url,
+    user_facing_watch_error,
+    v2r_article_is_gone,
 )
 
 
@@ -270,3 +273,138 @@ def test_plan_matches_sheet_accepts_written_links(tmp_path: Path) -> None:
         {"일상 글에 댓글": ""},
     ]
     assert plan_matches_sheet(headers, sheet_rows, plan) == []
+
+
+DELETED_SOURCE_ERROR = (
+    "V2R 요청 실패 (400): /naver_cafe_articles/article - "
+    '{"error":{"code":36,"reason":"DELETED_NAVER_CAFE_ARTICLE_SOURCE"}}'
+)
+
+
+def test_deleted_reason_is_recognized() -> None:
+    assert v2r_article_is_gone(RuntimeError(DELETED_SOURCE_ERROR))
+    assert not v2r_article_is_gone(RuntimeError("TOKEN_ERROR"))
+    assert "건너" in user_facing_watch_error(RuntimeError(DELETED_SOURCE_ERROR))
+    assert "1OwR_LSjO1ofOojldtSIqoxv0gieNSMx_t35_5G1VTCc" in DEFAULT_SHEET_URL
+
+
+def test_deleted_completion_link_skips_and_later_rows_still_run(tmp_path: Path) -> None:
+    extra = (
+        "키워드D,본문,양평맘,writer,질문형,"
+        "https://v2r.daboja.im/nc/articleDetail/REV3,,,,,\n"
+    )
+    path = write_sheet(tmp_path, extra_row=extra)
+    headers, rows = load_watch_rows(path)
+    payloads = {
+        "REV3": revision_payload(source_id="REV3", parent_source_id="DAILY3"),
+        "DAILY3": daily_payload(source_id="DAILY3", article_id=731500),
+        "REV2": revision_payload(source_id="REV2", parent_source_id=None),
+    }
+
+    def fetch(source_id: str) -> dict:
+        if source_id == "REV1":
+            raise RuntimeError(DELETED_SOURCE_ERROR)
+        return payloads[source_id]
+
+    opened: list[tuple[int, int]] = []
+
+    def check_cafe(cafe_id: int, article_id: int) -> int:
+        opened.append((cafe_id, article_id))
+        return 1
+
+    plan = build_plan(headers, rows, fetch, check_cafe)
+    assert plan.rows[0]["일상 글에 댓글"] == ""
+    assert plan.rows[0]["__action"] == "skip"
+    assert plan.rows[0]["__reason"] == "V2R에서 글이 삭제됨"
+    assert opened == [(22788814, 731500)]
+    assert plan.rows[3]["일상 글에 댓글"] == cafe_article_url(22788814, 731500)
+
+
+def test_deleted_parent_skips_and_later_rows_still_run(tmp_path: Path) -> None:
+    extra = (
+        "키워드D,본문,양평맘,writer,질문형,"
+        "https://v2r.daboja.im/nc/articleDetail/REV3,,,,,\n"
+    )
+    path = write_sheet(tmp_path, extra_row=extra)
+    headers, rows = load_watch_rows(path)
+    payloads = {
+        "REV1": revision_payload(source_id="REV1", status="RESERVED"),
+        "REV3": revision_payload(source_id="REV3", parent_source_id="DAILY3"),
+        "DAILY3": daily_payload(source_id="DAILY3", article_id=731500),
+        "REV2": revision_payload(source_id="REV2", parent_source_id=None),
+    }
+    parent_fetches = {"DAILY1": 0}
+
+    def fetch(source_id: str) -> dict:
+        if source_id == "DAILY1":
+            parent_fetches["DAILY1"] += 1
+            raise RuntimeError(DELETED_SOURCE_ERROR)
+        return payloads[source_id]
+
+    opened: list[tuple[int, int]] = []
+
+    def check_cafe(cafe_id: int, article_id: int) -> int:
+        opened.append((cafe_id, article_id))
+        return 1
+
+    plan = build_plan(headers, rows, fetch, check_cafe)
+    assert parent_fetches["DAILY1"] == 1
+    assert plan.rows[0]["일상 글에 댓글"] == ""
+    assert plan.rows[0]["__action"] == "skip"
+    assert plan.rows[0]["__reason"] == "V2R에서 원글이 삭제됨"
+    assert opened == [(22788814, 731500)]
+    assert plan.rows[3]["일상 글에 댓글"] == cafe_article_url(22788814, 731500)
+
+
+def test_token_error_still_stops_the_run(tmp_path: Path) -> None:
+    path = write_sheet(tmp_path)
+    headers, rows = load_watch_rows(path)
+
+    def fetch(source_id: str) -> dict:
+        raise RuntimeError("V2R 요청 실패 (403): TOKEN_ERROR")
+
+    with pytest.raises(RuntimeError, match="TOKEN_ERROR"):
+        build_plan(headers, rows, fetch, lambda cafe_id, article_id: 0)
+
+
+def test_cafe_open_failure_skips_unless_login(tmp_path: Path) -> None:
+    extra = (
+        "키워드D,본문,양평맘,writer,질문형,"
+        "https://v2r.daboja.im/nc/articleDetail/REV3,,,,,\n"
+    )
+    path = write_sheet(tmp_path, extra_row=extra)
+    headers, rows = load_watch_rows(path)
+    payloads = {
+        "REV1": revision_payload(status="RESERVED"),
+        "DAILY1": daily_payload(),
+        "REV2": revision_payload(source_id="REV2", parent_source_id=None),
+        "REV3": revision_payload(source_id="REV3", parent_source_id="DAILY3"),
+        "DAILY3": daily_payload(source_id="DAILY3", article_id=731500),
+    }
+
+    def check_cafe(cafe_id: int, article_id: int) -> int:
+        if article_id == 730069:
+            raise CommentWatchError("카페 글 730069을 열지 못했습니다. 네이버 로그인과 카페 가입을 확인해 주세요")
+        return 1
+
+    plan = build_plan(headers, rows, payloads.__getitem__, check_cafe)
+    assert plan.rows[0]["일상 글에 댓글"] == ""
+    assert plan.rows[0]["__action"] == "skip"
+    assert plan.rows[0]["__reason"] == "카페 글을 열 수 없음"
+    assert plan.rows[3]["일상 글에 댓글"] == cafe_article_url(22788814, 731500)
+
+
+def test_cafe_login_error_still_stops_the_run(tmp_path: Path) -> None:
+    path = write_sheet(tmp_path)
+    headers, rows = load_watch_rows(path)
+    payloads = {
+        "REV1": revision_payload(status="RESERVED"),
+        "DAILY1": daily_payload(),
+        "REV2": revision_payload(source_id="REV2", parent_source_id=None),
+    }
+
+    def check_cafe(cafe_id: int, article_id: int) -> int:
+        raise CommentWatchError("네이버 로그인 화면이 열렸습니다. 다시 로그인해 주세요")
+
+    with pytest.raises(CommentWatchError, match="로그인"):
+        build_plan(headers, rows, payloads.__getitem__, check_cafe)
