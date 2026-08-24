@@ -508,6 +508,33 @@ def test_saved_source_probes_run_in_parallel_with_unknowns_preserved() -> None:
     assert sum(value is False for value in results.values()) == 22
 
 
+def test_saved_source_probe_stops_after_first_full_outage_batch() -> None:
+    class OutagePublisher(AffiliateApiPublisher):
+        def __init__(self):
+            super().__init__(None, logging.getLogger("outage-simulation"))
+            self.authorization = "token"
+            self.calls = 0
+
+        def _request(self, method, path, payload=None, query=None, **kwargs):
+            self.calls += 1
+            time.sleep(0.03)
+            raise AffiliateApiError("V2R 네트워크 요청 실패")
+
+    urls = {
+        f"https://v2r.daboja.im/nc/articleDetail/source-{index}"
+        for index in range(100)
+    }
+    publisher = OutagePublisher()
+    started = time.monotonic()
+    results = publisher.probe_source_urls(urls)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.3
+    assert publisher.calls == 6
+    assert len(results) == 100
+    assert set(results.values()) == {None}
+
+
 def test_affiliate_runner_uses_single_revision_flow(tmp_path: Path) -> None:
     job = load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0]
     browser = FakeAffiliateBrowser()

@@ -315,7 +315,11 @@ class AffiliateApiPublisher:
         match = re.search(r"/nc/articleDetail/([0-9A-Za-z_-]+)", url or "")
         return match.group(1) if match else ""
 
-    def _probe_source_url(self, url: str) -> bool | None:
+    def _probe_source_url(
+        self,
+        url: str,
+        request_timeout: float = 4,
+    ) -> bool | None:
         """Return True for deleted, False for present, and None if uncertain."""
         source_id = self._source_id_from_url(url)
         if not source_id:
@@ -327,7 +331,7 @@ class AffiliateApiPublisher:
                 query={"source_id": source_id},
                 retry_auth=False,
                 max_attempts=1,
-                request_timeout=4,
+                request_timeout=request_timeout,
             )
         except AffiliateApiError as exc:
             if "DELETED_NAVER_CAFE_ARTICLE_SOURCE" in str(exc):
@@ -344,9 +348,39 @@ class AffiliateApiPublisher:
             return {}
         self._capture_authorization()
         worker_count = min(6, len(unique_urls))
+        pending_urls = list(unique_urls)
+        results: dict[str, bool | None] = {}
+        deadline = time.monotonic() + 8
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            statuses = executor.map(self._probe_source_url, unique_urls)
-            return dict(zip(unique_urls, statuses))
+            for offset in range(0, len(pending_urls), worker_count):
+                batch = pending_urls[offset : offset + worker_count]
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    results.update({url: None for url in batch})
+                    results.update(
+                        {
+                            url: None
+                            for url in pending_urls[offset + worker_count :]
+                        }
+                    )
+                    break
+                timeout = min(4.0, max(0.1, remaining))
+                statuses = list(
+                    executor.map(
+                        lambda url: self._probe_source_url(url, timeout),
+                        batch,
+                    )
+                )
+                results.update(zip(batch, statuses))
+                if all(status is None for status in statuses):
+                    results.update(
+                        {
+                            url: None
+                            for url in pending_urls[offset + worker_count :]
+                        }
+                    )
+                    break
+        return results
 
     @staticmethod
     def _field(item: dict[str, Any], *names: str) -> Any:
