@@ -743,7 +743,14 @@ def append_master_rows(path: str | Path, rows: list[MasterRow]) -> int:
         target_rows = _target_rows_for_paste(sheet, info, rows)
         for row_number, row in zip(target_rows, rows):
             _write_master_row(sheet, row_number, info.start_column, row)
-        workbook.save(info.path)
+        try:
+            workbook.save(info.path)
+        except PermissionError as exc:
+            raise GatlingPasteError(
+                "기관총 엑셀 파일이 열려 있거나 Google Drive가 사용 중입니다. "
+                "Excel에서 파일을 완전히 닫고 동기화가 끝난 뒤 다시 눌러 주세요: "
+                f"{info.path}"
+            ) from exc
         return target_rows[0]
     finally:
         workbook.close()
