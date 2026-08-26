@@ -653,6 +653,146 @@ class AffiliateApiPublisher:
             )
         return assigned
 
+    @classmethod
+    def _account_rows(cls, payload: Any) -> dict[str, dict[str, Any]]:
+        rows: dict[str, dict[str, Any]] = {}
+        for item in _walk_dicts(payload):
+            account = str(
+                cls._field(item, "login_id", "naver_login_id", "loginId") or ""
+            )
+            if account and (
+                "level_info" in item
+                or "levelInfo" in item
+                or cls._field(item, "member_key", "memberKey")
+            ):
+                rows[account] = item
+        return rows
+
+    @staticmethod
+    def _member_grade_ready(item: dict[str, Any] | None) -> bool:
+        if not item:
+            return False
+        level = item.get("level_info") or item.get("levelInfo")
+        if not isinstance(level, dict):
+            return False
+        return bool(
+            str(
+                level.get("member_level_name")
+                or level.get("memberLevelName")
+                or ""
+            ).strip()
+        )
+
+    def refresh_assigned_account_grades(
+        self,
+        jobs: list[AffiliateJob],
+    ) -> list[AffiliateJob]:
+        """Refresh missing member grades once per cafe/account before writing."""
+        self._capture_authorization()
+        pending_by_cafe: dict[str, list[AffiliateJob]] = {}
+        for job in jobs:
+            if job.status == JobStatus.PENDING and job.account:
+                pending_by_cafe.setdefault(job.cafe, []).append(job)
+
+        failed_jobs: list[AffiliateJob] = []
+        for cafe_name, cafe_jobs in pending_by_cafe.items():
+            config = CAFE_DESTINATIONS.get(cafe_name)
+            if not config:
+                continue
+            cafe_id = int(config["cafe_id"])
+            assigned_accounts = {job.account for job in cafe_jobs}
+            status = self._request(
+                "GET",
+                "/naver_cafes/naver_join_cafe",
+                query={"cafe_id": cafe_id},
+            )
+            rows = self._account_rows(status)
+            missing = sorted(
+                account
+                for account in assigned_accounts
+                if not self._member_grade_ready(rows.get(account))
+            )
+            if not missing:
+                self.logger.info(
+                    "%s 발행계정 멤버등급 확인 완료: %s개",
+                    cafe_name,
+                    len(assigned_accounts),
+                )
+                continue
+
+            self.logger.info(
+                "%s 멤버등급 미확인 계정 API 갱신 시작: %s개",
+                cafe_name,
+                len(missing),
+            )
+            refresh_errors: dict[str, str] = {}
+            for account in missing:
+                try:
+                    self._request(
+                        "PUT",
+                        "/naver_cafes/naver_join_cafe/sync/account",
+                        {
+                            "cafe_id": cafe_id,
+                            "naver_login_id": account,
+                        },
+                    )
+                    self.logger.info(
+                        "%s 계정 멤버등급 API 갱신 요청 완료: %s",
+                        cafe_name,
+                        account,
+                    )
+                except Exception as exc:
+                    refresh_errors[account] = str(exc)
+                    self.logger.warning(
+                        "%s 계정 멤버등급 API 갱신 실패: %s / %s",
+                        cafe_name,
+                        account,
+                        exc,
+                    )
+
+            unresolved = set(missing) - set(refresh_errors)
+            for attempt in range(3):
+                if not unresolved:
+                    break
+                refreshed = self._request(
+                    "GET",
+                    "/naver_cafes/naver_join_cafe",
+                    query={"cafe_id": cafe_id},
+                )
+                refreshed_rows = self._account_rows(refreshed)
+                unresolved = {
+                    account
+                    for account in unresolved
+                    if not self._member_grade_ready(refreshed_rows.get(account))
+                }
+                if unresolved and attempt < 2:
+                    time.sleep(1)
+
+            for account in unresolved:
+                refresh_errors[account] = "갱신 후에도 멤버등급 정보가 표시되지 않음"
+
+            for job in cafe_jobs:
+                error = refresh_errors.get(job.account)
+                if not error:
+                    continue
+                job.status = JobStatus.FAILED
+                job.message = f"계정 멤버등급 갱신 실패: {job.account} / {error[:150]}"
+                failed_jobs.append(job)
+                self.logger.error(
+                    "행 %s 발행 전 계정 멤버등급 확인 실패: %s",
+                    job.row_number,
+                    job.message,
+                )
+
+            refreshed_count = len(missing) - len(refresh_errors)
+            self.logger.info(
+                "%s 멤버등급 사전 갱신 완료: 성공 %s / 실패 %s",
+                cafe_name,
+                refreshed_count,
+                len(refresh_errors),
+            )
+        return failed_jobs
+
     def _pick_account(self, cafe: str, account_type: str) -> str:
         key = (cafe, account_type)
         pool = self.account_pools.get(key, [])

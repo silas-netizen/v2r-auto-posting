@@ -290,6 +290,8 @@ class AffiliateRunner:
                     job.message = "작업 DB에서 이미 완료됨"
         self.browser.start_affiliate_api_run(jobs)
         assigned_jobs = self.browser.assign_affiliate_accounts(jobs)
+        if not dry_run:
+            self.browser.refresh_affiliate_account_grades(jobs)
         for job in assigned_jobs:
             try:
                 self.browser.update_sheet_cell(

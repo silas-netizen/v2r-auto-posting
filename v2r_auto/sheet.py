@@ -239,6 +239,12 @@ def load_affiliate_jobs(
                 ),
                 completion_url=_clean_cell(row.get(AFFILIATE_COLUMNS["completion_url"])),
             )
+            if job.completion_url and not re.match(
+                r"^https?://",
+                job.completion_url,
+                flags=re.IGNORECASE,
+            ):
+                job.completion_url = ""
             if not job.account and job.account_type not in {"실명", "비실명"}:
                 job.status = JobStatus.SKIPPED
                 job.message = "D열 작성계정과 H열 계정유형이 모두 비어 있음"

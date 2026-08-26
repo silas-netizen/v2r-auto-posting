@@ -1616,6 +1616,13 @@ class V2RBrowser:
     ) -> list[AffiliateJob]:
         return self._get_affiliate_publisher().assign_accounts(jobs)
 
+    def refresh_affiliate_account_grades(
+        self, jobs: list[AffiliateJob]
+    ) -> list[AffiliateJob]:
+        return self._get_affiliate_publisher().refresh_assigned_account_grades(
+            jobs
+        )
+
     def classify_affiliate_failure(self, error: Exception) -> tuple[str, bool]:
         return self._get_affiliate_publisher().classify_failure(error)
 

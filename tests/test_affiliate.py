@@ -51,6 +51,19 @@ def test_completion_link_skips_affiliate_row(tmp_path: Path) -> None:
     assert jobs[0].status == JobStatus.SKIPPED
 
 
+def test_failure_text_in_completion_column_is_retried(tmp_path: Path) -> None:
+    jobs = load_affiliate_jobs(
+        write_affiliate_csv(
+            tmp_path,
+            "실패: 사진 첨부에 실패하여 사진 없는 글 등록을 중단했습니다",
+        ),
+        selected_row_number=2,
+    )
+
+    assert jobs[0].status == JobStatus.PENDING
+    assert jobs[0].completion_url == ""
+
+
 def test_missing_account_and_type_marks_affiliate_row_skipped(tmp_path: Path) -> None:
     path = tmp_path / "affiliate.csv"
     path.write_text(
@@ -447,6 +460,132 @@ def test_comment_bundle_collision_shifts_all_roots_in_source_order(
     ]
 
 
+def test_missing_member_grades_refresh_by_cafe_before_publish(
+    tmp_path: Path,
+) -> None:
+    jobs = [
+        load_affiliate_jobs(
+            write_affiliate_csv(tmp_path),
+            selected_row_number=2,
+        )[0]
+        for _ in range(3)
+    ]
+    jobs[0].cafe = "씨씨앙"
+    jobs[0].account = "oaxastera"
+    jobs[1].cafe = "씨씨앙"
+    jobs[1].account = "already-ready"
+    jobs[2].cafe = "양평맘"
+    jobs[2].account = "yang-missing"
+
+    class GradeRefreshPublisher(AffiliateApiPublisher):
+        def __init__(self):
+            super().__init__(None, logging.getLogger("grade-refresh-test"))
+            self.authorization = "token"
+            self.refreshed: set[tuple[int, str]] = set()
+            self.put_payloads: list[dict] = []
+
+        def _request(self, method, path, payload=None, query=None, **kwargs):
+            assert path in {
+                "/naver_cafes/naver_join_cafe",
+                "/naver_cafes/naver_join_cafe/sync/account",
+            }
+            if method == "PUT":
+                self.put_payloads.append(payload)
+                self.refreshed.add(
+                    (int(payload["cafe_id"]), payload["naver_login_id"])
+                )
+                return {"naver_account": payload}
+            cafe_id = int(query["cafe_id"])
+            accounts = (
+                ("oaxastera", "already-ready")
+                if cafe_id == 25016228
+                else ("yang-missing",)
+            )
+            return {
+                "naver_join_cafe": {
+                    "cafe_id": cafe_id,
+                    "naver_accounts": [
+                        {
+                            "login_id": account,
+                            "member_key": f"key-{account}",
+                            "level_info": {
+                                "member_level": 1,
+                                "member_level_name": (
+                                    "새싹"
+                                    if (cafe_id, account) in self.refreshed
+                                    or account == "already-ready"
+                                    else ""
+                                ),
+                            },
+                        }
+                        for account in accounts
+                    ],
+                }
+            }
+
+    publisher = GradeRefreshPublisher()
+    failed = publisher.refresh_assigned_account_grades(jobs)
+
+    assert failed == []
+    assert publisher.put_payloads == [
+        {"cafe_id": 25016228, "naver_login_id": "oaxastera"},
+        {"cafe_id": 22788814, "naver_login_id": "yang-missing"},
+    ]
+    assert all(job.status == JobStatus.PENDING for job in jobs)
+
+
+def test_grade_refresh_failure_only_blocks_affected_account(
+    tmp_path: Path,
+) -> None:
+    failed_job = load_affiliate_jobs(
+        write_affiliate_csv(tmp_path),
+        selected_row_number=2,
+    )[0]
+    failed_job.cafe = "씨씨앙"
+    failed_job.account = "oaxastera"
+    healthy_job = load_affiliate_jobs(
+        write_affiliate_csv(tmp_path),
+        selected_row_number=2,
+    )[0]
+    healthy_job.cafe = "씨씨앙"
+    healthy_job.account = "healthy"
+
+    class FailingGradeRefreshPublisher(AffiliateApiPublisher):
+        def __init__(self):
+            super().__init__(None, logging.getLogger("grade-failure-test"))
+            self.authorization = "token"
+
+        def _request(self, method, path, payload=None, query=None, **kwargs):
+            if method == "PUT":
+                raise AffiliateApiError("등급 조회 실패")
+            return {
+                "naver_join_cafe": {
+                    "cafe_id": 25016228,
+                    "naver_accounts": [
+                        {
+                            "login_id": "oaxastera",
+                            "member_key": "key-oaxastera",
+                            "level_info": {"member_level_name": ""},
+                        },
+                        {
+                            "login_id": "healthy",
+                            "member_key": "key-healthy",
+                            "level_info": {"member_level_name": "새싹"},
+                        },
+                    ],
+                }
+            }
+
+    failed = FailingGradeRefreshPublisher().refresh_assigned_account_grades(
+        [failed_job, healthy_job]
+    )
+
+    assert failed == [failed_job]
+    assert failed_job.status == JobStatus.FAILED
+    assert "oaxastera" in failed_job.message
+    assert healthy_job.status == JobStatus.PENDING
+
+
 class FakeAffiliateBrowser:
     def __init__(self) -> None:
         self.published = []
@@ -458,6 +597,9 @@ class FakeAffiliateBrowser:
         return None
 
     def assign_affiliate_accounts(self, jobs):
+        return []
+
+    def refresh_affiliate_account_grades(self, jobs):
         return []
 
     def publish_affiliate_revision(
