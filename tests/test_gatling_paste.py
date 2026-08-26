@@ -4,12 +4,14 @@ import random
 import pytest
 from openpyxl import Workbook, load_workbook
 
+from v2r_auto.cafe_catalog import normalized_name
 from v2r_auto.content import CommentNode, ParsedArticle, parse_article
 from v2r_auto.gatling_accounts import recognize_proxy_workbook
 from v2r_auto.images import ResolvedImage
 from v2r_auto.gatling_paste import (
     AFFILIATE_BOARD_LINKS,
     AFFILIATE_EXACT_BOARDS,
+    SELF_OWNED_BOARD_TARGETS,
     MASTER_HEADER_ROW,
     MASTER_HEADERS,
     TYPE_COMMENT,
@@ -28,10 +30,12 @@ from v2r_auto.gatling_paste import (
     exact_board_name,
     load_gatling_brand_jobs,
     paste_manuscripts_into_gatling,
+    photo_wash_batch_folder,
     recognize_gatling_workbook,
     replace_image_tokens,
     reply_target_value,
     require_writable_gatling,
+    self_owned_board_target,
 )
 from v2r_auto.models import DailyPost
 
@@ -208,7 +212,10 @@ def test_self_owned_manuscript_is_new_post_only() -> None:
     assert types[0] == TYPE_NEW_POST
     assert TYPE_EDIT_POST not in types
     assert rows[0].title == "실제 원고 제목"
-    assert rows[0].board_name == "가입인사"
+    assert rows[0].board_name == "약과 영양, 병원의 기억"
+    assert rows[0].link == SELF_OWNED_BOARD_TARGETS[
+        normalized_name("고요한 아침")
+    ][1]
     assert rows[0].hashtag == "단식원 가격"
     assert all(not row.hashtag for row in rows[1:])
 
@@ -226,7 +233,48 @@ def test_affiliate_new_post_gets_board_link_only() -> None:
     assert yang[0].link == AFFILIATE_BOARD_LINKS["양평맘"]
     assert all(row.link != AFFILIATE_BOARD_LINKS["양평맘"] for row in yang[1:])
     assert self_owned[0].type == TYPE_NEW_POST
-    assert self_owned[0].link is None
+    assert self_owned[0].link == SELF_OWNED_BOARD_TARGETS[
+        normalized_name("고요한 아침")
+    ][1]
+
+
+@pytest.mark.parametrize(
+    ("cafe", "board", "url"),
+    [
+        (
+            "고요한 아침",
+            "약과 영양, 병원의 기억",
+            "https://cafe.naver.com/f-e/cafes/14567700/menus/29",
+        ),
+        (
+            "헬씨트리",
+            "자유로운 건강 수다방",
+            "https://cafe.naver.com/f-e/cafes/23708088/menus/27",
+        ),
+        (
+            "글로시 마이",
+            "다이어트 · 운동 톡",
+            "https://cafe.naver.com/f-e/cafes/15175096/menus/50?viewType=L",
+        ),
+        (
+            "웨딩노트",
+            "뷰티 · 다이어트",
+            "https://cafe.naver.com/f-e/cafes/15441090/menus/32?viewType=L",
+        ),
+        (
+            "러브인썸",
+            "뷰티&미용",
+            "https://cafe.naver.com/f-e/cafes/26616683/menus/18?viewType=L",
+        ),
+        (
+            "마이웨딩드림",
+            "뷰티&다이어트",
+            "https://cafe.naver.com/f-e/cafes/26680163/menus/1?viewType=L",
+        ),
+    ],
+)
+def test_self_owned_cafe_board_targets(cafe: str, board: str, url: str) -> None:
+    assert self_owned_board_target(cafe) == (board, url)
 
 
 def test_affiliate_without_daily_post_raises() -> None:
@@ -278,7 +326,8 @@ def test_build_assigns_daily_posts_and_writes_master_columns(tmp_path: Path) -> 
     self_owned_new = next(
         row
         for row in result.rows
-        if row.type == TYPE_NEW_POST and row.board_name == "가입인사"
+        if row.type == TYPE_NEW_POST
+        and row.board_name == "약과 영양, 병원의 기억"
     )
     assert self_owned_new.title == "자사 제목"
 
@@ -742,6 +791,17 @@ def test_collected_images_use_pipe_separated_paths(tmp_path: Path) -> None:
 def test_image_folder_sits_next_to_the_excel(tmp_path: Path) -> None:
     path = tmp_path / "기관총 카페봇 복불용.xlsm"
     assert gatling_image_folder(path) == tmp_path / "기관총 카페봇 복불용_images"
+
+
+def test_photo_wash_batch_folder_uses_google_drive_image_root() -> None:
+    assert photo_wash_batch_folder(
+        r"G:\내 드라이브\image",
+        "20260826_194900",
+    ) == (
+        Path(r"G:\내 드라이브\image")
+        / "기관총_선택이미지"
+        / "20260826_194900"
+    )
 
 
 def test_manuscript_row_gets_hashtag_and_image_location() -> None:

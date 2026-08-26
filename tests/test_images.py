@@ -121,6 +121,43 @@ def test_patsooni_keyword_matches_filename_without_spaces(tmp_path: Path) -> Non
     assert [item.occurrence for item in resolved] == [0, 1]
 
 
+def test_other_brand_always_uses_random_keyword_folder(tmp_path: Path) -> None:
+    job = make_job("{연고사진}", brand="뉴더미스", keyword="치질 연고")
+
+    class FakeResolver(GoogleDriveImageResolver):
+        def __init__(self):
+            super().__init__(
+                tmp_path,
+                logging.getLogger("test"),
+                root_folder_id="root",
+                rng=random.Random(1),
+            )
+            self.items = {
+                "root": [DriveItem("brand", "뉴더미스", True)],
+                "brand": [
+                    DriveItem("keyword", "키워드", True),
+                    DriveItem("legacy", "연고사진", True),
+                ],
+                "keyword": [
+                    DriveItem("one", "랜덤1.jpg", False),
+                    DriveItem("two", "랜덤2.jpg", False),
+                ],
+                "legacy": [DriveItem("old", "기존규칙.jpg", False)],
+            }
+
+        def _list_folder(self, folder_id: str):
+            return self.items[folder_id]
+
+        def _download(self, item: DriveItem) -> Path:
+            return tmp_path / item.name
+
+    resolved = FakeResolver().resolve(job)
+
+    assert len(resolved) == 1
+    assert resolved[0].file_id in {"one", "two"}
+    assert resolved[0].file_id != "old"
+
+
 def test_list_folder_reads_embedded_view_before_first_screen(tmp_path: Path) -> None:
     embed = """
     <div class="flip-entry" id="entry-right" role="link">

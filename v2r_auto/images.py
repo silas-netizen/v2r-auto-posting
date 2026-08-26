@@ -246,7 +246,8 @@ class GoogleDriveImageResolver:
         resolved: list[ResolvedImage] = []
         for occurrence, marker in enumerate(markers):
             normalized = normalize_image_marker(marker)
-            folder = self._image_folder(brand_folder.item_id, marker)
+            folder_marker = marker if brand == "팥순이" else "키워드"
+            folder = self._image_folder(brand_folder.item_id, folder_marker)
             if not folder:
                 self.logger.warning(
                     "행 %s {%s} 폴더를 찾지 못해 해당 이미지 생략",
