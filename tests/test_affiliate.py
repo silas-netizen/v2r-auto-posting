@@ -509,9 +509,14 @@ def test_missing_member_grades_refresh_by_cafe_before_publish(
                             "login_id": account,
                             "member_key": f"key-{account}",
                             "level_info": {
-                                "member_level": 1,
-                                "member_level_name": (
-                                    "새싹"
+                                "member_level": (
+                                    128
+                                    if (cafe_id, account) in self.refreshed
+                                    or account == "already-ready"
+                                    else 1
+                                ),
+                                "member_level_icon_url": (
+                                    "Lv2 회원"
                                     if (cafe_id, account) in self.refreshed
                                     or account == "already-ready"
                                     else ""

@@ -675,12 +675,20 @@ class AffiliateApiPublisher:
         level = item.get("level_info") or item.get("levelInfo")
         if not isinstance(level, dict):
             return False
+        label = str(
+            level.get("member_level_name")
+            or level.get("memberLevelName")
+            or level.get("member_level_icon_url")
+            or level.get("memberLevelIconUrl")
+            or ""
+        ).strip()
+        member_level = level.get("member_level") or level.get("memberLevel")
         return bool(
-            str(
-                level.get("member_level_name")
-                or level.get("memberLevelName")
-                or ""
-            ).strip()
+            label
+            or (
+                isinstance(member_level, int)
+                and member_level > 1
+            )
         )
 
     def refresh_assigned_account_grades(
