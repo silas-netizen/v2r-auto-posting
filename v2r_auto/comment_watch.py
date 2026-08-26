@@ -85,6 +85,12 @@ def user_facing_watch_error(exc: BaseException) -> str:
     if v2r_article_is_gone(exc):
         return "V2R에서 이미 지워진 글이 있어 이 줄은 건너뛰고 나머지를 확인합니다"
     text = str(exc)
+    if "시트 표시를 확인하지 못했습니다" in text:
+        return (
+            "이번에 다른 회원 댓글이 없어 K열을 비워야 하는데, "
+            "예전에 넣어 둔 카페 링크가 남아 있습니다. "
+            "새 프로그램을 받으면 그 칸을 직접 비웁니다"
+        )
     if "TOKEN_ERROR" in text or "로그인 정보" in text:
         return "V2R 로그인이 풀렸습니다. 다시 로그인한 뒤 확인해 주세요"
     if "네트워크" in text:
@@ -376,6 +382,18 @@ class CommentWatchPlan:
             lines = [(row.get(self.mark_header) or "") for row in piece]
             chunks.append((2 + start, "\n".join(lines) + ("\n" if lines else "")))
         return chunks
+
+    def leftover_mark_cells(
+        self, sheet_rows: list[dict[str, str]]
+    ) -> list[tuple[int, str]]:
+        leftovers: list[tuple[int, str]] = []
+        for expected, actual in zip(self.rows, sheet_rows, strict=False):
+            wanted = clean_cell(expected.get(self.mark_header))
+            got = clean_cell(actual.get(self.mark_header))
+            if wanted == got:
+                continue
+            leftovers.append((int(expected["__row"]), wanted))
+        return leftovers
 
     def summary(self) -> str:
         return "\n".join(

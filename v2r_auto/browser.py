@@ -22,6 +22,7 @@ from selenium.common.exceptions import (
     NoSuchWindowException,
     TimeoutException,
     UnexpectedAlertPresentException,
+    WebDriverException,
 )
 from selenium.webdriver import ChromeOptions
 from selenium.webdriver.common.action_chains import ActionChains
@@ -463,29 +464,142 @@ class V2RBrowser:
             f"카페 글 {article_id}을 열지 못했습니다. 네이버 로그인과 카페 가입을 확인해 주세요"
         )
 
-    def write_comment_marks(self, sheet_url: str, plan) -> None:
+    def _open_sheet_edit(self, sheet_url: str) -> None:
+        """Open the editable tab so Chrome has a live Google session."""
+        self.start()
+        assert self.driver
+        target = self._sheet_range_url(sheet_url, "A", 1)
+        self._navigate(target, self.google_handle)
+        self.google_handle = self.driver.current_window_handle
+        self.wait.until(
+            lambda driver: driver.execute_script("return document.readyState") == "complete"
+        )
+        self.wait.until(EC.presence_of_element_located((By.ID, "waffle-rich-text-editor")))
+
+    def _google_sheet_auth(self) -> tuple[str, str, str]:
+        """Reuse the open Chrome Google login. Never log the token."""
+        from .sheets_write import cookie_header_and_sapisid, extract_bearer_tokens
+
+        assert self.driver
+        bearer = ""
+        try:
+            entries = []
+            for item in self.driver.get_log("performance"):
+                if isinstance(item, dict):
+                    entries.append(item)
+            tokens = extract_bearer_tokens(entries)
+            if tokens:
+                bearer = tokens[-1]
+        except WebDriverException:
+            bearer = ""
+        cookie_header, sapisid = cookie_header_and_sapisid(self.driver.get_cookies())
+        return bearer, cookie_header, sapisid
+
+    def _write_comment_via_sheets_api(self, sheet_url: str, plan) -> bool:
+        from .sheets_write import (
+            build_comment_watch_batch_update,
+            post_sheets_batch_update,
+            sheet_gid_from_url,
+            spreadsheet_id_from_url,
+        )
+
+        if not plan.rows:
+            return True
+        payload = build_comment_watch_batch_update(plan, sheet_gid_from_url(sheet_url))
+        spreadsheet_id = spreadsheet_id_from_url(sheet_url)
+        self._open_sheet_edit(sheet_url)
+        time.sleep(1.2)
+        bearer, cookie_header, sapisid = self._google_sheet_auth()
+        errors: list[str] = []
+        if bearer:
+            try:
+                post_sheets_batch_update(spreadsheet_id, payload, bearer=bearer)
+                return True
+            except Exception as exc:
+                errors.append(str(exc))
+        if sapisid:
+            try:
+                post_sheets_batch_update(
+                    spreadsheet_id,
+                    payload,
+                    cookie_header=cookie_header,
+                    sapisid=sapisid,
+                )
+                return True
+            except Exception as exc:
+                errors.append(str(exc))
+        if errors:
+            self.logger.warning("시트 바로 저장 실패: %s", errors[-1][:180])
+        else:
+            self.logger.warning("시트 바로 저장에 쓸 Google 권한이 없습니다")
+        return False
+
+    def _verify_comment_marks(
+        self, sheet_url: str, plan, *, downloads: int = 6
+    ) -> tuple[list[str], list[dict[str, str]]]:
         from .comment_watch import load_watch_rows, plan_matches_sheet
 
-        start_column, _ = plan.start_cell()
-        for start_row, tsv in plan.paste_chunks():
-            self.paste_sheet_columns(sheet_url, start_column, start_row, tsv)
         last_errors: list[str] = []
-        for attempt in range(1, 7):
+        rows: list[dict[str, str]] = []
+        for attempt in range(1, downloads + 1):
             time.sleep(1.5)
             path = self.download_sheet(sheet_url)
             headers, rows = load_watch_rows(path)
             last_errors = plan_matches_sheet(headers, rows, plan)
             if not last_errors:
-                self.logger.info("시트 댓글 표시를 확인했습니다")
-                return
+                return [], rows
             self.logger.warning(
-                "시트 확인 재시도 (%s/6): %s",
+                "시트 확인 재시도 (%s/%s): %s",
                 attempt,
+                downloads,
                 last_errors[0],
             )
-        raise AutomationError(
-            "시트 표시를 확인하지 못했습니다: " + "; ".join(last_errors[:5])
-        )
+        return last_errors, rows
+
+    def _write_comment_leftovers(self, sheet_url: str, plan, sheet_rows) -> None:
+        leftovers = plan.leftover_mark_cells(sheet_rows)
+        if not leftovers:
+            return
+        column, _ = plan.start_cell()
+        self.logger.info("남아 있는 K열 %s칸을 다시 맞춥니다", len(leftovers))
+        for row_number, value in leftovers:
+            self.update_sheet_cell(
+                sheet_url,
+                column,
+                row_number,
+                value,
+                verify_checks=4,
+            )
+
+    def write_comment_marks(self, sheet_url: str, plan) -> None:
+        self.start()
+        saved = self._write_comment_via_sheets_api(sheet_url, plan)
+        if saved:
+            self.logger.info("K열을 시트에 바로 저장했습니다")
+        else:
+            self.logger.info("바로 저장이 안 되어 한 번 붙여넣습니다")
+            start_column, _ = plan.start_cell()
+            for start_row, tsv in plan.paste_chunks():
+                self.paste_sheet_columns(sheet_url, start_column, start_row, tsv)
+
+        last_errors, rows = self._verify_comment_marks(sheet_url, plan)
+        if last_errors:
+            if saved:
+                self.logger.info("저장 확인이 안 되어 한 번 더 바로 저장합니다")
+                self._write_comment_via_sheets_api(sheet_url, plan)
+            else:
+                self.logger.info("붙여넣기 확인이 안 되어 바로 저장을 다시 시도합니다")
+                if not self._write_comment_via_sheets_api(sheet_url, plan):
+                    self._write_comment_leftovers(sheet_url, plan, rows)
+            last_errors, rows = self._verify_comment_marks(sheet_url, plan, downloads=4)
+        if last_errors:
+            self._write_comment_leftovers(sheet_url, plan, rows)
+            last_errors, _ = self._verify_comment_marks(sheet_url, plan, downloads=3)
+        if last_errors:
+            raise AutomationError(
+                "시트 표시를 확인하지 못했습니다: " + "; ".join(last_errors[:5])
+            )
+        self.logger.info("시트 댓글 표시를 확인했습니다")
 
     def write_join_marks(self, sheet_url: str, plan) -> None:
         from .join_marker import plan_matches_sheet, load_account_rows
@@ -578,15 +692,21 @@ class V2RBrowser:
                         editor = editors[0]
                         editor.click()
                         editor.send_keys(Keys.CONTROL, "a")
-                        editor.send_keys(value)
+                        if value:
+                            editor.send_keys(value)
+                        else:
+                            editor.send_keys(Keys.DELETE)
                         editor.send_keys(Keys.ENTER)
                     else:
                         # Sheets keeps a hidden rich-text editor while a grid
                         # cell is selected. Send typing to its global active-cell
                         # keyboard handler instead of that hidden element.
-                        ActionChains(self.driver).send_keys(value).send_keys(
-                            Keys.ENTER
-                        ).perform()
+                        actions = ActionChains(self.driver)
+                        if value:
+                            actions.send_keys(value)
+                        else:
+                            actions.send_keys(Keys.DELETE)
+                        actions.send_keys(Keys.ENTER).perform()
                     self._verify_sheet_cell(
                         sheet_url,
                         column,
@@ -627,6 +747,8 @@ class V2RBrowser:
             column_index = column_index * 26 + (ord(letter) - ord("A") + 1)
         column_index -= 1
         export_url = self._sheet_export_url(sheet_url)
+        from .sheets_write import csv_cell_value
+
         for _ in range(checks):
             separator = "&" if "?" in export_url else "?"
             with urlopen(
@@ -637,9 +759,8 @@ class V2RBrowser:
                         io.StringIO(response.read().decode("utf-8-sig"))
                     )
                 )
-            if len(rows) >= row_number and len(rows[row_number - 1]) > column_index:
-                if rows[row_number - 1][column_index] == expected:
-                    return
+            if csv_cell_value(rows, row_number, column_index) == expected:
+                return
             time.sleep(0.5)
         raise AutomationError(
             f"시트 {column}{row_number} 저장값을 다시 확인하지 못했습니다"

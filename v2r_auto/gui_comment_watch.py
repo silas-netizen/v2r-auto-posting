@@ -159,7 +159,7 @@ class CommentWatchApp(AutomationApp):
                     return
                 if self.stop_event.is_set():
                     return
-                self.logger.info("K열을 한 번에 붙여넣습니다")
+                self.logger.info("K열을 시트에 저장합니다")
                 self.browser.write_comment_marks(sheet_url, plan)
                 self._set_progress(3, 3)
                 self.ui_queue.put(("info", ("확인 완료", plan.summary())))
@@ -169,7 +169,11 @@ class CommentWatchApp(AutomationApp):
                 self.ui_queue.put(("error", (title, str(exc))))
             except Exception as exc:
                 message = user_facing_watch_error(exc)
-                if v2r_article_is_gone(exc) or isinstance(exc, AffiliateApiError):
+                if (
+                    v2r_article_is_gone(exc)
+                    or isinstance(exc, AffiliateApiError)
+                    or "시트 표시를 확인하지 못했습니다" in str(exc)
+                ):
                     self.logger.error(message)
                 else:
                     self.logger.exception("댓글 확인 실패")

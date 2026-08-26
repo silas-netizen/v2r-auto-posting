@@ -18,6 +18,12 @@ from v2r_auto.comment_watch import (
     user_facing_watch_error,
     v2r_article_is_gone,
 )
+from v2r_auto.sheets_write import (
+    batch_update_url,
+    build_comment_watch_batch_update,
+    csv_cell_value,
+    post_sheets_batch_update,
+)
 
 
 def revision_payload(
@@ -273,6 +279,77 @@ def test_plan_matches_sheet_accepts_written_links(tmp_path: Path) -> None:
         {"일상 글에 댓글": ""},
     ]
     assert plan_matches_sheet(headers, sheet_rows, plan) == []
+
+
+def test_leftover_empty_cells_are_cleared_in_batch_update(tmp_path: Path) -> None:
+    path = write_sheet(tmp_path)
+    headers, rows = load_watch_rows(path)
+    payloads = {
+        "REV1": revision_payload(status="RESERVED"),
+        "DAILY1": daily_payload(),
+        "REV2": revision_payload(source_id="REV2", parent_source_id=None),
+    }
+    plan = build_plan(headers, rows, payloads.__getitem__, lambda cafe_id, article_id: 0)
+    stale = [
+        {"일상 글에 댓글": cafe_article_url(22788814, 731466)},
+        {"일상 글에 댓글": ""},
+        {"일상 글에 댓글": cafe_article_url(22788814, 731473)},
+    ]
+    assert plan_matches_sheet(headers, stale, plan) == [
+        f"2행 K: 기대 '' / 실제 '{cafe_article_url(22788814, 731466)}'",
+        f"4행 K: 기대 '' / 실제 '{cafe_article_url(22788814, 731473)}'",
+    ]
+    assert plan.leftover_mark_cells(stale) == [
+        (2, ""),
+        (4, ""),
+    ]
+    payload = build_comment_watch_batch_update(plan, 0)
+    request = payload["requests"][0]["updateCells"]
+    assert request["range"] == {
+        "sheetId": 0,
+        "startRowIndex": 1,
+        "endRowIndex": 4,
+        "startColumnIndex": 10,
+        "endColumnIndex": 11,
+    }
+    assert [row["values"][0]["userEnteredValue"]["stringValue"] for row in request["rows"]] == [
+        "",
+        "",
+        "",
+    ]
+    assert "비워야" in user_facing_watch_error(
+        RuntimeError("시트 표시를 확인하지 못했습니다: 13행 K")
+    )
+    assert csv_cell_value([["키워드", "본문"], ["홍현희", "본문"]], 2, 10) == ""
+
+
+def test_post_sheets_batch_update_sends_bearer() -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        def read(self) -> bytes:
+            return b'{"replies":[]}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args) -> None:
+            return None
+
+    def opener(request, timeout=45):
+        captured["url"] = request.full_url
+        captured["auth"] = request.get_header("Authorization")
+        return FakeResponse()
+
+    result = post_sheets_batch_update(
+        "abc123",
+        {"requests": []},
+        bearer="ya29.token",
+        opener=opener,
+    )
+    assert result == {"replies": []}
+    assert captured["url"] == batch_update_url("abc123")
+    assert captured["auth"] == "Bearer ya29.token"
 
 
 DELETED_SOURCE_ERROR = (
