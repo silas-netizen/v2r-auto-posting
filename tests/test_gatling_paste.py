@@ -27,6 +27,8 @@ from v2r_auto.gatling_paste import (
     gatling_image_folder,
     exact_board_name,
     load_gatling_brand_jobs,
+    normalize_gatling_source,
+    parse_gatling_article,
     paste_manuscripts_into_gatling,
     recognize_gatling_workbook,
     replace_image_tokens,
@@ -594,6 +596,66 @@ def test_xlsb_is_recognized_but_not_writable(tmp_path: Path) -> None:
     assert info.headers[:4] == ["링크", "타입", "제목", "내용"]
     with pytest.raises(GatlingPasteError, match="xlsb"):
         require_writable_gatling(path)
+
+
+def test_marked_labels_are_recognized_but_marks_are_not_pasted() -> None:
+    article = parse_gatling_article(
+        "스위치온 쉐이크",
+        """#제목 :
+"스위치온 쉐이크 3주 먹어본 진짜 후기"
+
+**본문 :**
+#첫 줄입니다
+둘째 줄입니다
+
+#댓글 :
+"첫 댓글"
+**대댓글 :**
+답글입니다
+""",
+    )
+    assert article.title == "스위치온 쉐이크 3주 먹어본 진짜 후기"
+    assert article.body == "첫 줄입니다\n둘째 줄입니다"
+    assert article.comments[0].text == "첫 댓글"
+    assert article.comments[0].children[0].text == "답글입니다"
+    assert "#" not in article.title
+    assert '"' not in article.body
+    assert "*" not in article.comments[0].text
+
+
+def test_quoted_and_fullwidth_labels_still_parse() -> None:
+    article = parse_gatling_article(
+        "키워드",
+        '"제목 ： 멋진 제목\n본문 ： 멋진 본문\n댓글 : 댓글 내용"',
+    )
+    assert article.title == "멋진 제목"
+    assert article.body == "멋진 본문"
+    assert article.comments[0].text == "댓글 내용"
+
+
+def test_plain_manuscript_stays_unchanged() -> None:
+    article = parse_gatling_article("키워드", QUESTION_SOURCE)
+    assert article.title == "실제 원고 제목"
+    assert article.body == "실제 원고 본문"
+    assert [node.text for node in article.comments] == ["첫 댓글", "둘째 댓글"]
+
+
+def test_body_sentence_with_제목_is_not_a_label() -> None:
+    source = normalize_gatling_source("제목 : 제목\n본문 :\n그래서 제목 : 이렇게 지었어요")
+    article = parse_gatling_article("키워드", source)
+    assert article.body == "그래서 제목 : 이렇게 지었어요"
+
+
+def test_load_jobs_accepts_marked_title_lines(tmp_path: Path) -> None:
+    path = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        '"키워드","#제목 :\n실제 제목\n#본문 :\n실제 본문",고요한아침,writer,질문형,,,,,가입인사\n',
+    )
+    jobs, skipped = load_gatling_brand_jobs(path)
+    assert skipped == []
+    assert jobs[0].article.title == "실제 제목"
+    assert jobs[0].article.body == "실제 본문"
 
 
 def test_image_tokens_become_gatling_placeholder() -> None:

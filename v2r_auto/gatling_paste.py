@@ -333,6 +333,85 @@ def _cell(value: object) -> str:
     return str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
+_LABEL_WRAP_CHARS = set(
+    "#\"'`*~_=[]()【】「」『』“”‘’·•※★☆∙\ufeff"
+)
+_PASTE_MARK_PATTERN = re.compile(r'[#"“”‘’*`]+')
+_SECTION_LINE_PATTERN = re.compile(
+    r"^(?P<head>.*?)(?P<label>제목|본문)\s*[:：]\s*(?P<tail>.*)$"
+)
+_COMMENT_LINE_PATTERN = re.compile(
+    r"^(?P<head>.*?)(?P<dashes>대*)댓글(?:\s*(?P<number>\d+))?\s*[:：]\s*(?P<tail>.*)$"
+)
+_WRAP_PAIRS = (('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’"))
+
+
+def _head_is_only_marks(head: str) -> bool:
+    return all(ch in _LABEL_WRAP_CHARS or ch.isspace() for ch in head)
+
+
+def strip_gatling_marks(text: str) -> str:
+    """Drop decorative # / quotes / * so they are never pasted into 기관총."""
+    cleaned = _PASTE_MARK_PATTERN.sub("", text or "")
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned.strip()
+
+
+def _unwrap_source_quotes(source: str) -> str:
+    text = (source or "").strip()
+    for left, right in _WRAP_PAIRS:
+        if len(text) >= 2 and text.startswith(left) and text.endswith(right):
+            return text[len(left) : -len(right)].strip()
+    return text
+
+
+def normalize_gatling_source(source: str) -> str:
+    """Keep 제목 / 본문 / 댓글 labels even when #, quotes, or * wrap them."""
+    text = _unwrap_source_quotes(source.replace("\r\n", "\n").replace("\r", "\n"))
+    comment_index = 0
+    reply_at_depth: dict[int, int] = {}
+    lines: list[str] = []
+    for line in text.split("\n"):
+        section = _SECTION_LINE_PATTERN.match(line)
+        if section and _head_is_only_marks(section.group("head")):
+            tail = strip_gatling_marks(section.group("tail"))
+            lines.append(f"{section.group('label')} : {tail}".rstrip())
+            continue
+        comment = _COMMENT_LINE_PATTERN.match(line)
+        if comment and _head_is_only_marks(comment.group("head")):
+            depth = len(comment.group("dashes") or "")
+            number = comment.group("number")
+            if number:
+                index = int(number)
+            elif depth == 0:
+                comment_index += 1
+                index = comment_index
+                reply_at_depth = {}
+            else:
+                reply_at_depth[depth] = reply_at_depth.get(depth, 0) + 1
+                index = reply_at_depth[depth]
+            tail = strip_gatling_marks(comment.group("tail"))
+            lines.append(f"{'대' * depth}댓글{index}: {tail}".rstrip())
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def parse_gatling_article(keyword: str, source: str) -> ParsedArticle:
+    article = parse_article(keyword, normalize_gatling_source(source))
+    article.title = strip_gatling_marks(article.title)
+    article.body = strip_gatling_marks(article.body)
+
+    def clean(nodes: list[CommentNode]) -> None:
+        for node in nodes:
+            node.text = strip_gatling_marks(node.text)
+            clean(node.children)
+
+    clean(article.comments)
+    return article
+
+
 def _find_header(headers: list[str], candidates: set[str]) -> str:
     return next((header for header in headers if header.strip() in candidates), "")
 
@@ -764,7 +843,7 @@ def load_gatling_brand_jobs(
                 skipped.append(f"행 {row_number}: F열 완료 링크가 있어 건너뜀")
                 continue
             try:
-                article = parse_article(keyword, source)
+                article = parse_gatling_article(keyword, source)
             except ContentFormatError as exc:
                 skipped.append(f"행 {row_number}: 원고 형식 오류 ({exc})")
                 continue
