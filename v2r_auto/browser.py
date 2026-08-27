@@ -45,18 +45,22 @@ class AutomationError(RuntimeError):
 
 
 def sheet_values_match(expected: str, actual: str) -> bool:
-    """Sheets may show 5680 as 5,680. Treat those as the same value."""
+    """Sheets may show 5680 as 5,680, or 02:22:14 as 2:22:14."""
     left = str(expected or "")
     right = str(actual or "")
     if left == right:
         return True
     left_number = _sheet_number(left)
     right_number = _sheet_number(right)
-    return (
+    if (
         left_number is not None
         and right_number is not None
         and left_number == right_number
-    )
+    ):
+        return True
+    left_time = _sheet_datetime(left)
+    right_time = _sheet_datetime(right)
+    return left_time is not None and right_time is not None and left_time == right_time
 
 
 def _sheet_number(value: str) -> float | None:
@@ -68,8 +72,35 @@ def _sheet_number(value: str) -> float | None:
     )
     if not text:
         return None
+    # 날짜/시각은 숫자로 비교하지 않는다. 2026-08-28 02:22:14 와 2:22:14가
+    # 하이픈을 빼면 다른 숫자가 된다.
+    if any(mark in text for mark in (":", "-", "/")):
+        return None
     try:
         return float(text)
+    except ValueError:
+        return None
+
+
+_SHEET_DATETIME_RE = re.compile(
+    r"(?P<year>\d{4})\D+(?P<month>\d{1,2})\D+(?P<day>\d{1,2})"
+    r"\s+(?P<hour>\d{1,2}):(?P<minute>\d{2})(?::(?P<second>\d{2}))?"
+)
+
+
+def _sheet_datetime(value: str) -> datetime | None:
+    match = _SHEET_DATETIME_RE.search(value or "")
+    if not match:
+        return None
+    try:
+        return datetime(
+            int(match.group("year")),
+            int(match.group("month")),
+            int(match.group("day")),
+            int(match.group("hour")),
+            int(match.group("minute")),
+            int(match.group("second") or 0),
+        )
     except ValueError:
         return None
 

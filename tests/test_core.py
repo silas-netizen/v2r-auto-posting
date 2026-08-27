@@ -41,6 +41,16 @@ def test_sheet_values_match_treats_thousands_comma_as_same_number() -> None:
     )
 
 
+def test_sheet_values_match_treats_unpadded_sheet_time_as_same() -> None:
+    assert sheet_values_match("2026-08-28 02:22:14", "2026-08-28 2:22:14")
+    assert sheet_values_match("2026-08-28 2:22:14", "2026-08-28 02:22:14")
+    assert sheet_values_match("2026-08-28 16:05:09", "2026-08-28 16:05:09")
+    assert sheet_values_match("2026-08-28 02:22:14", "2026-8-28 2:22:14")
+    assert sheet_values_match("2026-08-28 02:22:14", "2026/8/28 2:22:14")
+    assert not sheet_values_match("2026-08-28 02:22:14", "2026-08-28 02:22:15")
+    assert not sheet_values_match("2026-08-28 02:22:14", "5680")
+
+
 def test_google_sheet_export_url() -> None:
     url = V2RBrowser._sheet_export_url(
         "https://docs.google.com/spreadsheets/d/abc_123/edit?gid=987#gid=987"
