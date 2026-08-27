@@ -157,6 +157,7 @@ class SearchVolumeFiller:
         self.naver = naver
         self.logger = logger
         self.delay_seconds = delay_seconds
+        self.failed_rows = 0
 
     def run(
         self,
@@ -184,6 +185,7 @@ class SearchVolumeFiller:
                 progress(0, 0)
             return targets
         total = len(targets)
+        self.failed_rows = 0
         for index, row in enumerate(targets, start=1):
             if stop_event is not None and stop_event.is_set():
                 self.logger.info("중지 요청으로 검색량 채우기를 멈춥니다")
@@ -200,7 +202,15 @@ class SearchVolumeFiller:
                 continue
             if progress:
                 progress(index - 1, total)
-            self._fill_one(row, dry_run=dry_run)
+            try:
+                self._fill_one(row, dry_run=dry_run)
+            except Exception as exc:
+                self.failed_rows += 1
+                self.logger.error(
+                    "키워드 처리 실패, 다음으로 이어갑니다: %s (%s)",
+                    keyword,
+                    exc,
+                )
             self._wait_while_paused(pause_event, stop_event)
             if self.delay_seconds:
                 self._interruptible_delay(
@@ -208,6 +218,12 @@ class SearchVolumeFiller:
                 )
             if progress:
                 progress(index, total)
+        if self.failed_rows:
+            self.logger.warning(
+                "검색량 채우기를 마쳤습니다. %s건 중 %s건은 시트에 다 못 넣었습니다",
+                total,
+                self.failed_rows,
+            )
         return targets
 
     def _wait_while_paused(self, pause_event, stop_event) -> None:
@@ -363,14 +379,33 @@ class SearchVolumeFiller:
                 label,
             )
             return
+        failed = 0
         if hasattr(self.notion, "update_volume_and_keyword"):
-            self.notion.update_volume_and_keyword(
-                row,
-                keyword=written_keyword,
-                search_volume=volume,
-                volume_found=volume_found,
-                search_url=search_url,
+            try:
+                failed = (
+                    self.notion.update_volume_and_keyword(
+                        row,
+                        keyword=written_keyword,
+                        search_volume=volume,
+                        volume_found=volume_found,
+                        search_url=search_url,
+                    )
+                    or 0
+                )
+            except Exception as exc:
+                failed = 1
+                self.logger.error(
+                    "시트 저장 실패, 다음 키워드로 이어갑니다 (%s): %s",
+                    row.keyword,
+                    exc,
+                )
+        if failed:
+            self.failed_rows += 1
+            self.logger.warning(
+                "이 키워드는 시트에 다 못 넣었습니다. 다음으로 이어갑니다: %s",
+                row.keyword,
             )
+            return
         if written_keyword:
             self.logger.info("%s 키워드 띄어쓰기 변경: %s", label, written_keyword)
         if search_url:

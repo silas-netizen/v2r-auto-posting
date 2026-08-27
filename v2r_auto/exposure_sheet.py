@@ -302,7 +302,7 @@ class GoogleSheetExposureStore:
         search_volume: int | None = None,
         volume_found: bool = False,
         search_url: str | None = None,
-    ) -> None:
+    ) -> int:
         if self.writer is None:
             raise SheetError("구글 시트에 쓸 브라우저가 없습니다")
         edited_at = now_stamp(self._now() if self._now else None)
@@ -315,10 +315,21 @@ class GoogleSheetExposureStore:
             edited_at=edited_at,
         )
         row_number = int(row.page_id)
+        failed = 0
         for write in writes:
-            self.writer.write_cell(
-                self.sheet_url, write.column, row_number, write.value
-            )
+            try:
+                self.writer.write_cell(
+                    self.sheet_url, write.column, row_number, write.value
+                )
+            except Exception as exc:
+                failed += 1
+                self.logger.error(
+                    "시트 %s%s 저장 실패, 다음 칸으로 이어갑니다: %s",
+                    write.column,
+                    row_number,
+                    exc,
+                )
+        return failed
 
     def _bind_headers(self, headers: list[str]) -> _SheetBind:
         keyword_col, keyword_idx = _find_header(headers, KEYWORD_HEADERS)

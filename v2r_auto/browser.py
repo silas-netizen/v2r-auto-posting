@@ -7,10 +7,11 @@ import logging
 import random
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlparse
 from urllib.request import urlopen
 
 from selenium import webdriver
@@ -45,22 +46,76 @@ class AutomationError(RuntimeError):
 
 
 def sheet_values_match(expected: str, actual: str) -> bool:
-    """Sheets may show 5680 as 5,680, or 02:22:14 as 2:22:14."""
+    """Treat Sheets display variants as the same saved value.
+
+    Numbers may gain commas, times may drop a leading zero, and URLs may be
+    wrapped as HYPERLINK or re-encoded (+ vs %20). Different search queries
+    are still different values.
+    """
     left = str(expected or "")
     right = str(actual or "")
     if left == right:
         return True
-    left_number = _sheet_number(left)
-    right_number = _sheet_number(right)
+    left_text = _sheet_plain_text(left)
+    right_text = _sheet_plain_text(right)
+    if left_text and left_text == right_text:
+        return True
+    left_number = _sheet_number(left_text or left)
+    right_number = _sheet_number(right_text or right)
     if (
         left_number is not None
         and right_number is not None
         and left_number == right_number
     ):
         return True
-    left_time = _sheet_datetime(left)
-    right_time = _sheet_datetime(right)
-    return left_time is not None and right_time is not None and left_time == right_time
+    left_time = _sheet_datetime(left_text or left)
+    right_time = _sheet_datetime(right_text or right)
+    if left_time is not None and right_time is not None and left_time == right_time:
+        return True
+    left_url = _sheet_url_key(left)
+    right_url = _sheet_url_key(right)
+    return left_url is not None and right_url is not None and left_url == right_url
+
+
+def _sheet_plain_text(value: str) -> str:
+    text = unicodedata.normalize("NFC", str(value or ""))
+    text = text.replace("\u00a0", " ").replace("\r\n", "\n").replace("\r", "\n")
+    text = text.strip()
+    if text.startswith("'"):
+        text = text[1:]
+    return text.strip()
+
+
+_HYPERLINK_RE = re.compile(r'(?is)=\s*HYPERLINK\s*\(\s*"([^"]+)"')
+
+
+def _unwrap_sheet_url(value: str) -> str:
+    text = _sheet_plain_text(value)
+    match = _HYPERLINK_RE.match(text)
+    if match:
+        return match.group(1).strip()
+    if text.startswith("="):
+        inner = text[1:].strip().strip('"').strip("'")
+        if re.match(r"https?://", inner, re.I):
+            return inner
+    return text
+
+
+def _sheet_url_key(value: str) -> tuple | None:
+    text = _unwrap_sheet_url(value)
+    if not re.match(r"https?://", text, re.I):
+        return None
+    parsed = urlparse(text)
+    query = tuple(
+        sorted(
+            (
+                unicodedata.normalize("NFC", key),
+                unicodedata.normalize("NFC", val),
+            )
+            for key, val in parse_qsl(parsed.query, keep_blank_values=True)
+        )
+    )
+    return (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, query)
 
 
 def _sheet_number(value: str) -> float | None:
@@ -302,27 +357,9 @@ class V2RBrowser:
                         )
                     )
                     self.driver.execute_script("window.focus();")
-                    editors = [
-                        element
-                        for element in self.driver.find_elements(
-                            By.ID,
-                            "waffle-rich-text-editor",
-                        )
-                        if element.is_displayed() and element.is_enabled()
-                    ]
-                    if editors:
-                        editor = editors[0]
-                        editor.click()
-                        editor.send_keys(Keys.CONTROL, "a")
-                        editor.send_keys(value)
-                        editor.send_keys(Keys.ENTER)
-                    else:
-                        # Sheets keeps a hidden rich-text editor while a grid
-                        # cell is selected. Send typing to its global active-cell
-                        # keyboard handler instead of that hidden element.
-                        ActionChains(self.driver).send_keys(value).send_keys(
-                            Keys.ENTER
-                        ).perform()
+                    # Type character-by-character and Sheets autocomplete can
+                    # steal a shorter URL (비만 → 비만 계산기). Paste instead.
+                    self._enter_sheet_value(value)
                     self._verify_sheet_cell(
                         sheet_url,
                         column,
@@ -348,6 +385,90 @@ class V2RBrowser:
             )
         finally:
             self._switch_to_handle(self.v2r_handle)
+
+    def _visible_sheet_editor(self):
+        assert self.driver
+        return [
+            element
+            for element in self.driver.find_elements(By.ID, "waffle-rich-text-editor")
+            if element.is_displayed() and element.is_enabled()
+        ]
+
+    def _enter_sheet_value(self, value: str) -> None:
+        if self._copy_to_clipboard(value):
+            self._paste_copied_sheet_value()
+            return
+        self.logger.warning("붙여넣기를 못 해 직접 입력합니다")
+        self._type_sheet_value(value)
+
+    def _copy_to_clipboard(self, text: str) -> bool:
+        assert self.driver
+        try:
+            parsed = urlparse(self.driver.current_url)
+            self.driver.execute_cdp_cmd(
+                "Browser.grantPermissions",
+                {
+                    "origin": f"{parsed.scheme}://{parsed.netloc}",
+                    "permissions": ["clipboardReadWrite", "clipboardSanitizedWrite"],
+                },
+            )
+        except Exception:
+            pass
+        script = """
+        const text = arguments[0];
+        const done = arguments[1];
+        const fallback = () => {
+            const el = document.createElement('textarea');
+            el.value = text;
+            el.setAttribute('readonly', '');
+            el.style.position = 'fixed';
+            el.style.left = '-9999px';
+            document.body.appendChild(el);
+            el.select();
+            let ok = false;
+            try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+            document.body.removeChild(el);
+            done(ok);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(() => done(true)).catch(fallback);
+        } else {
+            fallback();
+        }
+        """
+        try:
+            self.driver.set_script_timeout(5)
+            return bool(self.driver.execute_async_script(script, text))
+        except Exception:
+            return False
+
+    def _paste_copied_sheet_value(self) -> None:
+        assert self.driver
+        editors = self._visible_sheet_editor()
+        if editors:
+            editor = editors[0]
+            editor.click()
+            editor.send_keys(Keys.CONTROL, "a")
+            editor.send_keys(Keys.DELETE)
+            editor.send_keys(Keys.CONTROL, "v")
+            editor.send_keys(Keys.ENTER)
+            return
+        ActionChains(self.driver).send_keys(Keys.DELETE).key_down(Keys.CONTROL).send_keys(
+            "v"
+        ).key_up(Keys.CONTROL).send_keys(Keys.ENTER).perform()
+
+    def _type_sheet_value(self, value: str) -> None:
+        assert self.driver
+        editors = self._visible_sheet_editor()
+        if editors:
+            editor = editors[0]
+            editor.click()
+            editor.send_keys(Keys.CONTROL, "a")
+            editor.send_keys(Keys.DELETE)
+            editor.send_keys(value)
+            editor.send_keys(Keys.ENTER)
+            return
+        ActionChains(self.driver).send_keys(value).send_keys(Keys.ENTER).perform()
 
     def _verify_sheet_cell(
         self,

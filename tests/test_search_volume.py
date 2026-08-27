@@ -474,6 +474,67 @@ def test_sheet_store_reads_empty_volume_and_writes_search_url() -> None:
     ]
 
 
+def test_sheet_store_keeps_writing_other_cells_after_one_fails() -> None:
+    class FlakyWriter:
+        def __init__(self):
+            self.writes: list[str] = []
+
+        def write_cell(self, sheet_url, column, row_number, value):
+            if column == "I":
+                raise RuntimeError("autocomplete stole the URL")
+            self.writes.append(column)
+
+    writer = FlakyWriter()
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        logging.getLogger("test"),
+        writer=writer,
+        now=lambda: datetime(2026, 8, 27, 16, 45, 0),
+    )
+    row = ExposureRow(
+        "13",
+        "비만",
+        "",
+        "",
+        "밀려남",
+        "G",
+        "select",
+        volume_property="K",
+        keyword_property="H",
+        keyword_type="rich_text",
+        edited_property="J",
+        search_url_property="I",
+    )
+    failed = store.update_volume_and_keyword(
+        row,
+        keyword=None,
+        search_volume=3590,
+        volume_found=True,
+        search_url=naver_search_url("비만"),
+    )
+    assert failed == 1
+    assert writer.writes == ["K", "J"]
+
+
+def test_filler_continues_after_one_row_write_fails() -> None:
+    class BoomFirstStore(FakeStore):
+        def update_volume_and_keyword(self, row, **kwargs):
+            if row.keyword == "비만":
+                raise RuntimeError("시트 I13 저장에 3회 실패했습니다")
+            return super().update_volume_and_keyword(row, **kwargs)
+
+    naver = FakeNaver(suggestion="부종 원인", volume=12)
+    store = BoomFirstStore()
+    filler = SearchVolumeFiller(store, naver, logging.getLogger("test"), delay_seconds=0)
+    filler.run(
+        [_row("비만", page_id="13"), _row("부종원인", page_id="7")],
+        dry_run=False,
+    )
+    assert filler.failed_rows == 1
+    assert [item["page_id"] for item in store.writes] == ["7"]
+    assert store.writes[0]["keyword"] == "부종 원인"
+
+
 def test_sheet_store_skips_volume_when_not_found_but_writes_search() -> None:
     writer = RecordingWriter()
     store = GoogleSheetExposureStore(

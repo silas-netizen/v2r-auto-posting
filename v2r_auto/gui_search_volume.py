@@ -275,6 +275,19 @@ class SearchVolumeApp(AutomationApp):
                             ("작업 중지", "중지했습니다. 이어서 하려면 다시 시작을 누르세요"),
                         )
                     )
+                elif getattr(filler, "failed_rows", 0):
+                    self.ui_queue.put(
+                        (
+                            "info",
+                            (
+                                "작업 종료",
+                                (
+                                    f"{len(targets)}건 중 {filler.failed_rows}건은 "
+                                    "시트에 다 못 넣었습니다. 나머지는 이어가 마쳤습니다."
+                                ),
+                            ),
+                        )
+                    )
                 else:
                     self.ui_queue.put(
                         (
