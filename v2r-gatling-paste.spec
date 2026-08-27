@@ -1,4 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
+# Windows EXE for V2R 기관총 붙여넣기
 
 from PyInstaller.utils.hooks import collect_all
 
