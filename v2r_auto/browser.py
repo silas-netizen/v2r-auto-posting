@@ -340,51 +340,43 @@ class V2RBrowser:
         )
         cell_label = f"{column}{row_number}"
         last_error: Exception | None = None
-        try:
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    self._navigate(sheet_url_with_range, self.google_handle)
-                    self.google_handle = self.driver.current_window_handle
-                    self.wait.until(
-                        lambda driver: driver.execute_script(
-                            "return document.readyState"
-                        )
-                        == "complete"
-                    )
-                    self.wait.until(
-                        EC.presence_of_element_located(
-                            (By.ID, "waffle-rich-text-editor")
-                        )
-                    )
-                    self.driver.execute_script("window.focus();")
-                    # Type character-by-character and Sheets autocomplete can
-                    # steal a shorter URL (비만 → 비만 계산기). Paste instead.
-                    self._enter_sheet_value(value)
-                    self._verify_sheet_cell(
-                        sheet_url,
-                        column,
-                        row_number,
-                        value,
-                        checks=verify_checks,
-                    )
-                    self.logger.info("시트 %s에 값을 입력했습니다", cell_label)
-                    return
-                except Exception as exc:
-                    last_error = exc
-                    self.logger.warning(
-                        "시트 %s 저장 재시도 (%s/%s): %s",
-                        cell_label,
-                        attempt,
-                        max_attempts,
-                        exc,
-                    )
-                    time.sleep(attempt)
-            raise AutomationError(
-                f"시트 {cell_label} 저장에 {max_attempts}회 실패했습니다: "
-                f"{last_error}"
-            )
-        finally:
-            self._switch_to_handle(self.v2r_handle)
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self._navigate(sheet_url_with_range, self.google_handle)
+                self.google_handle = self.driver.current_window_handle
+                self.wait.until(
+                    lambda driver: driver.execute_script("return document.readyState")
+                    == "complete"
+                )
+                self.wait.until(
+                    EC.presence_of_element_located((By.ID, "waffle-rich-text-editor"))
+                )
+                self.driver.execute_script("window.focus();")
+                time.sleep(0.25)
+                self._enter_sheet_value(value)
+                self._verify_sheet_cell(
+                    sheet_url,
+                    column,
+                    row_number,
+                    value,
+                    checks=verify_checks,
+                )
+                self.logger.info("시트 %s에 값을 입력했습니다", cell_label)
+                return
+            except Exception as exc:
+                last_error = exc
+                self.logger.warning(
+                    "시트 %s 저장 재시도 (%s/%s): %s",
+                    cell_label,
+                    attempt,
+                    max_attempts,
+                    exc,
+                )
+                time.sleep(attempt)
+        raise AutomationError(
+            f"시트 {cell_label} 저장에 {max_attempts}회 실패했습니다: "
+            f"{last_error}"
+        )
 
     def _visible_sheet_editor(self):
         assert self.driver
@@ -395,86 +387,47 @@ class V2RBrowser:
         ]
 
     def _enter_sheet_value(self, value: str) -> None:
-        if self._copy_to_clipboard(value):
-            self._paste_copied_sheet_value()
-            return
-        self.logger.warning("붙여넣기를 못 해 직접 입력합니다")
-        self._type_sheet_value(value)
+        """Put the whole value in at once so column autocomplete cannot steal it.
 
-    def _copy_to_clipboard(self, text: str) -> bool:
+        Clipboard paste is unreliable in Sheets and a failed copy can clear the
+        cell, then leave it empty. Insert the text in one shot instead.
+        """
+        self._begin_sheet_cell_edit()
+        if self._insert_sheet_text(value):
+            self._finish_sheet_cell_edit()
+            return
+        self._type_sheet_text(value)
+        ActionChains(self.driver).send_keys("|").send_keys(Keys.BACKSPACE).perform()
+        self._finish_sheet_cell_edit()
+
+    def _begin_sheet_cell_edit(self) -> None:
+        assert self.driver
+        editors = self._visible_sheet_editor()
+        if not editors:
+            return
+        editor = editors[0]
+        editor.click()
+        editor.send_keys(Keys.CONTROL, "a")
+
+    def _insert_sheet_text(self, value: str) -> bool:
         assert self.driver
         try:
-            parsed = urlparse(self.driver.current_url)
-            self.driver.execute_cdp_cmd(
-                "Browser.grantPermissions",
-                {
-                    "origin": f"{parsed.scheme}://{parsed.netloc}",
-                    "permissions": ["clipboardReadWrite", "clipboardSanitizedWrite"],
-                },
-            )
-        except Exception:
-            pass
-        script = """
-        const text = arguments[0];
-        const done = arguments[1];
-        const fallback = () => {
-            const el = document.createElement('textarea');
-            el.value = text;
-            el.setAttribute('readonly', '');
-            el.style.position = 'fixed';
-            el.style.left = '-9999px';
-            document.body.appendChild(el);
-            el.select();
-            let ok = false;
-            try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
-            document.body.removeChild(el);
-            done(ok);
-        };
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(text).then(() => done(true)).catch(fallback);
-        } else {
-            fallback();
-        }
-        """
-        try:
-            self.driver.set_script_timeout(5)
-            return bool(self.driver.execute_async_script(script, text))
+            self.driver.execute_cdp_cmd("Input.insertText", {"text": value})
+            return True
         except Exception:
             return False
 
-    def _paste_copied_sheet_value(self) -> None:
+    def _type_sheet_text(self, value: str) -> None:
         assert self.driver
         editors = self._visible_sheet_editor()
         if editors:
-            editor = editors[0]
-            editor.click()
-            editor.send_keys(Keys.CONTROL, "a")
-            editor.send_keys(Keys.DELETE)
-            editor.send_keys(Keys.CONTROL, "v")
-            editor.send_keys(Keys.ENTER)
+            editors[0].send_keys(value)
             return
-        ActionChains(self.driver).send_keys(Keys.DELETE).key_down(Keys.CONTROL).send_keys(
-            "v"
-        ).key_up(Keys.CONTROL).send_keys(Keys.ENTER).perform()
+        ActionChains(self.driver).send_keys(value).perform()
 
-    def _type_sheet_value(self, value: str) -> None:
+    def _finish_sheet_cell_edit(self) -> None:
         assert self.driver
-        editors = self._visible_sheet_editor()
-        if editors:
-            editor = editors[0]
-            editor.click()
-            editor.send_keys(Keys.CONTROL, "a")
-            editor.send_keys(Keys.DELETE)
-            editor.send_keys(value)
-            # Break column autocomplete so Enter does not accept a longer
-            # neighbor value (비만 → 비만 계산기).
-            editor.send_keys("|")
-            editor.send_keys(Keys.BACKSPACE)
-            editor.send_keys(Keys.ENTER)
-            return
-        ActionChains(self.driver).send_keys(value).send_keys("|").send_keys(
-            Keys.BACKSPACE
-        ).send_keys(Keys.ENTER).perform()
+        ActionChains(self.driver).send_keys(Keys.ENTER).perform()
 
     def _verify_sheet_cell(
         self,
