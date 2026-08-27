@@ -11,13 +11,17 @@ from urllib.parse import quote
 CAFE_HOME_URL = "https://cafe.naver.com/cantsb"
 CAFE_ID = 25016228
 CAFE_SEARCH_PAGE = (
-    "https://cafe.naver.com/ca-cafes/"
+    "https://cafe.naver.com/f-e/cafes/"
     f"{CAFE_ID}/menus/0?viewType=L&ta=ARTICLE_COMMENT&page=1&q={{query}}"
 )
 CAFE_SEARCH_PAGE_MODERN = (
-    "https://cafe.naver.com/ArticleSearchList.nhn"
+    "https://cafe.naver.com/cantsb?iframe_url=/ArticleSearchList.nhn"
     f"?search.clubid={CAFE_ID}&search.media=0&search.searchBy=0"
     "&search.defaultValue=1&search.sortBy=date&search.query={query}"
+)
+MISSING_PAGE_HINTS = (
+    "페이지를 찾을 수 없습니다",
+    "서비스에 접속할 수 없습니다",
 )
 DEFAULT_KEYWORDS = ("팥순", "자연방패", "장으뜸")
 FLOWMOA_MEMBERSHIP_URL = "https://flowmoa.com/index.php?view=moa-membership"
@@ -112,6 +116,13 @@ def cafe_search_url(keyword: str) -> str:
 
 def cafe_search_url_modern(keyword: str) -> str:
     return CAFE_SEARCH_PAGE_MODERN.format(query=quote(keyword))
+
+
+def page_is_missing(html: str, url: str = "") -> bool:
+    current = (url or "").casefold()
+    if "/ca-cafes/" in current:
+        return True
+    return any(hint in (html or "") for hint in MISSING_PAGE_HINTS)
 
 
 def page_requires_naver_login(html: str, url: str = "") -> bool:

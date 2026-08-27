@@ -3,10 +3,12 @@ from v2r_auto.nickname_exclude import (
     DEFAULT_KEYWORDS,
     build_sync_result,
     cafe_search_url,
+    cafe_search_url_modern,
     merge_nicknames,
     new_nicknames,
     nicknames_from_html,
     nicknames_from_json,
+    page_is_missing,
     require_keywords,
     split_keywords,
 )
@@ -28,14 +30,29 @@ def test_keywords_can_be_added_later() -> None:
 
 def test_cafe_search_url_is_article_search_not_write() -> None:
     url = cafe_search_url("팥순")
-    assert "ca-cafes/25016228" in url
+    assert "f-e/cafes/25016228" in url
+    assert "ca-cafes" not in url
     assert "q=" in url
     assert "ArticleWrite" not in url
     assert "글쓰기" not in url
+    fallback = cafe_search_url_modern("팥순")
+    assert "ArticleSearchList.nhn" in fallback
+    assert "ArticleWrite" not in fallback
     from v2r_auto.nickname_exclude import search_api_urls
 
     api = search_api_urls("팥순", 1)[0]
     assert "apis.cafe.naver.com/search/v2/cafes/25016228/search/articles" in api
+
+
+def test_missing_cafe_page_is_detected() -> None:
+    assert page_is_missing(
+        "페이지를 찾을 수 없습니다",
+        "https://cafe.naver.com/ca-cafes/25016228/menus/0?q=장으뜸",
+    )
+    assert not page_is_missing(
+        "검색 결과",
+        "https://cafe.naver.com/f-e/cafes/25016228/menus/0?q=장으뜸",
+    )
 
 
 def test_merge_adds_only_new_nicknames() -> None:

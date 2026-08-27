@@ -20,6 +20,7 @@ from .nickname_exclude import (
     join_nicknames,
     nicknames_from_html,
     nicknames_from_json,
+    page_is_missing,
     page_requires_naver_login,
     payload_has_articles,
     require_keywords,
@@ -119,7 +120,13 @@ class NicknameExcludeSession:
         time.sleep(1.2)
         assert self.browser.driver
         current = (self.browser.driver.current_url or "").casefold()
-        if "articlewrite" in current or "write" in current:
+        html = self._page_html()
+        if (
+            "articlewrite" in current
+            or "/write" in current
+            or page_is_missing(html, current)
+        ):
+            self.logger.info("글 검색 화면이 아니라서 카페 검색 주소로 다시 엽니다")
             self.browser._navigate(cafe_search_url_modern(keyword), self.cafe_handle)
             time.sleep(1.2)
         self._require_cafe_login()
