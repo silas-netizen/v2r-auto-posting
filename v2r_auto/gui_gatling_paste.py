@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
@@ -9,16 +11,23 @@ from .daily_posts import DailyPostSheetError, looks_like_daily_sheet
 from .gatling_accounts import recognize_proxy_workbook, require_proxy_workbook
 from .gatling_paste import (
     DAILY_POST_SHEET_URL,
+    GatlingBuildResult,
     GatlingPasteError,
+    append_master_rows,
     build_gatling_master,
     gatling_image_folder,
     is_affiliate_cafe,
     load_existing_manuscript_keys,
     load_gatling_brand_jobs,
     paste_manuscripts_into_gatling,
+    photo_wash_batch_folder,
     recognize_gatling_workbook,
 )
 from .images import GoogleDriveImageResolver, brand_from_sheet_title, load_sheet_brand
+from .photo_washer_launch import (
+    PhotoWasherLaunchError,
+    open_photo_washer_and_folder,
+)
 from .gui import AutomationApp
 from .state import AnotherInstanceRunningError, InstanceLock
 
@@ -30,6 +39,9 @@ class GatlingPasteApp(AutomationApp):
     data_folder_name = "V2RGatlingPaste"
 
     def __init__(self):
+        self.prepared_result: GatlingBuildResult | None = None
+        self.prepared_signature: tuple[str, ...] | None = None
+        self.prepared_image_dir: Path | None = None
         super().__init__()
         self.instance_lock = InstanceLock(self.data_dir / "data" / "worker.lock")
         try:
@@ -42,17 +54,49 @@ class GatlingPasteApp(AutomationApp):
         self.minsize(800, 620)
 
     def _create_variables(self) -> None:
+        settings = self._load_local_settings()
         self.sheet_url = tk.StringVar()
         self.local_csv = tk.StringVar()
         self.gatling_path = tk.StringVar()
         self.proxy_path = tk.StringVar()
+        self.image_root = tk.StringVar(
+            value=settings.get("image_root", r"G:\내 드라이브\image")
+        )
+        self.photo_washer_path = tk.StringVar(
+            value=settings.get("photo_washer_path", "")
+        )
         self.progress_text = tk.StringVar(value="대기 중")
+
+    def _settings_path(self) -> Path:
+        return self.data_dir / "data" / "gatling-tools.json"
+
+    def _load_local_settings(self) -> dict[str, str]:
+        try:
+            value = json.loads(self._settings_path().read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _save_local_settings(self) -> None:
+        path = self._settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "image_root": self.image_root.get().strip(),
+                    "photo_washer_path": self.photo_washer_path.get().strip(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
     def _build_ui(self) -> None:
         outer = ttk.Frame(self, padding=16)
         outer.pack(fill=tk.BOTH, expand=True)
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(8, weight=1)
+        outer.rowconfigure(10, weight=1)
 
         ttk.Label(outer, text=self.app_name, font=("", 18, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
@@ -67,7 +111,9 @@ class GatlingPasteApp(AutomationApp):
                 "자사 카페는 새글에 원고를 바로 넣습니다. "
                 "해시태그는 원고 행에만 넣습니다. "
                 "시트에 {키워드}·{A열 키워드}·{B/A}가 있으면 사진을 고른 뒤 "
-                "{이미지}로 바꾸고, 고른 사진은 기관총 파일 옆 폴더에 모읍니다. "
+                "{이미지}로 바꾸고, 고른 사진은 Google Drive image 폴더 아래 "
+                "기관총_선택이미지/실행시각 폴더에 모읍니다. "
+                "엑셀에는 사진 전체 경로를 넣고 포토워셔와 폴더를 함께 엽니다. "
                 "시트에 있는 원고는 모두 넣습니다. "
                 "엑셀 타입이 비어 있어도 새글·글수정·댓글·대댓글을 알아서 적습니다. "
                 "제목과 본문이 이미 같은 원고만 넣지 않습니다. "
@@ -101,9 +147,23 @@ class GatlingPasteApp(AutomationApp):
             self.proxy_path,
             button=("파일", self._choose_proxy),
         )
+        self._entry_row(
+            outer,
+            6,
+            "Drive image 폴더",
+            self.image_root,
+            button=("폴더", self._choose_image_root),
+        )
+        self._entry_row(
+            outer,
+            7,
+            "포토워셔 main.exe",
+            self.photo_washer_path,
+            button=("파일", self._choose_photo_washer),
+        )
 
         actions = ttk.Frame(outer)
-        actions.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 10))
+        actions.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(8, 10))
         ttk.Button(actions, text="구글 시트 열기", command=self._open_sheet).pack(
             side=tk.LEFT
         )
@@ -117,7 +177,7 @@ class GatlingPasteApp(AutomationApp):
             side=tk.LEFT, padx=(8, 0)
         )
         self.start_button = ttk.Button(
-            actions, text="제목·본문·댓글 넣기", command=self._start
+            actions, text="세척 후 제목·본문·댓글 넣기", command=self._start
         )
         self.start_button.pack(side=tk.LEFT, padx=(8, 0))
         self.stop_button = ttk.Button(
@@ -126,7 +186,7 @@ class GatlingPasteApp(AutomationApp):
         self.stop_button.pack(side=tk.LEFT, padx=(8, 0))
 
         progress_frame = ttk.Frame(outer)
-        progress_frame.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        progress_frame.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(0, 6))
         progress_frame.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_frame, maximum=100)
         self.progress.grid(row=0, column=0, sticky="ew")
@@ -135,7 +195,7 @@ class GatlingPasteApp(AutomationApp):
         )
 
         log_frame = ttk.LabelFrame(outer, text="진행 기록", padding=8)
-        log_frame.grid(row=8, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=10, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state=tk.DISABLED)
@@ -166,6 +226,24 @@ class GatlingPasteApp(AutomationApp):
         )
         if selected:
             self.proxy_path.set(selected)
+
+    def _choose_image_root(self) -> None:
+        selected = filedialog.askdirectory(
+            title="Google Drive image 폴더 선택",
+            initialdir=self.image_root.get().strip() or None,
+        )
+        if selected:
+            self.image_root.set(selected)
+            self._save_local_settings()
+
+    def _choose_photo_washer(self) -> None:
+        selected = filedialog.askopenfilename(
+            title="포토워셔 main.exe 선택",
+            filetypes=[("포토워셔 main.exe", "main.exe"), ("실행 파일", "*.exe")],
+        )
+        if selected:
+            self.photo_washer_path.set(selected)
+            self._save_local_settings()
 
     def _proxy_book(self):
         path = self.proxy_path.get().strip()
@@ -222,6 +300,28 @@ class GatlingPasteApp(AutomationApp):
     def _image_resolver(self) -> GoogleDriveImageResolver:
         return GoogleDriveImageResolver(self.data_dir / "data", self.logger)
 
+    def _input_signature(self) -> tuple[str, ...]:
+        return (
+            self.sheet_url.get().strip(),
+            self.local_csv.get().strip(),
+            self.gatling_path.get().strip(),
+            self.proxy_path.get().strip(),
+            self.image_root.get().strip(),
+            self.photo_washer_path.get().strip(),
+        )
+
+    def _required_image_tools(self) -> tuple[Path, Path]:
+        image_root = Path(self.image_root.get().strip())
+        photo_washer = Path(self.photo_washer_path.get().strip())
+        if not image_root.is_dir():
+            raise GatlingPasteError(
+                "Google Drive 데스크톱의 image 폴더를 선택해 주세요"
+            )
+        if not photo_washer.is_file():
+            raise GatlingPasteError("포토워셔 main.exe를 선택해 주세요")
+        self._save_local_settings()
+        return image_root, photo_washer
+
     def _check_gatling(self) -> None:
         path = self.gatling_path.get().strip()
         if not path:
@@ -252,10 +352,20 @@ class GatlingPasteApp(AutomationApp):
 
     def _check_data(self) -> None:
         def work() -> None:
+            self.prepared_result = None
+            self.prepared_signature = None
+            self.prepared_image_dir = None
             brand_path, daily_path = self._brand_and_daily_paths()
             gatling_path = self.gatling_path.get().strip()
+            if not gatling_path:
+                raise GatlingPasteError("기관총 엑셀 파일을 선택해 주세요")
+            image_root, photo_washer = self._required_image_tools()
             existing_keys = (
                 load_existing_manuscript_keys(gatling_path) if gatling_path else None
+            )
+            image_dir = photo_wash_batch_folder(
+                image_root,
+                time.strftime("%Y%m%d_%H%M%S"),
             )
             result = build_gatling_master(
                 brand_path,
@@ -264,6 +374,7 @@ class GatlingPasteApp(AutomationApp):
                 skip_completed=False,
                 brand=self._brand_name(brand_path),
                 image_resolver=self._image_resolver(),
+                image_dir=image_dir,
                 existing_keys=existing_keys,
                 proxy_book=self._proxy_book(),
             )
@@ -280,6 +391,15 @@ class GatlingPasteApp(AutomationApp):
             )
             for item in result.skipped:
                 self.logger.info("건너뜀 %s", item)
+            self.prepared_result = result
+            self.prepared_signature = self._input_signature()
+            self.prepared_image_dir = image_dir
+            if result.image_count:
+                open_photo_washer_and_folder(
+                    photo_washer,
+                    image_dir,
+                    self.logger,
+                )
             self.ui_queue.put(
                 (
                     "info",
@@ -293,7 +413,9 @@ class GatlingPasteApp(AutomationApp):
                             f"대댓글 {counts.get('대댓글', 0)} / "
                             f"이미지 {result.image_count}장 / "
                             f"계정 {result.account_count}줄\n"
-                            f"건너뜀 {len(result.skipped)}건"
+                            f"건너뜀 {len(result.skipped)}건\n\n"
+                            "포토워셔에서 사진 세척을 끝낸 뒤 "
+                            "'세척 후 제목·본문·댓글 넣기'를 누르세요"
                         ),
                     ),
                 )
@@ -308,6 +430,15 @@ class GatlingPasteApp(AutomationApp):
         if not gatling_path:
             messagebox.showerror("입력 오류", "기관총 엑셀 파일을 선택해 주세요")
             return
+        if (
+            self.prepared_result is None
+            or self.prepared_signature != self._input_signature()
+        ):
+            messagebox.showerror(
+                "원고 확인 필요",
+                "먼저 '원고 확인'을 눌러 이미지 선택과 포토워셔 준비를 완료해 주세요",
+            )
+            return
         self.stop_event.clear()
         self.start_button.configure(state=tk.DISABLED)
         self.stop_button.configure(state=tk.NORMAL)
@@ -316,27 +447,17 @@ class GatlingPasteApp(AutomationApp):
 
         def work() -> None:
             try:
-                self._set_progress(1, 3)
-                brand_path, daily_path = self._brand_and_daily_paths()
-                self._set_progress(2, 3)
-                result, start_row = paste_manuscripts_into_gatling(
-                    brand_path,
-                    gatling_path,
-                    daily_path,
-                    manuscript_only=False,
-                    skip_completed=False,
-                    brand=self._brand_name(brand_path),
-                    image_resolver=self._image_resolver(),
-                    image_dir=gatling_image_folder(gatling_path),
-                    proxy_book=self._proxy_book(),
-                )
+                self._set_progress(1, 2)
+                result = self.prepared_result
+                assert result is not None
+                start_row = append_master_rows(gatling_path, result.rows)
                 counts = result.type_counts()
                 self.logger.info(
                     "기관총 마스터 %s행부터 %s줄을 넣었습니다",
                     start_row,
                     len(result.rows),
                 )
-                self._set_progress(3, 3)
+                self._set_progress(2, 2)
                 self.ui_queue.put(
                     (
                         "info",
@@ -358,7 +479,14 @@ class GatlingPasteApp(AutomationApp):
                         ),
                     )
                 )
-            except (GatlingPasteError, DailyPostSheetError) as exc:
+                self.prepared_result = None
+                self.prepared_signature = None
+                self.prepared_image_dir = None
+            except (
+                GatlingPasteError,
+                DailyPostSheetError,
+                PhotoWasherLaunchError,
+            ) as exc:
                 self.logger.exception("기관총 붙여넣기 실패")
                 self.ui_queue.put(("error", ("붙여넣기 실패", user_facing_browser_error(exc))))
             except Exception as exc:

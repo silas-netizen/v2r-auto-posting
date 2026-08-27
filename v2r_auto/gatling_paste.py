@@ -38,6 +38,32 @@ AFFILIATE_BOARD_LINKS = {
     "씨씨앙": "https://cafe.naver.com/f-e/cafes/25016228/menus/328?viewType=L",
     "양평맘": "https://cafe.naver.com/f-e/cafes/22788814/menus/14?viewType=L",
 }
+SELF_OWNED_BOARD_TARGETS = {
+    normalized_name("고요한 아침"): (
+        "약과 영양, 병원의 기억",
+        "https://cafe.naver.com/f-e/cafes/14567700/menus/29",
+    ),
+    normalized_name("헬씨트리"): (
+        "자유로운 건강 수다방",
+        "https://cafe.naver.com/f-e/cafes/23708088/menus/27",
+    ),
+    normalized_name("글로시 마이"): (
+        "다이어트 · 운동 톡",
+        "https://cafe.naver.com/f-e/cafes/15175096/menus/50?viewType=L",
+    ),
+    normalized_name("웨딩노트"): (
+        "뷰티 · 다이어트",
+        "https://cafe.naver.com/f-e/cafes/15441090/menus/32?viewType=L",
+    ),
+    normalized_name("러브인썸"): (
+        "뷰티&미용",
+        "https://cafe.naver.com/f-e/cafes/26616683/menus/18?viewType=L",
+    ),
+    normalized_name("마이웨딩드림"): (
+        "뷰티&다이어트",
+        "https://cafe.naver.com/f-e/cafes/26680163/menus/1?viewType=L",
+    ),
+}
 KNOWN_EXACT_BOARDS = (
     "자유 수다방",
     "이모저모 이야기💕",
@@ -211,6 +237,10 @@ def is_affiliate_cafe(cafe: str) -> bool:
 def affiliate_board_link(cafe: str) -> str:
     """양평맘·씨씨앙 새글 링크 열에 넣는 게시판 주소."""
     return AFFILIATE_BOARD_LINKS.get((cafe or "").strip(), "")
+
+
+def self_owned_board_target(cafe: str) -> tuple[str, str] | None:
+    return SELF_OWNED_BOARD_TARGETS.get(normalized_name(cafe))
 
 
 def exact_board_name(
@@ -792,7 +822,14 @@ def append_master_rows(path: str | Path, rows: list[MasterRow]) -> int:
         target_rows = _target_rows_for_paste(sheet, info, rows)
         for row_number, row in zip(target_rows, rows):
             _write_master_row(sheet, row_number, info.start_column, row)
-        workbook.save(info.path)
+        try:
+            workbook.save(info.path)
+        except PermissionError as exc:
+            raise GatlingPasteError(
+                "기관총 엑셀 파일이 열려 있거나 Google Drive가 사용 중입니다. "
+                "Excel에서 파일을 완전히 닫고 동기화가 끝난 뒤 다시 눌러 주세요: "
+                f"{info.path}"
+            ) from exc
         return target_rows[0]
     finally:
         workbook.close()
@@ -999,10 +1036,17 @@ def build_master_rows(
     proxy_book: ProxyBook | None = None,
     rng: random.Random | None = None,
 ) -> list[MasterRow]:
-    board_name = exact_board_name(
-        job.board,
-        job.cafe,
-        extra_exact_names=extra_exact_names,
+    mapped_self_owned = (
+        None if is_affiliate_cafe(job.cafe) else self_owned_board_target(job.cafe)
+    )
+    board_name = (
+        mapped_self_owned[0]
+        if mapped_self_owned
+        else exact_board_name(
+            job.board,
+            job.cafe,
+            extra_exact_names=extra_exact_names,
+        )
     )
     article_url = (job.cafe_article_url or "").strip()
     author, comment_map = resolve_job_accounts(job, proxy_book, rng=rng)
@@ -1059,7 +1103,7 @@ def build_master_rows(
                 body=job.article.body,
                 job=job,
                 board_name=board_name,
-                link=article_url,
+                link=(mapped_self_owned[1] if mapped_self_owned else article_url),
                 with_hashtag=True,
                 image_location=image_location,
                 author=author,
@@ -1080,6 +1124,13 @@ def build_master_rows(
 def gatling_image_folder(gatling_path: str | Path) -> Path:
     path = Path(gatling_path)
     return path.with_name(f"{path.stem}_images")
+
+
+def photo_wash_batch_folder(
+    image_root: str | Path,
+    timestamp: str,
+) -> Path:
+    return Path(image_root) / "기관총_선택이미지" / timestamp
 
 
 def collect_resolved_images(resolved: list[ResolvedImage], dest_dir: str | Path) -> str:
