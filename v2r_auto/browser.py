@@ -466,9 +466,15 @@ class V2RBrowser:
             editor.send_keys(Keys.CONTROL, "a")
             editor.send_keys(Keys.DELETE)
             editor.send_keys(value)
+            # Break column autocomplete so Enter does not accept a longer
+            # neighbor value (비만 → 비만 계산기).
+            editor.send_keys("|")
+            editor.send_keys(Keys.BACKSPACE)
             editor.send_keys(Keys.ENTER)
             return
-        ActionChains(self.driver).send_keys(value).send_keys(Keys.ENTER).perform()
+        ActionChains(self.driver).send_keys(value).send_keys("|").send_keys(
+            Keys.BACKSPACE
+        ).send_keys(Keys.ENTER).perform()
 
     def _verify_sheet_cell(
         self,
