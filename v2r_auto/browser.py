@@ -44,6 +44,36 @@ class AutomationError(RuntimeError):
     pass
 
 
+def sheet_values_match(expected: str, actual: str) -> bool:
+    """Sheets may show 5680 as 5,680. Treat those as the same value."""
+    left = str(expected or "")
+    right = str(actual or "")
+    if left == right:
+        return True
+    left_number = _sheet_number(left)
+    right_number = _sheet_number(right)
+    return (
+        left_number is not None
+        and right_number is not None
+        and left_number == right_number
+    )
+
+
+def _sheet_number(value: str) -> float | None:
+    text = (
+        (value or "")
+        .replace(",", "")
+        .replace(" ", "")
+        .replace("\u00a0", "")
+    )
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
 @dataclass(slots=True)
 class BrowserConfig:
     profile_dir: Path
@@ -302,6 +332,7 @@ class V2RBrowser:
             column_index = column_index * 26 + (ord(letter) - ord("A") + 1)
         column_index -= 1
         export_url = self._sheet_export_url(sheet_url)
+        actual = ""
         for _ in range(checks):
             separator = "&" if "?" in export_url else "?"
             with urlopen(
@@ -313,11 +344,13 @@ class V2RBrowser:
                     )
                 )
             if len(rows) >= row_number and len(rows[row_number - 1]) > column_index:
-                if rows[row_number - 1][column_index] == expected:
+                actual = rows[row_number - 1][column_index]
+                if sheet_values_match(expected, actual):
                     return
             time.sleep(0.5)
         raise AutomationError(
-            f"시트 {column}{row_number} 저장값을 다시 확인하지 못했습니다"
+            f"시트 {column}{row_number} 저장값을 다시 확인하지 못했습니다 "
+            f"(기대 {expected} / 실제 {actual or '(비어 있음)'})"
         )
 
     def ensure_v2r_login(self, email: str, password: str) -> None:

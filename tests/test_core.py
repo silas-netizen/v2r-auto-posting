@@ -9,6 +9,7 @@ from v2r_auto.browser import (
     SE_ONE_SELECTION_INDEX,
     V2R_SE_ONE_URL,
     V2RBrowser,
+    sheet_values_match,
 )
 from v2r_auto.history import HistoryCorruptedError, HistoryStore
 from v2r_auto.models import JobStatus, PostJob, RunResult
@@ -24,6 +25,19 @@ def sample_job() -> PostJob:
         body="본문",
         cafe="카페",
         board="게시판",
+    )
+
+
+def test_sheet_values_match_treats_thousands_comma_as_same_number() -> None:
+    assert sheet_values_match("5680", "5,680")
+    assert sheet_values_match("5,680", "5680")
+    assert sheet_values_match("5680", "5680")
+    assert sheet_values_match("0", "0")
+    assert not sheet_values_match("5680", "")
+    assert not sheet_values_match("5680", "5681")
+    assert not sheet_values_match(
+        "https://search.naver.com/search.naver?query=a",
+        "https://search.naver.com/search.naver?query=b",
     )
 
 

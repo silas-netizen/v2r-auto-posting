@@ -12,6 +12,7 @@ from v2r_auto.exposure_sheet import (
     plan_volume_writes,
 )
 from v2r_auto.search_volume import (
+    rows_to_process,
     SearchVolumeFiller,
     collect_cafe_article_previews,
     empty_volume_rows,
@@ -109,11 +110,13 @@ def _row(
     current_volume="",
     volume_property="키워드 검색량",
     keyword_type="title",
+    search_url="",
+    search_url_property="I",
 ) -> ExposureRow:
     return ExposureRow(
         page_id,
         keyword,
-        "",
+        search_url,
         "",
         "밀려남",
         "노출상태",
@@ -123,6 +126,7 @@ def _row(
         keyword_type=keyword_type,
         volume_property=volume_property,
         volume_type="number",
+        search_url_property=search_url_property,
     )
 
 
@@ -132,6 +136,16 @@ def test_blank_volume_is_empty_but_zero_is_not() -> None:
     assert volume_is_empty("  ")
     assert not volume_is_empty("0")
     assert not volume_is_empty("12")
+
+
+def test_rows_to_process_include_empty_volume_and_missing_search_url() -> None:
+    rows = [
+        _row("장으뜸", current_volume=""),
+        _row("팥순", current_volume="5,680", page_id="2"),
+        _row("코숨핏", current_volume="12", page_id="3", search_url="https://search.naver.com"),
+    ]
+    selected = rows_to_process(rows)
+    assert [row.keyword for row in selected] == ["장으뜸", "팥순"]
 
 
 def test_empty_volume_rows_skip_filled_and_missing_column() -> None:
@@ -237,15 +251,39 @@ def test_filler_falls_back_to_first_cafe_title() -> None:
     assert store.writes[0]["search_url"] == naver_search_url("장으뜸 장어즙")
 
 
-def test_filler_skips_rows_that_already_have_volume() -> None:
+def test_filler_skips_rows_that_already_have_volume_and_search_url() -> None:
     naver = FakeNaver(suggestion="장으뜸 장어즙", volume=1)
     store = FakeStore()
-    filled = _row("장으뜸장어즙", current_volume="0")
+    filled = _row(
+        "장으뜸장어즙",
+        current_volume="0",
+        search_url="https://search.naver.com/search.naver?query=x",
+    )
     SearchVolumeFiller(store, naver, logging.getLogger("test")).run(
         [filled], dry_run=False
     )
     assert naver.peeked == []
     assert store.writes == []
+
+
+def test_filler_writes_search_url_when_volume_already_filled() -> None:
+    naver = FakeNaver(suggestion="장으뜸 장어즙", volume=1)
+    store = FakeStore()
+    filled = _row("장으뜸장어즙", current_volume="5,680")
+    SearchVolumeFiller(store, naver, logging.getLogger("test")).run(
+        [filled], dry_run=False
+    )
+    assert naver.peeked == []
+    assert naver.looked_up == []
+    assert store.writes == [
+        {
+            "page_id": "1",
+            "keyword": None,
+            "search_volume": None,
+            "volume_found": False,
+            "search_url": naver_search_url("장으뜸장어즙"),
+        }
+    ]
 
 
 def test_dry_run_does_not_write_notion() -> None:

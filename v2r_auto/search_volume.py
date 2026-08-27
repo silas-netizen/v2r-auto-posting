@@ -46,6 +46,25 @@ def empty_volume_rows(rows: list[ExposureRow]) -> list[ExposureRow]:
     ]
 
 
+def missing_search_url(row: ExposureRow) -> bool:
+    return bool(row.search_url_property) and not str(row.search_url or "").strip()
+
+
+def rows_to_process(rows: list[ExposureRow]) -> list[ExposureRow]:
+    """빈 검색량 행, 또는 검색량은 있는데 통합검색 주소만 빠진 행."""
+    seen: set[str] = set()
+    selected: list[ExposureRow] = []
+    for row in rows:
+        needs_volume = bool(row.volume_property) and volume_is_empty(row.current_volume)
+        if not needs_volume and not missing_search_url(row):
+            continue
+        if row.page_id in seen:
+            continue
+        seen.add(row.page_id)
+        selected.append(row)
+    return selected
+
+
 def normalize_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
 
@@ -148,16 +167,19 @@ class SearchVolumeFiller:
         pause_event=None,
         progress=None,
     ) -> list[ExposureRow]:
-        targets = empty_volume_rows(rows)
+        targets = rows_to_process(rows)
         skipped = len(rows) - len(targets)
+        empty = empty_volume_rows(targets)
+        url_only = len(targets) - len(empty)
         if skipped:
             self.logger.info(
-                "검색량이 이미 있는 키워드 %s건은 건너뜁니다. 빈 검색량 %s건만 채웁니다",
+                "이미 끝난 키워드 %s건은 건너뜁니다. 빈 검색량 %s건, 통합검색만 비어 있는 행 %s건",
                 skipped,
-                len(targets),
+                len(empty),
+                url_only,
             )
         if not targets:
-            self.logger.info("검색량이 비어 있는 키워드가 없습니다")
+            self.logger.info("채울 검색량·통합검색이 없습니다")
             if progress:
                 progress(0, 0)
             return targets
@@ -216,6 +238,20 @@ class SearchVolumeFiller:
 
     def _fill_one(self, row: ExposureRow, *, dry_run: bool) -> None:
         keyword = strip_parenthetical(row.keyword)
+        if not volume_is_empty(row.current_volume):
+            search_url = naver_search_url(keyword)
+            self.logger.info(
+                "검색량은 이미 있어 통합검색 주소만 넣습니다: %s", keyword
+            )
+            self._write_result(
+                row,
+                written_keyword=None,
+                volume=None,
+                volume_found=False,
+                search_url=search_url,
+                dry_run=dry_run,
+            )
+            return
         self.logger.info("빈 검색량 키워드: %s", keyword)
         spacing = self._resolve_spacing(row.keyword)
         written_keyword = keep_keyword_notes(row.keyword, spacing.keyword)

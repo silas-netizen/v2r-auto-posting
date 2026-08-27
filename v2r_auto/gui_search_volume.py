@@ -13,7 +13,7 @@ from .exposure_sheet import (
     SheetError,
 )
 from .gui import AutomationApp
-from .search_volume import SearchVolumeFiller, empty_volume_rows
+from .search_volume import SearchVolumeFiller, empty_volume_rows, rows_to_process
 from .state import AnotherInstanceRunningError, InstanceLock
 
 
@@ -171,6 +171,8 @@ class SearchVolumeApp(AutomationApp):
                 self.ui_queue.put(("error", ("구글 시트 확인 실패", str(exc))))
                 return
             empty = empty_volume_rows(rows)
+            targets = rows_to_process(rows)
+            url_only = len(targets) - len(empty)
             missing_column = sum(1 for row in rows if not row.volume_property)
             if missing_column == len(rows):
                 self.ui_queue.put(
@@ -184,16 +186,21 @@ class SearchVolumeApp(AutomationApp):
                 )
                 return
             self.logger.info(
-                "키워드 %s건 중 검색량이 비어 있는 행 %s건",
+                "키워드 %s건 중 빈 검색량 %s건, 통합검색만 비어 있는 행 %s건",
                 len(rows),
                 len(empty),
+                url_only,
             )
             self.ui_queue.put(
                 (
                     "info",
                     (
                         "빈 검색량 확인",
-                        f"시트 키워드 {len(rows)}건 중 검색량이 비어 있는 행은 {len(empty)}건입니다. 0은 이미 채운 값으로 봅니다.",
+                        (
+                            f"시트 키워드 {len(rows)}건 중 검색량이 비어 있는 행은 {len(empty)}건입니다. "
+                            f"검색량은 있고 통합검색만 비어 있는 행은 {url_only}건입니다. "
+                            "0은 이미 채운 값으로 봅니다."
+                        ),
                     ),
                 )
             )
@@ -233,24 +240,29 @@ class SearchVolumeApp(AutomationApp):
         def work() -> None:
             try:
                 rows = store.load_rows()
-                empty = empty_volume_rows(rows)
-                if not empty:
+                targets = rows_to_process(rows)
+                if not targets:
                     self.ui_queue.put(
                         (
                             "info",
                             (
                                 "채울 행 없음",
-                                "검색량이 비어 있는 키워드가 없습니다. 0은 이미 채운 값입니다.",
+                                "검색량이 비어 있는 키워드가 없고, 통합검색만 빠진 행도 없습니다. 0은 이미 채운 값입니다.",
                             ),
                         )
                     )
                     return
-                self.logger.info("빈 검색량 %s건을 채웁니다", len(empty))
+                empty = empty_volume_rows(targets)
+                self.logger.info(
+                    "빈 검색량 %s건, 통합검색만 비어 있는 행 %s건을 채웁니다",
+                    len(empty),
+                    len(targets) - len(empty),
+                )
                 naver = self._naver()
                 naver.require_login()
                 filler = SearchVolumeFiller(store, naver, self.logger)
                 filler.run(
-                    empty,
+                    targets,
                     dry_run=dry_run,
                     stop_event=self.stop_event,
                     pause_event=self.pause_event,
@@ -267,7 +279,7 @@ class SearchVolumeApp(AutomationApp):
                     self.ui_queue.put(
                         (
                             "info",
-                            ("작업 종료", f"빈 검색량 {len(empty)}건 처리를 마쳤습니다"),
+                            ("작업 종료", f"{len(targets)}건 처리를 마쳤습니다"),
                         )
                     )
             except Exception as exc:
