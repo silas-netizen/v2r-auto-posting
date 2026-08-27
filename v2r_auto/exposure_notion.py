@@ -197,6 +197,7 @@ class _SourceBind:
     title_name: str
     status_name: str
     status_type: str
+    keyword_type: str = ""
     search_url_name: str = ""
     post_url_name: str = ""
     cafe_name: str = ""
@@ -319,7 +320,7 @@ class NotionExposureStore:
 
     def _bind_schema(self, schema: dict[str, Any], query_path: str, version: str, source_id: str = "") -> _SourceBind | None:
         try:
-            keyword_name, _keyword_type = _find_keyword_property(schema)
+            keyword_name, keyword_type = _find_keyword_property(schema)
             status_name, status_type = _find_property(schema, STATUS_HEADERS)
         except NotionError:
             return None
@@ -337,6 +338,7 @@ class NotionExposureStore:
             version=version,
             schema=schema,
             keyword_name=keyword_name,
+            keyword_type=keyword_type,
             title_name=_title_property_name(schema),
             status_name=status_name,
             status_type=status_type,
@@ -648,6 +650,13 @@ class NotionExposureStore:
                         volume_type=source.volume_type,
                         exposed_volume_property=source.exposed_volume_name,
                         exposed_volume_type=source.exposed_volume_type,
+                        current_volume=(
+                            _plain_text(properties.get(source.volume_name)).strip()
+                            if source.volume_name
+                            else ""
+                        ),
+                        keyword_property=source.keyword_name,
+                        keyword_type=source.keyword_type,
                     )
                 )
         if not rows:
@@ -738,6 +747,27 @@ class NotionExposureStore:
                 written_exposed = None
             if written_exposed is not None:
                 properties[row.exposed_volume_property] = written_exposed
+        self._request("PATCH", f"/pages/{row.page_id}", {"properties": properties})
+
+    def update_volume_and_keyword(
+        self,
+        row: ExposureRow,
+        *,
+        keyword: str | None = None,
+        search_volume: int | None = None,
+        volume_found: bool = False,
+    ) -> None:
+        properties: dict[str, Any] = {}
+        if keyword is not None and row.keyword_property:
+            written_keyword = self._writable_value(row.keyword_type, keyword)
+            if written_keyword is not None:
+                properties[row.keyword_property] = written_keyword
+        if volume_found and row.volume_property:
+            written_volume = self._writable_value(row.volume_type, search_volume)
+            if written_volume is not None:
+                properties[row.volume_property] = written_volume
+        if not properties:
+            return
         self._request("PATCH", f"/pages/{row.page_id}", {"properties": properties})
 
     def _writable_value(self, kind: str, value: Any) -> dict[str, Any] | None:

@@ -149,6 +149,37 @@ CAFE_IFRAME_SELECTORS = (
 )
 NAVER_LOGIN_COOKIES = {"NID_AUT", "NID_SES"}
 ADS_HOME_URL = "https://ads.naver.com/"
+AUTOCOMPLETE_FIRST_JS = r"""
+const compact = (s) => (s || '').replace(/\s+/g, '');
+const visible = (el) => {
+  if (!el) return false;
+  const r = el.getBoundingClientRect();
+  const st = window.getComputedStyle(el);
+  if (r.width < 2 || r.height < 2) return false;
+  if (st.visibility === 'hidden' || st.display === 'none' || Number(st.opacity) === 0) return false;
+  return true;
+};
+const itemText = (el) => {
+  const kwd = el.querySelector && el.querySelector('.kwd, .keyword, .atcmp_keyword, em, strong');
+  const raw = ((kwd && (kwd.innerText || kwd.textContent)) || el.innerText || el.textContent || '').trim();
+  return raw.split('\n')[0].trim();
+};
+const roots = [
+  '#autoFrame', '.autoCompleteContainer', '.atcmp_container', '.kwd_lst',
+  'ul.lst_keyword', '.nx_list_auto', '._keyword_list', '.auto_list'
+];
+for (const sel of roots) {
+  const found = Array.from(document.querySelectorAll(sel)).filter(visible);
+  for (const root of found) {
+    const items = Array.from(root.querySelectorAll('li a, li, .item._item, .atcmp_keyword, a'))
+      .filter(visible)
+      .map(itemText)
+      .filter(Boolean);
+    if (items.length) return items[0];
+  }
+}
+return '';
+"""
 VISIBLE_CAFE_LINKS_JS = r"""
 const visible = (el) => {
   if (!el) return false;
@@ -316,6 +347,57 @@ class SeleniumNaverSearch:
         self._wait_for_integrated_results(driver, query)
         self._last_visible_cafe_urls = self._collect_visible_cafe_urls(driver)
         return driver.page_source
+
+    def peek_first_autocomplete(self, keyword: str) -> str:
+        driver = self._driver()
+        query = strip_parenthetical(keyword)
+        self._focus_naver_tab(driver)
+        box = self._find_search_box(driver)
+        box.click()
+        box.send_keys(Keys.CONTROL, "a")
+        box.send_keys(Keys.BACKSPACE)
+        box.send_keys(query)
+        time.sleep(0.7)
+        text = self._first_autocomplete_text(driver)
+        if text:
+            return text
+        return self._fetch_autocomplete_suggestion(driver, query)
+
+    def _first_autocomplete_text(self, driver) -> str:
+        try:
+            text = driver.execute_script(AUTOCOMPLETE_FIRST_JS) or ""
+        except Exception:
+            text = ""
+        return str(text).strip().split("\n")[0].strip()
+
+    def _fetch_autocomplete_suggestion(self, driver, query: str) -> str:
+        script = """
+        const query = arguments[0];
+        const done = arguments[1];
+        const url = 'https://ac.search.naver.com/nx/ac?q=' + encodeURIComponent(query)
+          + '&q_enc=UTF-8&st=100&frm=nx&r_format=json&r_enc=UTF-8&r_unicode=0&t_koreng=1&ans=2';
+        fetch(url, {credentials: 'include'})
+          .then((resp) => resp.ok ? resp.json() : null)
+          .then((data) => {
+            try {
+              const items = data && data.items && data.items[0];
+              if (Array.isArray(items) && items.length) {
+                const first = items[0];
+                const text = Array.isArray(first) ? first[0] : '';
+                done(String(text || ''));
+                return;
+              }
+            } catch (e) {}
+            done('');
+          })
+          .catch(() => done(''));
+        """
+        try:
+            driver.set_script_timeout(12)
+            text = driver.execute_async_script(script, query) or ""
+        except Exception:
+            return ""
+        return str(text).strip().split("\n")[0].strip()
 
     def visible_cafe_article_urls(self) -> list[str] | None:
         return self._last_visible_cafe_urls
