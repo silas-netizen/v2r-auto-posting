@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 selenium_datas, selenium_binaries, selenium_hiddenimports = collect_all("selenium")
 
@@ -9,7 +9,13 @@ a = Analysis(
     pathex=[],
     binaries=selenium_binaries,
     datas=selenium_datas,
-    hiddenimports=selenium_hiddenimports,
+    hiddenimports=selenium_hiddenimports
+    + collect_submodules("v2r_auto")
+    + [
+        "v2r_auto.gui_nickname_exclude",
+        "v2r_auto.nickname_browser",
+        "v2r_auto.nickname_exclude",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -113,7 +113,7 @@ class NicknameExcludeSession:
         keyword: str,
         should_stop: Callable[[], bool] | None,
     ) -> list[str]:
-            self.logger.info("씨씨앙 글 검색창에서 '%s'를 찾습니다", keyword)
+        self.logger.info("씨씨앙 글 검색창에서 '%s'를 찾습니다", keyword)
         # 카페 글 검색만 연다. 글쓰기 화면은 쓰지 않는다.
         self.browser._navigate(cafe_search_url(keyword), self.cafe_handle)
         time.sleep(1.2)

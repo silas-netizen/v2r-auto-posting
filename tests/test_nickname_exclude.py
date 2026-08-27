@@ -1,3 +1,4 @@
+from v2r_auto.nickname_browser import NicknameExcludeSession
 from v2r_auto.nickname_exclude import (
     DEFAULT_KEYWORDS,
     build_sync_result,
@@ -77,3 +78,7 @@ def test_sync_result_keeps_existing_and_adds_new() -> None:
     assert plan.added == ["새닉"]
     assert plan.saved == ["팥순이", "새닉"]
     assert "1개" in plan.summary()
+
+
+def test_nickname_browser_module_loads() -> None:
+    assert NicknameExcludeSession.__name__ == "NicknameExcludeSession"
