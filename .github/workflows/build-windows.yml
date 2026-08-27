@@ -30,27 +30,29 @@ jobs:
 
       - name: Build EXE
         run: |
-          python -m PyInstaller --noconfirm --clean v2r-gatling-paste.spec
-          python -c "import zipfile; zipfile.ZipFile('dist/V2R-Gatling-Paste.zip','w',zipfile.ZIP_DEFLATED).write('dist/V2R-Gatling-Paste.exe','V2R-Gatling-Paste.exe')"
+          python -m PyInstaller --noconfirm --clean v2r-nickname-exclude.spec
+          python -c "import zipfile; zipfile.ZipFile('dist/V2R-Nickname-Exclude.zip','w',zipfile.ZIP_DEFLATED).write('dist/V2R-Nickname-Exclude.exe','V2R-Nickname-Exclude.exe')"
 
       - name: Upload Windows programs
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: V2R-Gatling-Paste-Windows
+          name: V2R-Nickname-Exclude-Windows
           path: |
-            dist/V2R-Gatling-Paste.exe
-            dist/V2R-Gatling-Paste.zip
+            dist/V2R-Nickname-Exclude.exe
+            dist/V2R-Nickname-Exclude.zip
           if-no-files-found: error
           retention-days: 1
 
       - name: Attach program to a GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >
-          gh release create "ci-exe-${{ github.run_id }}"
-          dist/V2R-Gatling-Paste.exe
-          dist/V2R-Gatling-Paste.zip
-          --title "Windows EXE ${{ github.sha }}"
-          --notes "CI build from ${{ github.ref_name }}"
-          --target "${{ github.sha }}"
+        run: |
+          $tag = "ci-exe-${{ github.run_id }}"
+          $ok = $false
+          foreach ($delay in 4, 8, 16, 32) {
+            gh release create $tag dist/V2R-Nickname-Exclude.exe dist/V2R-Nickname-Exclude.zip --title "Windows EXE ${{ github.sha }}" --notes "CI build from ${{ github.ref_name }}" --target "${{ github.sha }}"
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Start-Sleep -Seconds $delay
+          }
+          if (-not $ok) { exit 1 }
