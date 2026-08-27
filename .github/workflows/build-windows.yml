@@ -30,17 +30,17 @@ jobs:
 
       - name: Build EXE
         run: |
-          python -m PyInstaller --noconfirm --clean v2r-gatling-paste.spec
-          python -c "import zipfile; zipfile.ZipFile('dist/V2R-Gatling-Paste.zip','w',zipfile.ZIP_DEFLATED).write('dist/V2R-Gatling-Paste.exe','V2R-Gatling-Paste.exe')"
+          python -m PyInstaller --noconfirm --clean v2r-nickname-exclude.spec
+          python -c "import zipfile; zipfile.ZipFile('dist/V2R-Nickname-Exclude.zip','w',zipfile.ZIP_DEFLATED).write('dist/V2R-Nickname-Exclude.exe','V2R-Nickname-Exclude.exe')"
 
       - name: Upload Windows programs
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: V2R-Gatling-Paste-Windows
+          name: V2R-Nickname-Exclude-Windows
           path: |
-            dist/V2R-Gatling-Paste.exe
-            dist/V2R-Gatling-Paste.zip
+            dist/V2R-Nickname-Exclude.exe
+            dist/V2R-Nickname-Exclude.zip
           if-no-files-found: error
           retention-days: 1
 
@@ -49,8 +49,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >
           gh release create "ci-exe-${{ github.run_id }}"
-          dist/V2R-Gatling-Paste.exe
-          dist/V2R-Gatling-Paste.zip
+          dist/V2R-Nickname-Exclude.exe
+          dist/V2R-Nickname-Exclude.zip
           --title "Windows EXE ${{ github.sha }}"
           --notes "CI build from ${{ github.ref_name }}"
           --target "${{ github.sha }}"
