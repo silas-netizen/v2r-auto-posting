@@ -5,11 +5,13 @@ from v2r_auto.nickname_exclude import (
     DEFAULT_CAFE_URL,
     DEFAULT_KEYWORDS,
     NicknameExcludeError,
+    article_ids_from_json,
     build_sync_result,
     cafe_id_from_page,
     cafe_search_url,
     cafe_search_url_modern,
     cookies_show_naver_login,
+    join_nicknames_lines,
     merge_nicknames,
     new_nicknames,
     nicknames_from_html,
@@ -18,7 +20,10 @@ from v2r_auto.nickname_exclude import (
     parse_cafe_address,
     require_keywords,
     search_api_urls,
+    search_page_info,
+    should_stop_search,
     split_keywords,
+    write_nicknames_file,
 )
 
 
@@ -76,9 +81,10 @@ def test_cookies_show_naver_login() -> None:
 
 def test_cafe_search_url_is_article_search_not_write() -> None:
     cafe = parse_cafe_address(DEFAULT_CAFE_URL)
-    url = cafe_search_url("팥순", cafe)
+    url = cafe_search_url("팥순", cafe, page=3)
     assert "f-e/cafes/25016228" in url
     assert "ca-cafes" not in url
+    assert "page=3" in url
     assert "q=" in url
     assert "ArticleWrite" not in url
     assert "글쓰기" not in url
@@ -145,3 +151,32 @@ def test_sync_result_keeps_existing_and_adds_new() -> None:
 
 def test_nickname_browser_module_loads() -> None:
     assert NicknameExcludeSession.__name__ == "NicknameExcludeSession"
+
+
+def test_nicknames_are_written_one_per_line(tmp_path) -> None:
+    text = join_nicknames_lines(["팥순이", "자연방패", "장으뜸"])
+    assert text == "팥순이\n자연방패\n장으뜸"
+    path = write_nicknames_file(tmp_path / "제외닉네임.txt", ["팥순이", "자연방패"])
+    assert path.read_text(encoding="utf-8") == "팥순이\n자연방패\n"
+
+
+def test_search_keeps_going_until_all_pages() -> None:
+    payload = {
+        "result": {
+            "articleList": [{"articleId": 11, "writerNickname": "팥순이"}],
+            "pageInfo": {
+                "lastNavigationPageNumber": 4,
+                "totalArticleCount": 52,
+                "visibleNextButton": True,
+            },
+        }
+    }
+    last_page, total, has_more = search_page_info(payload)
+    assert last_page == 4
+    assert total == 52
+    assert has_more
+    assert article_ids_from_json(payload) == ["11"]
+    assert should_stop_search(1, 4, True, 0, 1) is False
+    assert should_stop_search(4, 4, False, 0, 1) is False
+    assert should_stop_search(5, 4, False, 2, 0) is True
+    assert should_stop_search(2, None, False, 2, 0) is True

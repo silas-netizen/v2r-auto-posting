@@ -53,14 +53,17 @@ NICKNAME_KEYS = (
 )
 SEARCH_API_TEMPLATES = (
     "https://apis.cafe.naver.com/search/v2/cafes/"
-    "{cafe_id}/search/articles?query={query}&perPage=15&page={page}"
-    "&menuId=0&views=MEMBER_LEVEL,COUNT,SALE_INFO,CAFE_MENU",
+    "{cafe_id}/search/articles?query={query}&perPage=50&page={page}"
+    "&menuId=0&ta=ARTICLE_COMMENT&views=MEMBER_LEVEL,COUNT,SALE_INFO,CAFE_MENU",
     "https://apis.naver.com/cafe-web/cafe-searchui-api/v1/cafes/"
-    "{cafe_id}/search/articles?query={query}&page={page}&perPage=50",
+    "{cafe_id}/search/articles?query={query}&page={page}&perPage=50"
+    "&ta=ARTICLE_COMMENT",
     "https://apis.naver.com/cafe-web/cafe-mobile/CafeSearchArticleList"
     "?search.clubid={cafe_id}&search.query={query}&search.page={page}"
     "&search.perPage=50&search.searchBy=0",
 )
+MAX_SEARCH_PAGES = 200
+ARTICLE_ID_KEYS = ("articleId", "articleid", "article_id")
 HTML_NICK_PATTERNS = (
     re.compile(r'data-nickname="([^"]+)"'),
     re.compile(r'"writerNickname"\s*:\s*"([^"]+)"'),
@@ -114,6 +117,27 @@ def clean_nickname(value: str) -> str:
 
 def join_nicknames(nicknames: Iterable[str]) -> str:
     return ", ".join(split_nicknames("\n".join(nicknames)))
+
+
+def join_nicknames_lines(nicknames: Iterable[str]) -> str:
+    return "\n".join(split_nicknames("\n".join(nicknames)))
+
+
+def write_nicknames_file(path: Path, nicknames: Iterable[str]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = join_nicknames_lines(nicknames)
+    if text:
+        text += "\n"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def open_nicknames_notepad(path: Path) -> None:
+    import subprocess
+    import sys
+
+    if sys.platform == "win32":
+        subprocess.Popen(["notepad.exe", str(path)])
 
 
 def merge_nicknames(existing: Iterable[str], incoming: Iterable[str]) -> list[str]:
@@ -190,23 +214,28 @@ def require_cafe_id(cafe: CafeTarget) -> int:
     return cafe.cafe_id
 
 
-def cafe_search_url(keyword: str, cafe: CafeTarget | None = None) -> str:
+def cafe_search_url(keyword: str, cafe: CafeTarget | None = None, page: int = 1) -> str:
     target = cafe or parse_cafe_address(DEFAULT_CAFE_URL)
     cafe_id = require_cafe_id(target)
     return (
         f"https://cafe.naver.com/f-e/cafes/{cafe_id}/menus/0"
-        f"?viewType=L&ta=ARTICLE_COMMENT&page=1&q={quote(keyword)}"
+        f"?viewType=L&ta=ARTICLE_COMMENT&page={max(1, int(page))}&q={quote(keyword)}"
     )
 
 
-def cafe_search_url_modern(keyword: str, cafe: CafeTarget | None = None) -> str:
+def cafe_search_url_modern(
+    keyword: str,
+    cafe: CafeTarget | None = None,
+    page: int = 1,
+) -> str:
     target = cafe or parse_cafe_address(DEFAULT_CAFE_URL)
     cafe_id = require_cafe_id(target)
     home = target.home_url or f"https://cafe.naver.com/f-e/cafes/{cafe_id}"
     return (
         f"{home}?iframe_url=/ArticleSearchList.nhn"
         f"?search.clubid={cafe_id}&search.media=0&search.searchBy=0"
-        f"&search.defaultValue=1&search.sortBy=date&search.query={quote(keyword)}"
+        f"&search.defaultValue=1&search.sortBy=date&search.page={max(1, int(page))}"
+        f"&search.query={quote(keyword)}"
     )
 
 
@@ -270,6 +299,75 @@ def search_api_urls(
     ]
 
 
+def article_ids_from_json(payload: Any) -> list[str]:
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key in ARTICLE_ID_KEYS:
+                value = node.get(key)
+                if value in (None, ""):
+                    continue
+                item = str(value)
+                if item not in seen:
+                    seen.add(item)
+                    found.append(item)
+                break
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(payload)
+    return found
+
+
+def search_page_info(payload: Any) -> tuple[int | None, int | None, bool]:
+    last_page: int | None = None
+    total: int | None = None
+    has_more = False
+
+    def walk(node: Any) -> None:
+        nonlocal last_page, total, has_more
+        if isinstance(node, dict):
+            if node.get("lastNavigationPageNumber") not in (None, ""):
+                last_page = int(node["lastNavigationPageNumber"])
+            if node.get("totalArticleCount") not in (None, ""):
+                total = int(node["totalArticleCount"])
+            if node.get("visibleNextButton") or node.get("hasMore"):
+                has_more = True
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(payload)
+    return last_page, total, has_more
+
+
+def should_stop_search(
+    page: int,
+    last_page: int | None,
+    has_more: bool,
+    empty_streak: int,
+    new_article_count: int,
+) -> bool:
+    if page >= MAX_SEARCH_PAGES:
+        return True
+    if new_article_count > 0:
+        return False
+    if last_page is not None and page >= last_page and not has_more:
+        return True
+    if page > 1 and empty_streak >= 2:
+        return True
+    if empty_streak >= 3:
+        return True
+    return False
+
+
 def payload_has_articles(payload: Any) -> bool:
     if payload is None:
         return False
@@ -300,9 +398,6 @@ class ExcludeSyncResult:
             [
                 f"검색어 {len(self.keywords)}개",
                 f"카페에서 찾은 닉네임 {len(self.found)}개",
-                f"이미 제외된 닉네임 {len(self.already)}개",
-                f"새로 넣은 닉네임 {len(self.added)}개",
-                f"지금 제외 목록 {len(self.saved)}개",
             ]
         )
 
