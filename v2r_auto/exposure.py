@@ -29,9 +29,10 @@ KEYWORD_HEADERS = ("키워드", "검색어", "검색 키워드")
 STATUS_HEADERS = ("노출상태", "노출 상태")
 SEARCH_URL_HEADERS = ("통합검색", "통합 검색", "네이버 통합검색", "네이버통합검색")
 POST_URL_HEADERS = ("작성 글", "작성글", "작성 글 링크", "작성글링크")
-CAFE_HEADERS = ("카페/ID", "카페 / ID", "카페ID")
+CAFE_HEADERS = ("카페/ID", "카페 / ID", "카페ID", "카페명", "카페")
 VOLUME_HEADERS = ("키워드 검색량", "#키워드검색량", "# 키워드 검색량", "검색량")
 EXPOSED_VOLUME_HEADERS = ("노출된 검색량", "#노출된검색량", "# 노출된 검색량", "노출 검색량")
+EDITED_HEADERS = ("최종 편집 일시", "최종편집일시", "최종 수정 일시")
 _ANCHOR_RE = re.compile(
     r'(?is)<a\b[^>]*\bhref=["\']([^"\']+)["\'][^>]*>(.*?)</a>'
 )
@@ -56,6 +57,8 @@ class ExposureRow:
     current_volume: str = ""
     keyword_property: str = ""
     keyword_type: str = ""
+    edited_property: str = ""
+    search_url_property: str = ""
 
 
 @dataclass(slots=True)

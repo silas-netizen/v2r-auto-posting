@@ -14,10 +14,11 @@ from .exposure import (
     compact_text,
     is_cafe_article_url,
     is_clustered_sub_result,
+    naver_search_url,
     strip_parenthetical,
 )
 
-WRITABLE_KEYWORD_TYPES = {"title", "rich_text"}
+WRITABLE_KEYWORD_TYPES = {"title", "rich_text", "text"}
 _NOTE_TAIL_RE = re.compile(r"(\s*[\(（][\s\S]*)$")
 
 
@@ -255,6 +256,7 @@ class SearchVolumeFiller:
             written_keyword=written_keyword if keyword_changed else None,
             volume=volume,
             volume_found=volume_found,
+            search_url=naver_search_url(spacing.keyword),
             dry_run=dry_run,
         )
         if keyword_changed:
@@ -312,13 +314,17 @@ class SearchVolumeFiller:
         written_keyword: str | None,
         volume: int | None,
         volume_found: bool,
+        search_url: str,
         dry_run: bool,
     ) -> None:
+        label = getattr(self.notion, "label", "노션")
         if dry_run:
             self.logger.info(
-                "검증 모드: %s / 검색량 %s (노션에 쓰지 않음)",
+                "검증 모드: %s / 검색량 %s / 통합검색 %s (%s에 쓰지 않음)",
                 written_keyword or row.keyword,
                 volume if volume_found else "(조회 안 됨)",
+                search_url,
+                label,
             )
             return
         if hasattr(self.notion, "update_volume_and_keyword"):
@@ -327,10 +333,16 @@ class SearchVolumeFiller:
                 keyword=written_keyword,
                 search_volume=volume,
                 volume_found=volume_found,
+                search_url=search_url,
             )
         if written_keyword:
-            self.logger.info("노션 키워드 띄어쓰기 변경: %s", written_keyword)
+            self.logger.info("%s 키워드 띄어쓰기 변경: %s", label, written_keyword)
+        if search_url:
+            self.logger.info("%s 통합검색 반영: %s", label, search_url)
+            row.search_url = search_url
         if volume_found:
-            self.logger.info("노션 검색량 반영: %s = %s", row.keyword, volume)
+            self.logger.info("%s 검색량 반영: %s = %s", label, row.keyword, volume)
         elif not written_keyword:
-            self.logger.warning("검색량을 못 읽어 노션은 그대로 둡니다: %s", row.keyword)
+            self.logger.warning(
+                "검색량을 못 읽어 검색량 칸은 그대로 둡니다: %s", row.keyword
+            )

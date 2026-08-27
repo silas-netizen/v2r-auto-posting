@@ -756,6 +756,7 @@ class NotionExposureStore:
         keyword: str | None = None,
         search_volume: int | None = None,
         volume_found: bool = False,
+        search_url: str | None = None,
     ) -> None:
         properties: dict[str, Any] = {}
         if keyword is not None and row.keyword_property:

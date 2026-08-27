@@ -2,8 +2,15 @@ import json
 import logging
 from urllib.error import HTTPError
 
-from v2r_auto.exposure import ExposureRow
+from datetime import datetime
+
+from v2r_auto.exposure import ExposureRow, naver_search_url
 from v2r_auto.exposure_notion import NotionExposureStore
+from v2r_auto.exposure_sheet import (
+    GoogleSheetExposureStore,
+    SheetWrite,
+    plan_volume_writes,
+)
 from v2r_auto.search_volume import (
     SearchVolumeFiller,
     collect_cafe_article_previews,
@@ -82,6 +89,7 @@ class FakeStore:
         keyword=None,
         search_volume=None,
         volume_found=False,
+        search_url=None,
     ):
         self.writes.append(
             {
@@ -89,6 +97,7 @@ class FakeStore:
                 "keyword": keyword,
                 "search_volume": search_volume,
                 "volume_found": volume_found,
+                "search_url": search_url,
             }
         )
 
@@ -199,10 +208,12 @@ def test_filler_uses_first_autocomplete_spacing() -> None:
             "keyword": "장으뜸 장어즙",
             "search_volume": 88,
             "volume_found": True,
+            "search_url": naver_search_url("장으뜸 장어즙"),
         }
     ]
     assert row.keyword == "장으뜸 장어즙"
     assert row.current_volume == "88"
+    assert row.search_url == naver_search_url("장으뜸 장어즙")
 
 
 def test_filler_falls_back_to_first_cafe_title() -> None:
@@ -223,6 +234,7 @@ def test_filler_falls_back_to_first_cafe_title() -> None:
     assert naver.searched == ["장으뜸장어즙"]
     assert store.writes[0]["keyword"] == "장으뜸 장어즙"
     assert store.writes[0]["search_volume"] == 10
+    assert store.writes[0]["search_url"] == naver_search_url("장으뜸 장어즙")
 
 
 def test_filler_skips_rows_that_already_have_volume() -> None:
@@ -321,3 +333,137 @@ def test_notion_store_reads_empty_volume_and_patches_keyword() -> None:
     payload = bodies[-1]["properties"]
     assert payload["키워드"]["title"][0]["text"]["content"] == "장으뜸 장어즙"
     assert payload["키워드 검색량"]["number"] == 21000
+
+
+PATSOON_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1OwR_LSjO1ofOojldtSIqoxv0gieNSMx_t35_5G1VTCc/"
+    "edit?gid=1325327696#gid=1325327696"
+)
+
+
+class RecordingWriter:
+    def __init__(self):
+        self.writes: list[tuple[str, str, int, str]] = []
+
+    def write_cell(self, sheet_url: str, column: str, row_number: int, value: str) -> None:
+        self.writes.append((sheet_url, column, row_number, value))
+
+
+class FakeCsvResponse:
+    def __init__(self, payload: bytes):
+        self.payload = payload
+
+    def read(self):
+        return self.payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+
+def test_plan_volume_writes_fills_volume_search_and_time() -> None:
+    row = ExposureRow(
+        "2",
+        "장으뜸장어즙",
+        "",
+        "",
+        "밀려남",
+        "G",
+        "select",
+        volume_property="K",
+        keyword_property="H",
+        keyword_type="rich_text",
+        edited_property="J",
+        search_url_property="I",
+    )
+    writes = plan_volume_writes(
+        row,
+        keyword="장으뜸 장어즙",
+        search_volume=21000,
+        volume_found=True,
+        search_url=naver_search_url("장으뜸 장어즙"),
+        edited_at="2026-08-27 16:45:00",
+    )
+    assert writes == [
+        SheetWrite("H", "장으뜸 장어즙"),
+        SheetWrite("K", "21000"),
+        SheetWrite("I", naver_search_url("장으뜸 장어즙")),
+        SheetWrite("J", "2026-08-27 16:45:00"),
+    ]
+
+
+def test_sheet_store_reads_empty_volume_and_writes_search_url() -> None:
+    csv_text = (
+        "카페,노출 상태,키워드,통합검색,최종 편집 일시,키워드 검색량\n"
+        "씨씨앙,밀려남,장으뜸장어즙,,,\n"
+        "씨씨앙,밀려남,팥순,,,0\n"
+    )
+
+    def opener(request, timeout=30):
+        return FakeCsvResponse(csv_text.encode("utf-8"))
+
+    writer = RecordingWriter()
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        logging.getLogger("test"),
+        opener=opener,
+        writer=writer,
+        now=lambda: datetime(2026, 8, 27, 16, 45, 0),
+    )
+    rows = store.load_rows()
+    assert [row.keyword for row in rows] == ["장으뜸장어즙", "팥순"]
+    assert [row.current_volume for row in rows] == ["", "0"]
+    assert rows[0].keyword_property == "C"
+    assert rows[0].search_url_property == "D"
+    assert rows[0].volume_property == "F"
+    empty = empty_volume_rows(rows)
+    assert [row.keyword for row in empty] == ["장으뜸장어즙"]
+    store.update_volume_and_keyword(
+        empty[0],
+        keyword="장으뜸 장어즙",
+        search_volume=21000,
+        volume_found=True,
+        search_url=naver_search_url("장으뜸 장어즙"),
+    )
+    assert writer.writes == [
+        (PATSOON_URL, "C", 2, "장으뜸 장어즙"),
+        (PATSOON_URL, "F", 2, "21000"),
+        (PATSOON_URL, "D", 2, naver_search_url("장으뜸 장어즙")),
+        (PATSOON_URL, "E", 2, "2026-08-27 16:45:00"),
+    ]
+
+
+def test_sheet_store_skips_volume_when_not_found_but_writes_search() -> None:
+    writer = RecordingWriter()
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        logging.getLogger("test"),
+        writer=writer,
+        now=lambda: datetime(2026, 8, 27, 16, 45, 0),
+    )
+    row = ExposureRow(
+        "5",
+        "코숨핏",
+        "",
+        "",
+        "밀려남",
+        "G",
+        "select",
+        volume_property="K",
+        keyword_property="H",
+        keyword_type="rich_text",
+        edited_property="J",
+        search_url_property="I",
+    )
+    store.update_volume_and_keyword(
+        row,
+        keyword=None,
+        search_volume=None,
+        volume_found=False,
+        search_url=naver_search_url("코숨핏"),
+    )
+    columns = [item[1] for item in writer.writes]
+    assert columns == ["I", "J"]

@@ -7,7 +7,11 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 
 from .exposure_naver import SeleniumNaverSearch
-from .exposure_notion import NotionError, NotionExposureStore
+from .exposure_sheet import (
+    GoogleSheetExposureStore,
+    SeleniumSheetWriter,
+    SheetError,
+)
 from .gui import AutomationApp
 from .search_volume import SearchVolumeFiller, empty_volume_rows
 from .state import AnotherInstanceRunningError, InstanceLock
@@ -41,13 +45,11 @@ class SearchVolumeApp(AutomationApp):
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return
-        self.notion_token.set(str(data.get("notion_token") or ""))
-        self.database_url.set(str(data.get("database_url") or ""))
+        self.sheet_url.set(str(data.get("sheet_url") or ""))
 
     def _save_settings(self) -> None:
         payload = {
-            "notion_token": self.notion_token.get().strip(),
-            "database_url": self.database_url.get().strip(),
+            "sheet_url": self.sheet_url.get().strip(),
         }
         self._settings_path().write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
@@ -55,8 +57,7 @@ class SearchVolumeApp(AutomationApp):
         )
 
     def _create_variables(self) -> None:
-        self.notion_token = tk.StringVar()
-        self.database_url = tk.StringVar()
+        self.sheet_url = tk.StringVar()
         self.dry_run = tk.BooleanVar(value=True)
         self.progress_text = tk.StringVar(value="대기 중")
         self.pause_event = threading.Event()
@@ -72,21 +73,20 @@ class SearchVolumeApp(AutomationApp):
         )
         ttk.Label(
             outer,
-            text="검색량이 비어 있는 키워드만 채웁니다. 0은 이미 채운 값입니다. 띄어쓰기는 자동완성 첫 항목, 없으면 통합검색 첫 카페 글 제목을 따릅니다.",
+            text="구글 시트에서 검색량이 비어 있는 키워드만 채웁니다. 0은 이미 채운 값입니다. 띄어쓰기는 자동완성 첫 항목, 없으면 통합검색 첫 카페 글 제목을 따릅니다. 통합검색 주소도 같이 넣습니다.",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
-        self._entry_row(outer, 2, "노션 연결키", self.notion_token, show="*")
-        self._entry_row(outer, 3, "노션 DB 주소", self.database_url)
+        self._entry_row(outer, 2, "구글 시트 주소", self.sheet_url)
         ttk.Label(
             outer,
-            text="연결키는 노션 설정 → 연결에 만든 암호입니다. 데이터베이스에 그 연결을 초대해 주세요. 노출 확인 프로그램과 같은 표를 쓰면 됩니다.",
+            text="시트 주소는 해당 탭이 열린 주소를 그대로 넣으세요. 누구나 수정 가능하면 로그인 없이 읽고 씁니다. 막혀 있으면 크롬에서 구글 로그인하세요.",
         ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
         actions = ttk.Frame(outer)
         actions.grid(row=5, column=0, columnspan=3, sticky="ew", pady=8)
         ttk.Checkbutton(
             actions,
-            text="검증 모드(노션에 쓰지 않음)",
+            text="검증 모드(시트에 쓰지 않음)",
             variable=self.dry_run,
         ).pack(side=tk.LEFT)
         ttk.Button(actions, text="1. 크롬 준비", command=self._open_login).pack(
@@ -138,20 +138,23 @@ class SearchVolumeApp(AutomationApp):
 
     def _open_login(self) -> None:
         self._save_settings()
+        sheet_url = self.sheet_url.get().strip()
 
         def work() -> None:
-            self._naver().prepare_login()
+            self._naver().prepare_login(sheet_url=sheet_url)
 
         self._run_background(work)
 
-    def _store(self) -> NotionExposureStore:
-        token = self.notion_token.get().strip()
-        database_url = self.database_url.get().strip()
-        if not token:
-            raise ValueError("노션 연결키를 입력하세요")
-        if not database_url:
-            raise ValueError("노션 데이터베이스 주소를 입력하세요")
-        return NotionExposureStore(token, database_url, self.logger)
+    def _store(self) -> GoogleSheetExposureStore:
+        sheet_url = self.sheet_url.get().strip()
+        if not sheet_url:
+            raise ValueError("구글 시트 주소를 입력하세요")
+        return GoogleSheetExposureStore(
+            sheet_url,
+            self.logger,
+            writer=SeleniumSheetWriter(self.browser, self.logger),
+            browser=self.browser,
+        )
 
     def _check_data(self) -> None:
         try:
@@ -164,8 +167,8 @@ class SearchVolumeApp(AutomationApp):
         def work() -> None:
             try:
                 rows = store.load_rows()
-            except NotionError as exc:
-                self.ui_queue.put(("error", ("노션 확인 실패", str(exc))))
+            except SheetError as exc:
+                self.ui_queue.put(("error", ("구글 시트 확인 실패", str(exc))))
                 return
             empty = empty_volume_rows(rows)
             missing_column = sum(1 for row in rows if not row.volume_property)
@@ -175,7 +178,7 @@ class SearchVolumeApp(AutomationApp):
                         "error",
                         (
                             "검색량 열 없음",
-                            "노션에서 키워드 검색량 열을 찾지 못했습니다",
+                            "시트에서 키워드 검색량 열을 찾지 못했습니다",
                         ),
                     )
                 )
@@ -190,7 +193,7 @@ class SearchVolumeApp(AutomationApp):
                     "info",
                     (
                         "빈 검색량 확인",
-                        f"노션 키워드 {len(rows)}건 중 검색량이 비어 있는 행은 {len(empty)}건입니다. 0은 이미 채운 값으로 봅니다.",
+                        f"시트 키워드 {len(rows)}건 중 검색량이 비어 있는 행은 {len(empty)}건입니다. 0은 이미 채운 값으로 봅니다.",
                     ),
                 )
             )
@@ -209,12 +212,12 @@ class SearchVolumeApp(AutomationApp):
         if dry_run:
             if not messagebox.askyesno(
                 "검증 모드",
-                "검증 모드입니다. 네이버만 확인하고 노션은 바꾸지 않습니다. 계속할까요?",
+                "검증 모드입니다. 네이버만 확인하고 시트에는 쓰지 않습니다. 계속할까요?",
             ):
                 return
         elif not messagebox.askyesno(
             "실제 반영",
-            "검증 모드가 꺼져 있습니다. 검색량이 비어 있는 키워드만 검색량을 채우고, 띄어쓰기가 다르면 노션 키워드도 고칩니다. 계속할까요?",
+            "검증 모드가 꺼져 있습니다. 검색량이 비어 있는 키워드만 검색량과 통합검색 주소를 넣고, 띄어쓰기가 다르면 시트 키워드도 고칩니다. 최종 편집 일시는 지금 시각을 넣습니다. 계속할까요?",
         ):
             return
         self._save_settings()
@@ -225,7 +228,7 @@ class SearchVolumeApp(AutomationApp):
         self.resume_button.configure(state=tk.DISABLED)
         self.stop_button.configure(state=tk.NORMAL)
         self.progress.configure(value=0)
-        self.progress_text.set("노션 키워드를 읽는 중")
+        self.progress_text.set("구글 시트 키워드를 읽는 중")
 
         def work() -> None:
             try:
