@@ -1,0 +1,323 @@
+import json
+import logging
+from urllib.error import HTTPError
+
+from v2r_auto.exposure import ExposureRow
+from v2r_auto.exposure_notion import NotionExposureStore
+from v2r_auto.search_volume import (
+    SearchVolumeFiller,
+    collect_cafe_article_previews,
+    empty_volume_rows,
+    first_visible_cafe_title,
+    keep_keyword_notes,
+    spacing_from_autocomplete,
+    spacing_from_text,
+    volume_is_empty,
+)
+
+
+class FakeResponse:
+    def __init__(self, payload, status=200):
+        self.payload = payload
+        self.status = status
+
+    def read(self):
+        if self.status >= 400:
+            raise HTTPError(
+                "https://api.notion.com",
+                self.status,
+                "error",
+                hdrs=None,
+                fp=None,
+            )
+        return json.dumps(self.payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+
+class FakeNaver:
+    def __init__(
+        self,
+        suggestion="",
+        search_html="",
+        visible_urls=None,
+        volume=12,
+    ):
+        self.suggestion = suggestion
+        self.search_html = search_html
+        self.visible_urls = visible_urls
+        self.volume = volume
+        self.peeked: list[str] = []
+        self.searched: list[str] = []
+        self.looked_up: list[str] = []
+
+    def peek_first_autocomplete(self, keyword: str) -> str:
+        self.peeked.append(keyword)
+        return self.suggestion
+
+    def search_integrated(self, keyword: str) -> str:
+        self.searched.append(keyword)
+        return self.search_html
+
+    def visible_cafe_article_urls(self):
+        return self.visible_urls
+
+    def lookup_search_volume(self, keyword: str) -> int | None:
+        self.looked_up.append(keyword)
+        return self.volume
+
+
+class FakeStore:
+    def __init__(self):
+        self.writes: list[dict] = []
+
+    def update_volume_and_keyword(
+        self,
+        row,
+        *,
+        keyword=None,
+        search_volume=None,
+        volume_found=False,
+    ):
+        self.writes.append(
+            {
+                "page_id": row.page_id,
+                "keyword": keyword,
+                "search_volume": search_volume,
+                "volume_found": volume_found,
+            }
+        )
+
+
+def _row(
+    keyword: str,
+    *,
+    page_id="1",
+    current_volume="",
+    volume_property="키워드 검색량",
+    keyword_type="title",
+) -> ExposureRow:
+    return ExposureRow(
+        page_id,
+        keyword,
+        "",
+        "",
+        "밀려남",
+        "노출상태",
+        "status",
+        current_volume=current_volume,
+        keyword_property="키워드",
+        keyword_type=keyword_type,
+        volume_property=volume_property,
+        volume_type="number",
+    )
+
+
+def test_blank_volume_is_empty_but_zero_is_not() -> None:
+    assert volume_is_empty("")
+    assert volume_is_empty(None)
+    assert volume_is_empty("  ")
+    assert not volume_is_empty("0")
+    assert not volume_is_empty("12")
+
+
+def test_empty_volume_rows_skip_filled_and_missing_column() -> None:
+    rows = [
+        _row("장으뜸", current_volume=""),
+        _row("팥순", current_volume="0", page_id="2"),
+        _row("코숨핏", current_volume="321", page_id="3"),
+        _row("자연방패", current_volume="", page_id="4", volume_property=""),
+    ]
+    empty = empty_volume_rows(rows)
+    assert [row.keyword for row in empty] == ["장으뜸"]
+
+
+def test_autocomplete_spacing_only_when_same_letters() -> None:
+    assert spacing_from_autocomplete("장으뜸장어즙", "장으뜸 장어즙") == "장으뜸 장어즙"
+    assert spacing_from_autocomplete("장 으뜸 장어즙", "장으뜸 장어즙") == "장으뜸 장어즙"
+    assert spacing_from_autocomplete("장으뜸장어즙", "장어즙 효능") == ""
+    assert spacing_from_autocomplete("장으뜸장어즙", "") == ""
+
+
+def test_spacing_from_cafe_title_keeps_title_spaces() -> None:
+    title = "[후기] 장으뜸 장어즙 한달 먹었어요"
+    assert spacing_from_text("장으뜸장어즙", title) == "장으뜸 장어즙"
+    assert spacing_from_text("장 으뜸장어즙", title) == "장으뜸 장어즙"
+    assert spacing_from_text("코숨핏", title) == ""
+
+
+def test_keep_parenthetical_notes_when_fixing_spaces() -> None:
+    assert (
+        keep_keyword_notes("내치핵(내치핵자연치료 글로 노출됨)", "내 치핵")
+        == "내 치핵(내치핵자연치료 글로 노출됨)"
+    )
+    assert keep_keyword_notes("장으뜸장어즙", "장으뜸 장어즙") == "장으뜸 장어즙"
+
+
+def test_first_visible_cafe_title_is_any_cafe_not_only_ours() -> None:
+    html = """
+    <div id="main_pack">
+      <a href="https://cafe.naver.com/othercafe">이웃카페</a>
+      <a href="https://cafe.naver.com/othercafe/11">장으뜸 장어즙 후기</a>
+      <a href="https://cafe.naver.com/cantsb/99">우리 글은 나중</a>
+    </div>
+    """
+    previews = collect_cafe_article_previews(html)
+    assert [item.title for item in previews] == ["장으뜸 장어즙 후기", "우리 글은 나중"]
+    assert first_visible_cafe_title(html, None) == "장으뜸 장어즙 후기"
+    assert (
+        first_visible_cafe_title(html, ["https://cafe.naver.com/cantsb/99"])
+        == "우리 글은 나중"
+    )
+
+
+def test_clustered_sub_cafe_title_is_skipped() -> None:
+    html = """
+    <a href="https://cafe.naver.com/cantsb/1" data-heatmap-target=".link">대표 장으뜸 장어즙</a>
+    <a href="https://cafe.naver.com/cantsb/2" data-heatmap-target=".series">서브 글</a>
+    """
+    assert first_visible_cafe_title(html, None) == "대표 장으뜸 장어즙"
+
+
+def test_filler_uses_first_autocomplete_spacing() -> None:
+    naver = FakeNaver(suggestion="장으뜸 장어즙", volume=88)
+    store = FakeStore()
+    row = _row("장으뜸장어즙")
+    SearchVolumeFiller(store, naver, logging.getLogger("test")).run(
+        [row], dry_run=False
+    )
+    assert naver.peeked == ["장으뜸장어즙"]
+    assert naver.searched == []
+    assert naver.looked_up == ["장으뜸 장어즙"]
+    assert store.writes == [
+        {
+            "page_id": "1",
+            "keyword": "장으뜸 장어즙",
+            "search_volume": 88,
+            "volume_found": True,
+        }
+    ]
+    assert row.keyword == "장으뜸 장어즙"
+    assert row.current_volume == "88"
+
+
+def test_filler_falls_back_to_first_cafe_title() -> None:
+    html = """
+    <a href="https://cafe.naver.com/someone/77">장으뜸 장어즙 후기입니다</a>
+    """
+    naver = FakeNaver(
+        suggestion="장어즙 효능",
+        search_html=html,
+        visible_urls=["https://cafe.naver.com/someone/77"],
+        volume=10,
+    )
+    store = FakeStore()
+    row = _row("장으뜸장어즙")
+    SearchVolumeFiller(store, naver, logging.getLogger("test")).run(
+        [row], dry_run=False
+    )
+    assert naver.searched == ["장으뜸장어즙"]
+    assert store.writes[0]["keyword"] == "장으뜸 장어즙"
+    assert store.writes[0]["search_volume"] == 10
+
+
+def test_filler_skips_rows_that_already_have_volume() -> None:
+    naver = FakeNaver(suggestion="장으뜸 장어즙", volume=1)
+    store = FakeStore()
+    filled = _row("장으뜸장어즙", current_volume="0")
+    SearchVolumeFiller(store, naver, logging.getLogger("test")).run(
+        [filled], dry_run=False
+    )
+    assert naver.peeked == []
+    assert store.writes == []
+
+
+def test_dry_run_does_not_write_notion() -> None:
+    naver = FakeNaver(suggestion="장으뜸 장어즙", volume=44)
+    store = FakeStore()
+    SearchVolumeFiller(store, naver, logging.getLogger("test")).run(
+        [_row("장으뜸장어즙")], dry_run=True
+    )
+    assert store.writes == []
+
+
+def test_notion_store_reads_empty_volume_and_patches_keyword() -> None:
+    bodies = []
+
+    def opener(request, timeout=30):
+        if request.data:
+            bodies.append(json.loads(request.data.decode("utf-8")))
+        if request.full_url.endswith("/databases/2260ab12-cdff-80c3-a4c0-d2f0ab1e9c44"):
+            return FakeResponse(
+                {
+                    "properties": {
+                        "키워드": {"type": "title"},
+                        "노출상태": {"type": "status"},
+                        "키워드 검색량": {"type": "number"},
+                    }
+                }
+            )
+        if request.full_url.endswith("/query"):
+            return FakeResponse(
+                {
+                    "results": [
+                        {
+                            "id": "page-empty",
+                            "properties": {
+                                "키워드": {
+                                    "type": "title",
+                                    "title": [{"plain_text": "장으뜸장어즙"}],
+                                },
+                                "노출상태": {
+                                    "type": "status",
+                                    "status": {"name": "밀려남"},
+                                },
+                                "키워드 검색량": {"type": "number", "number": None},
+                            },
+                        },
+                        {
+                            "id": "page-zero",
+                            "properties": {
+                                "키워드": {
+                                    "type": "title",
+                                    "title": [{"plain_text": "팥순"}],
+                                },
+                                "노출상태": {
+                                    "type": "status",
+                                    "status": {"name": "밀려남"},
+                                },
+                                "키워드 검색량": {"type": "number", "number": 0},
+                            },
+                        },
+                    ],
+                    "has_more": False,
+                }
+            )
+        return FakeResponse({})
+
+    store = NotionExposureStore(
+        "secret",
+        "https://www.notion.so/2260ab12cdff80c3a4c0d2f0ab1e9c44",
+        logging.getLogger("test"),
+        opener=opener,
+    )
+    rows = store.load_rows()
+    assert [row.keyword for row in rows] == ["장으뜸장어즙", "팥순"]
+    assert [row.current_volume for row in rows] == ["", "0"]
+    assert rows[0].keyword_property == "키워드"
+    assert rows[0].keyword_type == "title"
+    empty = empty_volume_rows(rows)
+    assert [row.keyword for row in empty] == ["장으뜸장어즙"]
+    store.update_volume_and_keyword(
+        empty[0],
+        keyword="장으뜸 장어즙",
+        search_volume=21000,
+        volume_found=True,
+    )
+    payload = bodies[-1]["properties"]
+    assert payload["키워드"]["title"][0]["text"]["content"] == "장으뜸 장어즙"
+    assert payload["키워드 검색량"]["number"] == 21000

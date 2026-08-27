@@ -53,6 +53,9 @@ class ExposureRow:
     volume_type: str = ""
     exposed_volume_property: str = ""
     exposed_volume_type: str = ""
+    current_volume: str = ""
+    keyword_property: str = ""
+    keyword_type: str = ""
 
 
 @dataclass(slots=True)
