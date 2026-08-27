@@ -76,6 +76,11 @@ def keep_keyword_notes(original: str, spaced: str) -> str:
     return spaced + match.group(1)
 
 
+def is_spacing_only_suggestion(keyword: str, suggestion: str) -> bool:
+    """Autocomplete may change spaces, never add or drop other words."""
+    return bool(spacing_from_autocomplete(keyword, suggestion))
+
+
 def spacing_from_autocomplete(keyword: str, suggestion: str) -> str:
     line = normalize_spaces((suggestion or "").split("\n")[0])
     if not line:
@@ -329,7 +334,7 @@ class SearchVolumeFiller:
             return SpacingFix(keyword=spaced, source="자동완성")
         if suggestion:
             self.logger.info(
-                "자동완성 첫 항목이 다른 검색어라 통합검색 카페 글을 봅니다: %s",
+                "자동완성 첫 항목에 다른 단어가 붙어 무시하고 통합검색 카페 글을 봅니다: %s",
                 suggestion.split("\n")[0][:40],
             )
         else:

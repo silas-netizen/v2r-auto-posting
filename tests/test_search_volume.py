@@ -17,6 +17,7 @@ from v2r_auto.search_volume import (
     collect_cafe_article_previews,
     empty_volume_rows,
     first_visible_cafe_title,
+    is_spacing_only_suggestion,
     keep_keyword_notes,
     spacing_from_autocomplete,
     spacing_from_text,
@@ -164,6 +165,13 @@ def test_autocomplete_spacing_only_when_same_letters() -> None:
     assert spacing_from_autocomplete("장 으뜸 장어즙", "장으뜸 장어즙") == "장으뜸 장어즙"
     assert spacing_from_autocomplete("장으뜸장어즙", "장어즙 효능") == ""
     assert spacing_from_autocomplete("장으뜸장어즙", "") == ""
+    assert spacing_from_autocomplete("비만", "비만 계산기") == ""
+    assert spacing_from_autocomplete("복부비만", "여자 복부비만") == ""
+    assert spacing_from_autocomplete("허벅지안쪽살빼기", "허벅지 안쪽 살 빼기 운동") == ""
+    assert spacing_from_autocomplete("비만", "비 만") == "비 만"
+    assert is_spacing_only_suggestion("부종원인", "부종 원인")
+    assert not is_spacing_only_suggestion("비만", "비만 계산기")
+    assert not is_spacing_only_suggestion("복부비만", "여자 복부비만")
 
 
 def test_spacing_from_cafe_title_keeps_title_spaces() -> None:

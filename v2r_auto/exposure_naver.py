@@ -20,6 +20,7 @@ from .exposure import (
     strip_parenthetical,
     volume_from_result_cells,
 )
+from .search_volume import is_spacing_only_suggestion
 
 FIND_KEYWORD_TOOL_BOX_JS = r"""
 const compact = (s) => (s || '').replace(/\s+/g, '');
@@ -352,7 +353,9 @@ class SeleniumNaverSearch:
         box.send_keys(query)
         time.sleep(0.55)
         if not self._click_spacing_autocomplete(driver, query):
-            box.send_keys(Keys.ENTER)
+            # Enter would accept a highlighted different-word suggestion
+            # such as 비만 → 비만 계산기. Search the typed keyword only.
+            driver.get(naver_search_url(query))
         self._wait_for_integrated_results(driver, query)
         self._last_visible_cafe_urls = self._collect_visible_cafe_urls(driver)
         return driver.page_source
@@ -964,9 +967,9 @@ class SeleniumNaverSearch:
                             suggestion = (element.text or "").strip()
                             if not suggestion:
                                 continue
-                            if compact_text(suggestion) != compact_text(query):
+                            if not is_spacing_only_suggestion(query, suggestion):
                                 self.logger.info(
-                                    "자동완성 첫 항목이 다른 검색어라 입력한 키워드 그대로 검색합니다: %s",
+                                    "자동완성 첫 항목에 다른 단어가 붙어 입력한 키워드 그대로 검색합니다: %s",
                                     suggestion.split("\n")[0][:40],
                                 )
                                 return False
