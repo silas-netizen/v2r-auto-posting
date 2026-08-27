@@ -11,13 +11,13 @@ from urllib.parse import quote
 CAFE_HOME_URL = "https://cafe.naver.com/cantsb"
 CAFE_ID = 25016228
 CAFE_SEARCH_PAGE = (
+    "https://cafe.naver.com/ca-cafes/"
+    f"{CAFE_ID}/menus/0?viewType=L&ta=ARTICLE_COMMENT&page=1&q={{query}}"
+)
+CAFE_SEARCH_PAGE_MODERN = (
     "https://cafe.naver.com/ArticleSearchList.nhn"
     f"?search.clubid={CAFE_ID}&search.media=0&search.searchBy=0"
     "&search.defaultValue=1&search.sortBy=date&search.query={query}"
-)
-CAFE_SEARCH_PAGE_MODERN = (
-    "https://cafe.naver.com/f-e/cafes/"
-    f"{CAFE_ID}/searches/articles?q={{query}}"
 )
 DEFAULT_KEYWORDS = ("팥순", "자연방패", "장으뜸")
 FLOWMOA_MEMBERSHIP_URL = "https://flowmoa.com/index.php?view=moa-membership"
@@ -41,13 +41,14 @@ NICKNAME_KEYS = (
     "nick",
 )
 SEARCH_API_TEMPLATES = (
+    "https://apis.cafe.naver.com/search/v2/cafes/"
+    f"{CAFE_ID}/search/articles?query={{query}}&perPage=15&page={{page}}"
+    "&menuId=0&views=MEMBER_LEVEL,COUNT,SALE_INFO,CAFE_MENU",
     "https://apis.naver.com/cafe-web/cafe-searchui-api/v1/cafes/"
     f"{CAFE_ID}/search/articles?query={{query}}&page={{page}}&perPage=50",
     "https://apis.naver.com/cafe-web/cafe-mobile/CafeSearchArticleList"
     f"?search.clubid={CAFE_ID}&search.query={{query}}&search.page={{page}}"
-    "&search.perPage=50&search.searchBy=1",
-    "https://apis.naver.com/cafe-web/cafe-search-api/v1.0/cafes/"
-    f"{CAFE_ID}/articles?query={{query}}&page={{page}}&size=50",
+    "&search.perPage=50&search.searchBy=0",
 )
 HTML_NICK_PATTERNS = (
     re.compile(r'data-nickname="([^"]+)"'),

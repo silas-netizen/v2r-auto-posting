@@ -27,11 +27,14 @@ def test_keywords_can_be_added_later() -> None:
 
 def test_cafe_search_url_is_article_search_not_write() -> None:
     url = cafe_search_url("팥순")
-    assert "ArticleSearchList" in url
-    assert "clubid=25016228" in url
-    assert "query=" in url
+    assert "ca-cafes/25016228" in url
+    assert "q=" in url
     assert "ArticleWrite" not in url
     assert "글쓰기" not in url
+    from v2r_auto.nickname_exclude import search_api_urls
+
+    api = search_api_urls("팥순", 1)[0]
+    assert "apis.cafe.naver.com/search/v2/cafes/25016228/search/articles" in api
 
 
 def test_merge_adds_only_new_nicknames() -> None:
