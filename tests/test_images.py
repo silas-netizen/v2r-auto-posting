@@ -7,6 +7,7 @@ from v2r_auto.images import (
     DriveItem,
     GoogleDriveImageResolver,
     brand_from_sheet_title,
+    normalize_image_marker,
     placeholders,
     strip_placeholders,
 )
@@ -30,6 +31,13 @@ def test_sheet_title_brand_uses_last_parentheses() -> None:
     assert brand_from_sheet_title("카페 원고 작성 시트 (팥순이) - Google Drive") == "팥순이"
 
 
+def test_image_markers_are_normalized() -> None:
+    assert normalize_image_marker("키워드") == "키워드"
+    assert normalize_image_marker("A열 키워드") == "키워드"
+    assert normalize_image_marker("B/A") == "B/A"
+    assert normalize_image_marker("BA") == "B/A"
+
+
 def test_all_curly_placeholders_are_removed() -> None:
     body = "첫 줄\n{키워드}\n둘째 {B/A}\n{없는폴더}"
 
@@ -51,7 +59,7 @@ def test_drive_folder_page_parses_folders_and_images() -> None:
 
 
 def test_patsooni_keyword_matches_filename_without_spaces(tmp_path: Path) -> None:
-    job = make_job("{키워드}\n{B/A}")
+    job = make_job("{A열 키워드}\n{B/A}")
 
     class FakeResolver(GoogleDriveImageResolver):
         def __init__(self):

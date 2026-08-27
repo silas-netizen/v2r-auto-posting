@@ -39,6 +39,15 @@ def placeholders(body: str) -> list[str]:
     return [match.group(1).strip() for match in PLACEHOLDER_PATTERN.finditer(body)]
 
 
+def normalize_image_marker(marker: str) -> str:
+    compact = re.sub(r"\s+", "", marker or "")
+    if compact in {"키워드", "A열키워드"}:
+        return "키워드"
+    if compact in {"B/A", "BA"}:
+        return "B/A"
+    return (marker or "").strip()
+
+
 def strip_placeholders(body: str) -> str:
     return PLACEHOLDER_PATTERN.sub("", body)
 
@@ -159,43 +168,61 @@ class GoogleDriveImageResolver:
         target.write_bytes(data)
         return target
 
-    def resolve(self, job: AffiliateJob) -> list[ResolvedImage]:
-        markers = placeholders(job.body)
-        if job.image_disabled or not markers:
+    def _image_folder(self, brand_folder_id: str, marker: str) -> DriveItem | None:
+        normalized = normalize_image_marker(marker)
+        names = [normalized]
+        if normalized == "B/A":
+            names = ["B/A", "BA"]
+        elif normalized == "키워드":
+            names = ["키워드"]
+        for name in names:
+            found = self._folder(brand_folder_id, name)
+            if found:
+                return found
+        return None
+
+    def resolve_body(
+        self,
+        *,
+        brand: str,
+        keyword: str,
+        body: str,
+        image_disabled: bool = False,
+        row_number: int = 0,
+    ) -> list[ResolvedImage]:
+        markers = placeholders(body)
+        if image_disabled or not markers:
             return []
-        brand_folder = self._folder(self.root_folder_id, job.brand)
+        brand_folder = self._folder(self.root_folder_id, brand)
         if not brand_folder:
             self.logger.warning(
                 "행 %s 이미지 브랜드 폴더를 찾지 못해 이미지 없이 진행: %s",
-                job.row_number,
-                job.brand or "브랜드 미확인",
+                row_number,
+                brand or "브랜드 미확인",
             )
             return []
 
         resolved: list[ResolvedImage] = []
         for occurrence, marker in enumerate(markers):
-            folder_name = marker
-            keyword_match = job.brand == "팥순이" and marker == "키워드"
-            if job.brand == "팥순이" and marker == "B/A":
-                folder_name = "BA"
-            folder = self._folder(brand_folder.item_id, folder_name)
+            normalized = normalize_image_marker(marker)
+            folder = self._image_folder(brand_folder.item_id, marker)
             if not folder:
                 self.logger.warning(
                     "행 %s {%s} 폴더를 찾지 못해 해당 이미지 생략",
-                    job.row_number,
+                    row_number,
                     marker,
                 )
                 continue
             files = [item for item in self._list_folder(folder.item_id) if not item.is_folder]
-            if keyword_match:
-                wanted = re.sub(r"\s+", "", job.keyword).casefold()
+            if brand == "팥순이" and normalized == "키워드":
+                wanted = re.sub(r"\s+", "", keyword).casefold()
                 candidates = [item for item in files if self._file_key(item.name) == wanted]
             else:
                 candidates = files
             if not candidates:
                 self.logger.warning(
                     "행 %s {%s}에 사용할 이미지를 찾지 못해 해당 이미지 생략",
-                    job.row_number,
+                    row_number,
                     marker,
                 )
                 continue
@@ -205,7 +232,7 @@ class GoogleDriveImageResolver:
             except Exception as exc:
                 self.logger.warning(
                     "행 %s {%s} 이미지 다운로드 실패로 생략: %s",
-                    job.row_number,
+                    row_number,
                     marker,
                     exc,
                 )
@@ -220,3 +247,12 @@ class GoogleDriveImageResolver:
                 )
             )
         return resolved
+
+    def resolve(self, job: AffiliateJob) -> list[ResolvedImage]:
+        return self.resolve_body(
+            brand=job.brand,
+            keyword=job.keyword,
+            body=job.body,
+            image_disabled=job.image_disabled,
+            row_number=job.row_number,
+        )
