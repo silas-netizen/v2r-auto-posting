@@ -17,6 +17,11 @@ from .exposure import (
 )
 from .exposure_naver import SeleniumNaverSearch
 from .exposure_notion import NotionError, NotionExposureStore
+from .exposure_sheet import (
+    GoogleSheetExposureStore,
+    SeleniumSheetWriter,
+    SheetError,
+)
 from .gui import AutomationApp
 from .state import AnotherInstanceRunningError, InstanceLock
 
@@ -34,9 +39,10 @@ class ExposureApp(AutomationApp):
             messagebox.showerror("중복 실행", str(exc))
             self.destroy()
             raise SystemExit(1) from exc
-        self.geometry("960x860")
-        self.minsize(880, 740)
+        self.geometry("960x880")
+        self.minsize(880, 760)
         self._load_settings()
+        self._apply_source()
 
     def _settings_path(self) -> Path:
         return self.data_dir / "settings.json"
@@ -51,6 +57,10 @@ class ExposureApp(AutomationApp):
             return
         self.notion_token.set(str(data.get("notion_token") or ""))
         self.database_url.set(str(data.get("database_url") or ""))
+        self.sheet_url.set(str(data.get("sheet_url") or ""))
+        source = str(data.get("source") or "notion").strip()
+        if source in {"notion", "sheet"}:
+            self.source.set(source)
         brands = str(data.get("brands") or "").strip()
         if brands:
             self.brands.set(brands)
@@ -60,8 +70,10 @@ class ExposureApp(AutomationApp):
 
     def _save_settings(self) -> None:
         payload = {
+            "source": self.source.get().strip() or "notion",
             "notion_token": self.notion_token.get().strip(),
             "database_url": self.database_url.get().strip(),
+            "sheet_url": self.sheet_url.get().strip(),
             "brands": self.brands.get().strip(),
             "cafes": self.cafes.get().strip(),
         }
@@ -71,8 +83,10 @@ class ExposureApp(AutomationApp):
         )
 
     def _create_variables(self) -> None:
+        self.source = tk.StringVar(value="notion")
         self.notion_token = tk.StringVar()
         self.database_url = tk.StringVar()
+        self.sheet_url = tk.StringVar()
         self.cafes = tk.StringVar(value=", ".join(DEFAULT_CAFE_NAMES))
         self.brands = tk.StringVar(value=", ".join(DEFAULT_BRAND_MARKERS))
         self.dry_run = tk.BooleanVar(value=True)
@@ -84,7 +98,7 @@ class ExposureApp(AutomationApp):
         outer = ttk.Frame(self, padding=16)
         outer.pack(fill=tk.BOTH, expand=True)
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(10, weight=1)
+        outer.rowconfigure(11, weight=1)
 
         ttk.Label(outer, text=self.app_name, font=("", 18, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
@@ -94,23 +108,40 @@ class ExposureApp(AutomationApp):
             text="네이버 검색은 한 번만 로그인하면 됩니다. 검색량은 광고주센터 왼쪽 메뉴 도구 → 키워드 도구에서 읽습니다. 크롬 창은 닫지 마세요.",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
-        self._entry_row(outer, 2, "노션 연결키", self.notion_token, show="*")
-        self._entry_row(outer, 3, "노션 DB 주소", self.database_url)
-        self._entry_row(outer, 4, "우리 카페", self.cafes)
-        self._entry_row(outer, 5, "브랜드 식별어", self.brands)
+        source_row = ttk.Frame(outer)
+        source_row.grid(row=2, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        ttk.Label(source_row, text="데이터", width=17).pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            source_row,
+            text="노션",
+            variable=self.source,
+            value="notion",
+            command=self._apply_source,
+        ).pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            source_row,
+            text="구글 시트",
+            variable=self.source,
+            value="sheet",
+            command=self._apply_source,
+        ).pack(side=tk.LEFT, padx=(12, 0))
 
-        ttk.Label(
-            outer,
-            text="연결키는 노션 설정 → 연결에 만든 암호입니다. 데이터베이스에 그 연결을 초대해 주세요.",
-        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        self.notion_token_widgets = self._field_row(
+            outer, 3, "노션 연결키", self.notion_token, show="*"
+        )
+        self.database_widgets = self._field_row(outer, 4, "노션 DB 주소", self.database_url)
+        self.sheet_widgets = self._field_row(outer, 4, "구글 시트 주소", self.sheet_url)
+        self._entry_row(outer, 5, "우리 카페", self.cafes)
+        self._entry_row(outer, 6, "브랜드 식별어", self.brands)
+
+        self.source_hint = ttk.Label(outer, text="")
+        self.source_hint.grid(row=7, column=0, columnspan=3, sticky="w", pady=(0, 8))
 
         select_frame = ttk.LabelFrame(outer, text="선택 조회", padding=8)
-        select_frame.grid(row=7, column=0, columnspan=3, sticky="nsew", pady=(0, 8))
+        select_frame.grid(row=8, column=0, columnspan=3, sticky="nsew", pady=(0, 8))
         select_frame.columnconfigure(0, weight=1)
-        ttk.Label(
-            select_frame,
-            text="키워드 여러 개, 줄바꿈으로 붙여 넣기. 괄호 안은 빼고, 노션에 있는 키워드만 검사합니다. 검색량도 함께 반영합니다.",
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        self.select_hint = ttk.Label(select_frame, text="")
+        self.select_hint.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 4))
         self.keyword_text = tk.Text(select_frame, height=7, wrap="word")
         self.keyword_text.grid(row=1, column=0, columnspan=2, sticky="nsew")
         self.keyword_text.bind("<KeyRelease>", self._refresh_selected_count)
@@ -131,12 +162,13 @@ class ExposureApp(AutomationApp):
         )
 
         actions = ttk.Frame(outer)
-        actions.grid(row=8, column=0, columnspan=3, sticky="ew", pady=8)
-        ttk.Checkbutton(
+        actions.grid(row=9, column=0, columnspan=3, sticky="ew", pady=8)
+        self.dry_run_check = ttk.Checkbutton(
             actions,
             text="검증 모드(노션에 쓰지 않음)",
             variable=self.dry_run,
-        ).pack(side=tk.LEFT)
+        )
+        self.dry_run_check.pack(side=tk.LEFT)
         ttk.Button(actions, text="1. 크롬 준비", command=self._open_login).pack(
             side=tk.LEFT, padx=(16, 0)
         )
@@ -166,7 +198,7 @@ class ExposureApp(AutomationApp):
         ).pack(side=tk.RIGHT)
 
         progress_frame = ttk.Frame(outer)
-        progress_frame.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        progress_frame.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         progress_frame.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_frame, maximum=100)
         self.progress.grid(row=0, column=0, sticky="ew")
@@ -175,7 +207,8 @@ class ExposureApp(AutomationApp):
         )
 
         log_frame = ttk.LabelFrame(outer, text="실시간 로그", padding=8)
-        log_frame.grid(row=10, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=11, column=0, columnspan=3, sticky="nsew")
+        self._apply_source()
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state=tk.DISABLED)
@@ -184,15 +217,75 @@ class ExposureApp(AutomationApp):
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=scrollbar.set)
 
+    def _field_row(
+        self,
+        parent: ttk.Frame,
+        row: int,
+        label: str,
+        variable: tk.StringVar,
+        show: str | None = None,
+    ) -> tuple[ttk.Label, ttk.Entry]:
+        caption = ttk.Label(parent, text=label, width=17)
+        caption.grid(row=row, column=0, sticky="w", pady=3)
+        entry = ttk.Entry(parent, textvariable=variable, show=show)
+        entry.grid(row=row, column=1, sticky="ew", pady=3)
+        return caption, entry
+
+    def _is_sheet_source(self) -> bool:
+        return self.source.get().strip() == "sheet"
+
+    def _source_label(self) -> str:
+        return "구글 시트" if self._is_sheet_source() else "노션"
+
+    def _apply_source(self) -> None:
+        if not hasattr(self, "source_hint"):
+            return
+        sheet = self._is_sheet_source()
+        if sheet:
+            for widget in self.notion_token_widgets + self.database_widgets:
+                widget.grid_remove()
+            for widget in self.sheet_widgets:
+                widget.grid()
+            self.source_hint.configure(
+                text="시트 주소는 해당 탭이 열린 주소를 그대로 넣으세요. 누구나 수정 가능하면 로그인 없이 읽고 씁니다. 막혀 있으면 크롬에서 구글 로그인하세요."
+            )
+            self.select_hint.configure(
+                text="키워드 여러 개, 줄바꿈으로 붙여 넣기. 괄호 안은 빼고, 시트에 있는 키워드만 검사합니다. 검색량도 함께 반영합니다."
+            )
+            self.dry_run_check.configure(text="검증 모드(시트에 쓰지 않음)")
+        else:
+            for widget in self.sheet_widgets:
+                widget.grid_remove()
+            for widget in self.notion_token_widgets + self.database_widgets:
+                widget.grid()
+            self.source_hint.configure(
+                text="연결키는 노션 설정 → 연결에 만든 암호입니다. 데이터베이스에 그 연결을 초대해 주세요."
+            )
+            self.select_hint.configure(
+                text="키워드 여러 개, 줄바꿈으로 붙여 넣기. 괄호 안은 빼고, 노션에 있는 키워드만 검사합니다. 검색량도 함께 반영합니다."
+            )
+            self.dry_run_check.configure(text="검증 모드(노션에 쓰지 않음)")
+
     def _open_login(self) -> None:
         self._save_settings()
+        sheet_url = self.sheet_url.get().strip() if self._is_sheet_source() else ""
 
         def work() -> None:
-            self._naver().prepare_login()
+            self._naver().prepare_login(sheet_url=sheet_url)
 
         self._run_background(work)
 
-    def _store(self) -> NotionExposureStore:
+    def _store(self):
+        if self._is_sheet_source():
+            sheet_url = self.sheet_url.get().strip()
+            if not sheet_url:
+                raise ValueError("구글 시트 주소를 입력하세요")
+            return GoogleSheetExposureStore(
+                sheet_url,
+                self.logger,
+                writer=SeleniumSheetWriter(self.browser, self.logger),
+                browser=self.browser,
+            )
         token = self.notion_token.get().strip()
         database_url = self.database_url.get().strip()
         if not token:
@@ -212,14 +305,14 @@ class ExposureApp(AutomationApp):
         def work() -> None:
             try:
                 rows = store.load_rows()
-            except NotionError as exc:
-                self.ui_queue.put(("error", ("노션 확인 실패", str(exc))))
+            except (NotionError, SheetError) as exc:
+                self.ui_queue.put(("error", (f"{store.label} 확인 실패", str(exc))))
                 return
             self.logger.info("키워드 확인 완료: %s건", len(rows))
             self.ui_queue.put(
                 (
                     "info",
-                    ("키워드 확인", f"노션에서 키워드 {len(rows)}건을 읽었습니다"),
+                    ("키워드 확인", f"{store.label}에서 키워드 {len(rows)}건을 읽었습니다"),
                 )
             )
 
@@ -254,17 +347,28 @@ class ExposureApp(AutomationApp):
             messagebox.showerror("입력 오류", str(exc))
             return
         dry_run = self.dry_run.get()
+        label = getattr(store, "label", self._source_label())
         if dry_run:
             if not messagebox.askyesno(
                 "검증 모드",
-                "검증 모드입니다. 네이버만 확인하고 노션은 바꾸지 않습니다. 계속할까요?",
+                f"검증 모드입니다. 네이버만 확인하고 {label}에는 쓰지 않습니다. 계속할까요?",
             ):
                 return
-        elif not messagebox.askyesno(
-            "실제 반영",
-            "검증 모드가 꺼져 있습니다. 검색 결과에 따라 노션 노출상태와 검색량을 바꿉니다. 카페/ID는 노출완이고 카페가 다를 때만 바꿉니다. 계속할까요?",
-        ):
-            return
+        else:
+            cafe_field = "카페명" if self._is_sheet_source() else "카페/ID"
+            edited = (
+                " 최종 편집 일시는 지금 시각을 넣습니다."
+                if self._is_sheet_source()
+                else ""
+            )
+            if not messagebox.askyesno(
+                "실제 반영",
+                (
+                    f"검증 모드가 꺼져 있습니다. 검색 결과에 따라 {label} 노출상태와 검색량을 바꿉니다. "
+                    f"{cafe_field}는 노출완이고 카페가 다를 때만 바꿉니다.{edited} 계속할까요?"
+                ),
+            ):
+                return
         self._save_settings()
         self.stop_event.clear()
         self.pause_event.clear()
@@ -274,7 +378,7 @@ class ExposureApp(AutomationApp):
         self.resume_button.configure(state=tk.DISABLED)
         self.stop_button.configure(state=tk.NORMAL)
         self.progress.configure(value=0)
-        self.progress_text.set("노션 키워드를 읽는 중")
+        self.progress_text.set(f"{label} 키워드를 읽는 중")
 
         def work() -> None:
             try:
@@ -282,10 +386,15 @@ class ExposureApp(AutomationApp):
                 if selected_only:
                     rows, missing = match_selected_rows(rows, selected or [])
                     for keyword in missing:
-                        self.logger.warning("노션에 없는 키워드라 건너뜁니다: %s", keyword)
+                        self.logger.warning(
+                            "%s에 없는 키워드라 건너뜁니다: %s", label, keyword
+                        )
                     if not rows:
                         self.ui_queue.put(
-                            ("error", ("선택 조회", "노션에서 맞는 키워드를 찾지 못했습니다"))
+                            (
+                                "error",
+                                ("선택 조회", f"{label}에서 맞는 키워드를 찾지 못했습니다"),
+                            )
                         )
                         return
                     self.logger.info("선택 조회 %s건을 검사합니다", len(rows))

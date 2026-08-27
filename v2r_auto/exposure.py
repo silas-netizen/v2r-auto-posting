@@ -29,9 +29,10 @@ KEYWORD_HEADERS = ("키워드", "검색어", "검색 키워드")
 STATUS_HEADERS = ("노출상태", "노출 상태")
 SEARCH_URL_HEADERS = ("통합검색", "통합 검색", "네이버 통합검색", "네이버통합검색")
 POST_URL_HEADERS = ("작성 글", "작성글", "작성 글 링크", "작성글링크")
-CAFE_HEADERS = ("카페/ID", "카페 / ID", "카페ID")
+CAFE_HEADERS = ("카페/ID", "카페 / ID", "카페ID", "카페명", "카페")
 VOLUME_HEADERS = ("키워드 검색량", "#키워드검색량", "# 키워드 검색량", "검색량")
 EXPOSED_VOLUME_HEADERS = ("노출된 검색량", "#노출된검색량", "# 노출된 검색량", "노출 검색량")
+EDITED_HEADERS = ("최종 편집 일시", "최종편집일시", "최종 수정 일시")
 _ANCHOR_RE = re.compile(
     r'(?is)<a\b[^>]*\bhref=["\']([^"\']+)["\'][^>]*>(.*?)</a>'
 )
@@ -53,6 +54,7 @@ class ExposureRow:
     volume_type: str = ""
     exposed_volume_property: str = ""
     exposed_volume_type: str = ""
+    edited_property: str = ""
 
 
 @dataclass(slots=True)
@@ -644,13 +646,15 @@ class ExposureChecker:
             cafe_log = f"변경 {cafe_write}"
         elif cafe_value:
             cafe_log = f"유지 {cafe_value}"
+        label = getattr(self.notion, "label", "노션")
         if dry_run:
             self.logger.info(
-                "검증 모드: %s → %s / 카페 %s / 검색량 %s (노션에 쓰지 않음)",
+                "검증 모드: %s → %s / 카페 %s / 검색량 %s (%s에 쓰지 않음)",
                 row.current_status or "(비어 있음)",
                 status,
                 cafe_log,
                 volume if volume_found else "(조회 안 됨)",
+                label,
             )
             return
         if hasattr(self.notion, "update_check_result"):
@@ -664,11 +668,11 @@ class ExposureChecker:
         elif row.current_status != status:
             self.notion.update_status(row, status)
         if row.current_status != status:
-            self.logger.info("노션 노출상태 변경: %s → %s", row.keyword, status)
+            self.logger.info("%s 노출상태 변경: %s → %s", label, row.keyword, status)
         else:
             self.logger.info("상태 유지: %s", status)
         if cafe_write:
-            self.logger.info("노션 카페/ID 변경: %s → %s", row.keyword, cafe_write)
+            self.logger.info("%s 카페 변경: %s → %s", label, row.keyword, cafe_write)
         row.current_status = status
         row.current_cafe = cafe_value
 

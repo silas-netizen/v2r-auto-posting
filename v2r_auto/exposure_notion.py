@@ -210,6 +210,8 @@ class _SourceBind:
 
 
 class NotionExposureStore:
+    label = "노션"
+
     def __init__(
         self,
         token: str,
