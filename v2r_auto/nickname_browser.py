@@ -9,20 +9,25 @@ from selenium.webdriver.common.keys import Keys
 
 from .browser import AutomationError, V2RBrowser
 from .nickname_exclude import (
-    CAFE_HOME_URL,
-    FLOWMOA_HOME_URL,
+    DEFAULT_CAFE_URL,
     FLOWMOA_MEMBERSHIP_URL,
+    NAVER_LOGIN_URL,
+    CafeTarget,
     ExcludeSyncResult,
     NicknameExcludeError,
     build_sync_result,
+    cafe_id_from_page,
     cafe_search_url,
     cafe_search_url_modern,
+    cookies_show_naver_login,
     join_nicknames,
     nicknames_from_html,
     nicknames_from_json,
     page_is_missing,
     page_requires_naver_login,
+    parse_cafe_address,
     payload_has_articles,
+    require_cafe_id,
     require_keywords,
     search_api_urls,
     split_nicknames,
@@ -42,25 +47,85 @@ fetch(url, {credentials: 'include', headers: {Accept: 'application/json,text/htm
 
 
 class NicknameExcludeSession:
-    def __init__(self, browser: V2RBrowser):
+    def __init__(self, browser: V2RBrowser, cafe: CafeTarget | None = None):
         self.browser = browser
         self.logger = browser.logger
+        self.cafe = cafe or parse_cafe_address(DEFAULT_CAFE_URL)
         self.cafe_handle: str | None = None
         self.flowmoa_handle: str | None = None
 
-    def open_login_windows(self) -> None:
+    def open_login_windows(
+        self,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> None:
         browser = self.browser
         browser.start()
         assert browser.driver
-        browser._navigate(CAFE_HOME_URL, self.cafe_handle)
         self.cafe_handle = browser.driver.current_window_handle
+        self.wait_for_naver_login(should_stop=should_stop)
+        self._open_cafe_home()
         browser.driver.switch_to.new_window("tab")
         self.flowmoa_handle = browser.driver.current_window_handle
         browser._navigate(FLOWMOA_MEMBERSHIP_URL, self.flowmoa_handle)
+        self.logger.info("신고기 창을 열었습니다")
+
+    def wait_for_naver_login(
+        self,
+        should_stop: Callable[[], bool] | None = None,
+        timeout_seconds: int = 600,
+    ) -> None:
+        self.browser.ensure_browser()
+        assert self.browser.driver
+        if self._naver_logged_in():
+            self.logger.info("네이버 로그인이 되어 있습니다")
+            return
+        self._switch(self.cafe_handle)
+        self.cafe_handle = self.browser.driver.current_window_handle
+        self.browser._navigate(NAVER_LOGIN_URL, self.cafe_handle)
         self.logger.info(
-            "씨씨앙과 신고기 창을 열었습니다. "
-            "네이버는 이 크롬에서 로그인하면 됩니다"
+            "네이버 로그인 창을 먼저 열었습니다. "
+            "이 크롬에서 로그인하면 카페가 열립니다"
         )
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if should_stop and should_stop():
+                raise NicknameExcludeError("확인을 중지했습니다")
+            if self._naver_logged_in():
+                self.logger.info("네이버 로그인을 확인했습니다")
+                return
+            time.sleep(1)
+        raise NicknameExcludeError(
+            "네이버 로그인을 기다렸지만 확인하지 못했습니다. "
+            "이 프로그램 크롬에서 로그인한 뒤 다시 시작해 주세요"
+        )
+
+    def _naver_logged_in(self) -> bool:
+        assert self.browser.driver
+        names = [cookie.get("name", "") for cookie in self.browser.driver.get_cookies()]
+        if cookies_show_naver_login(names):
+            return True
+        url = self.browser.driver.current_url or ""
+        if page_requires_naver_login(self._page_html(), url):
+            return False
+        current = url.casefold()
+        return "cafe.naver.com" in current and "nid.naver.com" not in current
+
+    def _open_cafe_home(self) -> None:
+        self._switch(self.cafe_handle)
+        self.browser._navigate(self.cafe.home_url, self.cafe_handle)
+        self.cafe_handle = self.browser.driver.current_window_handle
+        self._resolve_cafe_id()
+        self.logger.info("카페를 열었습니다: %s", self.cafe.home_url)
+
+    def _resolve_cafe_id(self) -> None:
+        if self.cafe.cafe_id:
+            return
+        found = cafe_id_from_page(self._page_html(), self.browser.driver.current_url)
+        if not found:
+            raise NicknameExcludeError(
+                "카페 번호를 찾지 못했습니다. 카페 주소를 다시 확인해 주세요"
+            )
+        self.cafe = self.cafe.with_cafe_id(found)
 
     def _switch(self, handle: str | None) -> None:
         self.browser.ensure_browser()
@@ -95,10 +160,10 @@ class NicknameExcludeSession:
     ) -> list[str]:
         self.browser.ensure_browser()
         assert self.browser.driver
+        self.wait_for_naver_login(should_stop=should_stop)
         if self.cafe_handle is None:
-            self.browser._navigate(CAFE_HOME_URL, self.cafe_handle)
             self.cafe_handle = self.browser.driver.current_window_handle
-        self._switch(self.cafe_handle)
+        self._open_cafe_home()
         self._require_cafe_login()
         found: list[str] = []
         for keyword in keywords:
@@ -106,7 +171,7 @@ class NicknameExcludeSession:
                 raise NicknameExcludeError("확인을 중지했습니다")
             found.extend(self._search_one_keyword(keyword, should_stop))
         nicknames = split_nicknames("\n".join(found))
-        self.logger.info("씨씨앙에서 닉네임 %s개를 모았습니다", len(nicknames))
+        self.logger.info("카페에서 닉네임 %s개를 모았습니다", len(nicknames))
         return nicknames
 
     def _search_one_keyword(
@@ -114,9 +179,10 @@ class NicknameExcludeSession:
         keyword: str,
         should_stop: Callable[[], bool] | None,
     ) -> list[str]:
-        self.logger.info("씨씨앙 글 검색창에서 '%s'를 찾습니다", keyword)
+        require_cafe_id(self.cafe)
+        self.logger.info("카페 글 검색창에서 '%s'를 찾습니다", keyword)
         # 카페 글 검색만 연다. 글쓰기 화면은 쓰지 않는다.
-        self.browser._navigate(cafe_search_url(keyword), self.cafe_handle)
+        self.browser._navigate(cafe_search_url(keyword, self.cafe), self.cafe_handle)
         time.sleep(1.2)
         assert self.browser.driver
         current = (self.browser.driver.current_url or "").casefold()
@@ -127,7 +193,10 @@ class NicknameExcludeSession:
             or page_is_missing(html, current)
         ):
             self.logger.info("글 검색 화면이 아니라서 카페 검색 주소로 다시 엽니다")
-            self.browser._navigate(cafe_search_url_modern(keyword), self.cafe_handle)
+            self.browser._navigate(
+                cafe_search_url_modern(keyword, self.cafe),
+                self.cafe_handle,
+            )
             time.sleep(1.2)
         self._require_cafe_login()
         found: list[str] = []
@@ -159,7 +228,7 @@ class NicknameExcludeSession:
         return found
 
     def _search_page(self, keyword: str, page: int) -> list[str]:
-        for url in search_api_urls(keyword, page):
+        for url in search_api_urls(keyword, page, self.cafe):
             result = self._fetch(url)
             if not result.get("ok"):
                 continue
@@ -338,7 +407,10 @@ class NicknameExcludeSession:
         user: str,
         password: str,
         should_stop: Callable[[], bool] | None = None,
+        cafe_url: str = "",
     ) -> ExcludeSyncResult:
+        if cafe_url:
+            self.cafe = parse_cafe_address(cafe_url)
         keywords = require_keywords(keywords_text)
         found = self.collect_cafe_nicknames(keywords, should_stop=should_stop)
         self.login_flowmoa(user, password)
@@ -352,5 +424,9 @@ class NicknameExcludeSession:
         return plan
 
 
-def open_login_windows(browser: V2RBrowser) -> None:
-    NicknameExcludeSession(browser).open_login_windows()
+def open_login_windows(
+    browser: V2RBrowser,
+    cafe: CafeTarget | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> None:
+    NicknameExcludeSession(browser, cafe).open_login_windows(should_stop=should_stop)

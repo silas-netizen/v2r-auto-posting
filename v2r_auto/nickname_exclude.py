@@ -8,17 +8,24 @@ from typing import Any, Callable, Iterable
 from urllib.parse import quote
 
 
-CAFE_HOME_URL = "https://cafe.naver.com/cantsb"
-CAFE_ID = 25016228
-CAFE_SEARCH_PAGE = (
-    "https://cafe.naver.com/f-e/cafes/"
-    f"{CAFE_ID}/menus/0?viewType=L&ta=ARTICLE_COMMENT&page=1&q={{query}}"
-)
-CAFE_SEARCH_PAGE_MODERN = (
-    "https://cafe.naver.com/cantsb?iframe_url=/ArticleSearchList.nhn"
-    f"?search.clubid={CAFE_ID}&search.media=0&search.searchBy=0"
-    "&search.defaultValue=1&search.sortBy=date&search.query={query}"
-)
+DEFAULT_CAFE_URL = "https://cafe.naver.com/cantsb"
+DEFAULT_CAFE_ID = 25016228
+DEFAULT_CAFE_SLUG = "cantsb"
+CAFE_HOME_URL = DEFAULT_CAFE_URL
+CAFE_ID = DEFAULT_CAFE_ID
+NAVER_LOGIN_URL = "https://nid.naver.com/nidlogin.login"
+NAVER_LOGIN_COOKIES = ("NID_AUT", "NID_SES")
+RESERVED_CAFE_SLUGS = {
+    "articlelist.nhn",
+    "articlesearchlist.nhn",
+    "articlewrite.nhn",
+    "ca-cafes",
+    "ca-fe",
+    "ca-fes",
+    "cafeprofileview.nhn",
+    "f-e",
+    "managehome.nhn",
+}
 MISSING_PAGE_HINTS = (
     "페이지를 찾을 수 없습니다",
     "서비스에 접속할 수 없습니다",
@@ -46,12 +53,12 @@ NICKNAME_KEYS = (
 )
 SEARCH_API_TEMPLATES = (
     "https://apis.cafe.naver.com/search/v2/cafes/"
-    f"{CAFE_ID}/search/articles?query={{query}}&perPage=15&page={{page}}"
+    "{cafe_id}/search/articles?query={query}&perPage=15&page={page}"
     "&menuId=0&views=MEMBER_LEVEL,COUNT,SALE_INFO,CAFE_MENU",
     "https://apis.naver.com/cafe-web/cafe-searchui-api/v1/cafes/"
-    f"{CAFE_ID}/search/articles?query={{query}}&page={{page}}&perPage=50",
+    "{cafe_id}/search/articles?query={query}&page={page}&perPage=50",
     "https://apis.naver.com/cafe-web/cafe-mobile/CafeSearchArticleList"
-    f"?search.clubid={CAFE_ID}&search.query={{query}}&search.page={{page}}"
+    "?search.clubid={cafe_id}&search.query={query}&search.page={page}"
     "&search.perPage=50&search.searchBy=0",
 )
 HTML_NICK_PATTERNS = (
@@ -60,10 +67,27 @@ HTML_NICK_PATTERNS = (
     re.compile(r'"nickname"\s*:\s*"([^"]+)"'),
     re.compile(r'class="[^"]*nick[^"]*"[^>]*>\s*([^<]{1,40})\s*<'),
 )
+CAFE_ID_PATTERNS = (
+    re.compile(r"/cafes/(\d+)"),
+    re.compile(r"(?:clubid|cafeid)=(\d+)", re.I),
+    re.compile(r'"cafeId"\s*:\s*"?(\d+)'),
+    re.compile(r'"clubId"\s*:\s*"?(\d+)'),
+    re.compile(r"g_sClubId\s*=\s*['\"]?(\d+)"),
+)
 
 
 class NicknameExcludeError(ValueError):
     pass
+
+
+@dataclass(slots=True)
+class CafeTarget:
+    home_url: str
+    cafe_id: int | None = None
+    slug: str = ""
+
+    def with_cafe_id(self, cafe_id: int) -> "CafeTarget":
+        return CafeTarget(home_url=self.home_url, cafe_id=cafe_id, slug=self.slug)
 
 
 def split_keywords(text: str) -> list[str]:
@@ -110,12 +134,80 @@ def new_nicknames(existing: Iterable[str], incoming: Iterable[str]) -> list[str]
     return added
 
 
-def cafe_search_url(keyword: str) -> str:
-    return CAFE_SEARCH_PAGE.format(query=quote(keyword))
+def normalize_cafe_url(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        raise NicknameExcludeError("카페 주소를 넣어 주세요")
+    if not re.match(r"^https?://", raw, re.I):
+        raw = "https://" + raw
+    return raw
 
 
-def cafe_search_url_modern(keyword: str) -> str:
-    return CAFE_SEARCH_PAGE_MODERN.format(query=quote(keyword))
+def parse_cafe_address(text: str) -> CafeTarget:
+    raw = normalize_cafe_url(text)
+    lowered = raw.casefold()
+    if "cafe.naver.com" not in lowered:
+        raise NicknameExcludeError(
+            "네이버 카페 주소를 넣어 주세요. 예: https://cafe.naver.com/cantsb"
+        )
+    cafe_id = cafe_id_from_page("", raw)
+    slug = ""
+    match = re.search(r"(?:m\.)?cafe\.naver\.com/([^/?#]+)", raw, re.I)
+    if match:
+        candidate = match.group(1)
+        if candidate.casefold() not in RESERVED_CAFE_SLUGS and not candidate.isdigit():
+            slug = candidate
+    if slug:
+        home_url = f"https://cafe.naver.com/{slug}"
+    elif cafe_id:
+        home_url = f"https://cafe.naver.com/f-e/cafes/{cafe_id}"
+    else:
+        home_url = raw.split("?")[0].rstrip("/")
+    if cafe_id is None and slug.casefold() == DEFAULT_CAFE_SLUG:
+        cafe_id = DEFAULT_CAFE_ID
+    return CafeTarget(home_url=home_url, cafe_id=cafe_id, slug=slug)
+
+
+def cafe_id_from_page(html: str, url: str = "") -> int | None:
+    for source in (url, html):
+        for pattern in CAFE_ID_PATTERNS:
+            match = pattern.search(source or "")
+            if match:
+                return int(match.group(1))
+    return None
+
+
+def cookies_show_naver_login(cookie_names: Iterable[str]) -> bool:
+    names = {name for name in cookie_names}
+    return any(name in names for name in NAVER_LOGIN_COOKIES)
+
+
+def require_cafe_id(cafe: CafeTarget) -> int:
+    if not cafe.cafe_id:
+        raise NicknameExcludeError(
+            "카페 번호를 찾지 못했습니다. 카페 주소를 다시 확인해 주세요"
+        )
+    return cafe.cafe_id
+
+
+def cafe_search_url(keyword: str, cafe: CafeTarget | None = None) -> str:
+    target = cafe or parse_cafe_address(DEFAULT_CAFE_URL)
+    cafe_id = require_cafe_id(target)
+    return (
+        f"https://cafe.naver.com/f-e/cafes/{cafe_id}/menus/0"
+        f"?viewType=L&ta=ARTICLE_COMMENT&page=1&q={quote(keyword)}"
+    )
+
+
+def cafe_search_url_modern(keyword: str, cafe: CafeTarget | None = None) -> str:
+    target = cafe or parse_cafe_address(DEFAULT_CAFE_URL)
+    cafe_id = require_cafe_id(target)
+    home = target.home_url or f"https://cafe.naver.com/f-e/cafes/{cafe_id}"
+    return (
+        f"{home}?iframe_url=/ArticleSearchList.nhn"
+        f"?search.clubid={cafe_id}&search.media=0&search.searchBy=0"
+        f"&search.defaultValue=1&search.sortBy=date&search.query={quote(keyword)}"
+    )
 
 
 def page_is_missing(html: str, url: str = "") -> bool:
@@ -160,9 +252,22 @@ def nicknames_from_html(html: str) -> list[str]:
     return split_nicknames("\n".join(found))
 
 
-def search_api_urls(keyword: str, page: int) -> list[str]:
+def search_api_urls(
+    keyword: str,
+    page: int,
+    cafe: CafeTarget | int | None = None,
+) -> list[str]:
+    if isinstance(cafe, int):
+        cafe_id = cafe
+    elif cafe is not None:
+        cafe_id = require_cafe_id(cafe)
+    else:
+        cafe_id = DEFAULT_CAFE_ID
     encoded = quote(keyword)
-    return [template.format(query=encoded, page=page) for template in SEARCH_API_TEMPLATES]
+    return [
+        template.format(cafe_id=cafe_id, query=encoded, page=page)
+        for template in SEARCH_API_TEMPLATES
+    ]
 
 
 def payload_has_articles(payload: Any) -> bool:
@@ -204,6 +309,7 @@ class ExcludeSyncResult:
 
 @dataclass(slots=True)
 class LocalSettings:
+    cafe_url: str = DEFAULT_CAFE_URL
     flowmoa_user: str = "earlybirdz"
     keywords: str = ", ".join(DEFAULT_KEYWORDS)
     watch: bool = False
@@ -220,6 +326,7 @@ class LocalSettings:
         if not isinstance(data, dict):
             return cls()
         return cls(
+            cafe_url=str(data.get("cafe_url") or DEFAULT_CAFE_URL),
             flowmoa_user=str(data.get("flowmoa_user") or "earlybirdz"),
             keywords=str(data.get("keywords") or ", ".join(DEFAULT_KEYWORDS)),
             watch=bool(data.get("watch")),
@@ -231,6 +338,7 @@ class LocalSettings:
         path.write_text(
             json.dumps(
                 {
+                    "cafe_url": self.cafe_url,
                     "flowmoa_user": self.flowmoa_user,
                     "keywords": self.keywords,
                     "watch": self.watch,

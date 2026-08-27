@@ -5,17 +5,19 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from .gui import AutomationApp
-from .nickname_browser import NicknameExcludeSession, open_login_windows
+from .nickname_browser import NicknameExcludeSession
 from .nickname_exclude import (
+    DEFAULT_CAFE_URL,
     DEFAULT_KEYWORDS,
     LocalSettings,
     NicknameExcludeError,
+    parse_cafe_address,
 )
 from .state import AnotherInstanceRunningError, InstanceLock
 
 
 class NicknameExcludeApp(AutomationApp):
-    app_name = "씨씨앙 제외 닉네임"
+    app_name = "카페 제외 닉네임"
     data_folder_name = "V2RNicknameExclude"
 
     def __init__(self):
@@ -27,14 +29,15 @@ class NicknameExcludeApp(AutomationApp):
             messagebox.showerror("중복 실행", str(exc))
             self.destroy()
             raise SystemExit(1) from exc
-        self.geometry("820x640")
-        self.minsize(760, 580)
+        self.geometry("820x680")
+        self.minsize(760, 620)
 
     def _settings_path(self):
         return self.data_dir / "settings.json"
 
     def _create_variables(self) -> None:
         settings = LocalSettings.load(self._settings_path())
+        self.cafe_url = tk.StringVar(value=settings.cafe_url or DEFAULT_CAFE_URL)
         self.keywords = tk.StringVar(value=settings.keywords or ", ".join(DEFAULT_KEYWORDS))
         self.flowmoa_user = tk.StringVar(value=settings.flowmoa_user)
         self.flowmoa_password = tk.StringVar()
@@ -46,7 +49,7 @@ class NicknameExcludeApp(AutomationApp):
         outer = ttk.Frame(self, padding=16)
         outer.pack(fill=tk.BOTH, expand=True)
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(7, weight=1)
+        outer.rowconfigure(8, weight=1)
 
         ttk.Label(outer, text=self.app_name, font=("", 18, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
@@ -54,22 +57,23 @@ class NicknameExcludeApp(AutomationApp):
         ttk.Label(
             outer,
             text=(
-                "씨씨앙 카페 글 검색창에 브랜드 식별 키워드를 넣어 "
-                "글을 모두 찾은 뒤, 그 글의 닉네임을 신고기 제외 닉네임에 넣습니다. "
+                "먼저 네이버 로그인 창을 연 뒤, 입력한 카페 주소를 엽니다. "
+                "카페 글 검색창에 식별 키워드를 넣어 글을 찾고, "
+                "그 글의 닉네임을 신고기 제외 닉네임에 넣습니다. "
                 "글쓰기 버튼은 쓰지 않습니다. "
                 "이미 있는 닉네임은 그대로 두고 새로 나온 것만 추가합니다. "
-                "식별 키워드는 나중에 추가하거나 바꿀 수 있습니다. "
-                "네이버는 이 프로그램이 연 크롬에서 로그인하면 됩니다."
+                "카페 주소와 식별 키워드는 나중에 바꿀 수 있습니다."
             ),
             wraplength=760,
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
-        self._entry_row(outer, 2, "식별 키워드", self.keywords)
-        self._entry_row(outer, 3, "신고기 아이디", self.flowmoa_user)
-        self._entry_row(outer, 4, "신고기 비밀번호", self.flowmoa_password, show="*")
+        self._entry_row(outer, 2, "카페 주소", self.cafe_url)
+        self._entry_row(outer, 3, "식별 키워드", self.keywords)
+        self._entry_row(outer, 4, "신고기 아이디", self.flowmoa_user)
+        self._entry_row(outer, 5, "신고기 비밀번호", self.flowmoa_password, show="*")
 
         options = ttk.Frame(outer)
-        options.grid(row=5, column=0, columnspan=3, sticky="w", pady=(0, 10))
+        options.grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 10))
         ttk.Checkbutton(
             options,
             text="새로 나오는 닉네임을 계속 넣기",
@@ -85,7 +89,7 @@ class NicknameExcludeApp(AutomationApp):
         ).pack(side=tk.LEFT)
 
         buttons = ttk.Frame(outer)
-        buttons.grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 10))
+        buttons.grid(row=7, column=0, columnspan=3, sticky="w", pady=(0, 10))
         ttk.Button(buttons, text="로그인 준비", command=self._open_login).pack(side=tk.LEFT)
         self.start_button = ttk.Button(buttons, text="제외 닉네임 넣기", command=self._start)
         self.start_button.pack(side=tk.LEFT, padx=(8, 0))
@@ -95,7 +99,7 @@ class NicknameExcludeApp(AutomationApp):
         self.stop_button.pack(side=tk.LEFT, padx=(8, 0))
 
         log_frame = ttk.LabelFrame(outer, text="진행 기록", padding=8)
-        log_frame.grid(row=7, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=8, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state=tk.DISABLED)
@@ -105,7 +109,7 @@ class NicknameExcludeApp(AutomationApp):
         self.log_text.configure(yscrollcommand=scrollbar.set)
 
         progress_frame = ttk.Frame(outer)
-        progress_frame.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        progress_frame.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         progress_frame.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_frame, maximum=100)
         self.progress.grid(row=0, column=0, sticky="ew")
@@ -115,22 +119,57 @@ class NicknameExcludeApp(AutomationApp):
 
     def _save_settings(self) -> None:
         LocalSettings(
+            cafe_url=self.cafe_url.get().strip() or DEFAULT_CAFE_URL,
             flowmoa_user=self.flowmoa_user.get().strip() or "earlybirdz",
             keywords=self.keywords.get().strip(),
             watch=self.watch.get(),
             watch_minutes=max(5, int(self.watch_minutes.get() or 30)),
         ).save(self._settings_path())
 
+    def _read_cafe(self):
+        try:
+            return parse_cafe_address(self.cafe_url.get())
+        except NicknameExcludeError as exc:
+            messagebox.showerror("입력 오류", str(exc))
+            return None
+
     def _open_login(self) -> None:
+        if self.worker and not self.worker.done():
+            messagebox.showwarning("작업 중", "현재 작업이 끝난 뒤 다시 시도하세요")
+            return
+        cafe = self._read_cafe()
+        if cafe is None:
+            return
         self._save_settings()
-        self._run_background(lambda: open_login_windows(self.browser))
+        self.stop_event.clear()
+        self.start_button.configure(state=tk.DISABLED)
+        self.stop_button.configure(state=tk.NORMAL)
+
+        def work() -> None:
+            try:
+                session = NicknameExcludeSession(self.browser, cafe)
+                session.open_login_windows(should_stop=self.stop_event.is_set)
+            except NicknameExcludeError as exc:
+                self.logger.error("%s", exc)
+                self.ui_queue.put(("error", ("로그인 준비 실패", str(exc))))
+            except Exception as exc:
+                self.logger.exception("로그인 준비 실패")
+                self.ui_queue.put(("error", ("오류", str(exc))))
+            finally:
+                self.ui_queue.put(("finished", None))
+
+        self.worker = self.executor.submit(work)
 
     def _start(self) -> None:
         if self.worker and not self.worker.done():
             return
+        cafe = self._read_cafe()
+        if cafe is None:
+            return
         user = self.flowmoa_user.get().strip()
         password = self.flowmoa_password.get()
         keywords = self.keywords.get().strip()
+        cafe_url = self.cafe_url.get().strip()
         if not keywords:
             messagebox.showerror("입력 오류", "브랜드 식별 키워드를 넣어 주세요")
             return
@@ -150,15 +189,16 @@ class NicknameExcludeApp(AutomationApp):
         self._set_progress(0, 2)
 
         def work() -> None:
-            session = NicknameExcludeSession(self.browser)
+            session = NicknameExcludeSession(self.browser, cafe)
             try:
                 while True:
-                    self.logger.info("씨씨앙 글을 검색해 제외 닉네임을 맞춥니다")
+                    self.logger.info("카페 글을 검색해 제외 닉네임을 맞춥니다")
                     plan = session.sync(
                         keywords,
                         user,
                         password,
                         should_stop=self.stop_event.is_set,
+                        cafe_url=cafe_url,
                     )
                     self.logger.info(plan.summary().replace("\n", " / "))
                     if plan.added:

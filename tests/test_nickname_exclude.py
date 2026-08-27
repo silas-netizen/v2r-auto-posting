@@ -1,15 +1,23 @@
+import pytest
+
 from v2r_auto.nickname_browser import NicknameExcludeSession
 from v2r_auto.nickname_exclude import (
+    DEFAULT_CAFE_URL,
     DEFAULT_KEYWORDS,
+    NicknameExcludeError,
     build_sync_result,
+    cafe_id_from_page,
     cafe_search_url,
     cafe_search_url_modern,
+    cookies_show_naver_login,
     merge_nicknames,
     new_nicknames,
     nicknames_from_html,
     nicknames_from_json,
     page_is_missing,
+    parse_cafe_address,
     require_keywords,
+    search_api_urls,
     split_keywords,
 )
 
@@ -28,20 +36,58 @@ def test_keywords_can_be_added_later() -> None:
     assert require_keywords("팥순 / 자연방패") == ["팥순", "자연방패"]
 
 
+def test_parse_cafe_address_from_home_and_id() -> None:
+    home = parse_cafe_address("https://cafe.naver.com/cantsb")
+    assert home.slug == "cantsb"
+    assert home.cafe_id == 25016228
+    assert home.home_url == "https://cafe.naver.com/cantsb"
+
+    numbered = parse_cafe_address("https://cafe.naver.com/f-e/cafes/22788814/menus/14")
+    assert numbered.cafe_id == 22788814
+    assert numbered.home_url == "https://cafe.naver.com/f-e/cafes/22788814"
+
+    other = parse_cafe_address("cafe.naver.com/yangpyeongmom")
+    assert other.slug == "yangpyeongmom"
+    assert other.cafe_id is None
+    assert other.home_url == "https://cafe.naver.com/yangpyeongmom"
+
+    club = parse_cafe_address(
+        "https://cafe.naver.com/ArticleSearchList.nhn?search.clubid=25016228"
+    )
+    assert club.cafe_id == 25016228
+
+
+def test_parse_cafe_address_rejects_empty_and_non_cafe() -> None:
+    with pytest.raises(NicknameExcludeError):
+        parse_cafe_address("")
+    with pytest.raises(NicknameExcludeError):
+        parse_cafe_address("https://www.naver.com")
+
+
+def test_cafe_id_from_page() -> None:
+    assert cafe_id_from_page("", "https://cafe.naver.com/f-e/cafes/25016228") == 25016228
+    assert cafe_id_from_page('var g_sClubId = "25016228";', "") == 25016228
+
+
+def test_cookies_show_naver_login() -> None:
+    assert cookies_show_naver_login(["NID_AUT", "NNB"])
+    assert not cookies_show_naver_login(["NNB"])
+
+
 def test_cafe_search_url_is_article_search_not_write() -> None:
-    url = cafe_search_url("팥순")
+    cafe = parse_cafe_address(DEFAULT_CAFE_URL)
+    url = cafe_search_url("팥순", cafe)
     assert "f-e/cafes/25016228" in url
     assert "ca-cafes" not in url
     assert "q=" in url
     assert "ArticleWrite" not in url
     assert "글쓰기" not in url
-    fallback = cafe_search_url_modern("팥순")
+    fallback = cafe_search_url_modern("팥순", cafe)
     assert "ArticleSearchList.nhn" in fallback
     assert "ArticleWrite" not in fallback
-    from v2r_auto.nickname_exclude import search_api_urls
-
-    api = search_api_urls("팥순", 1)[0]
-    assert "apis.cafe.naver.com/search/v2/cafes/25016228/search/articles" in api
+    other = parse_cafe_address("https://cafe.naver.com/f-e/cafes/22788814")
+    api = search_api_urls("팥순", 1, other)[0]
+    assert "apis.cafe.naver.com/search/v2/cafes/22788814/search/articles" in api
 
 
 def test_missing_cafe_page_is_detected() -> None:
