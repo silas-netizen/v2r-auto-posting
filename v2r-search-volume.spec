@@ -16,6 +16,7 @@ a = Analysis(
         "v2r_auto.exposure",
         "v2r_auto.exposure_naver",
         "v2r_auto.exposure_notion",
+        "v2r_auto.exposure_sheet",
     ],
     hookspath=[],
     hooksconfig={},

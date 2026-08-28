@@ -9,6 +9,7 @@ from v2r_auto.browser import (
     SE_ONE_SELECTION_INDEX,
     V2R_SE_ONE_URL,
     V2RBrowser,
+    sheet_values_match,
 )
 from v2r_auto.history import HistoryCorruptedError, HistoryStore
 from v2r_auto.models import JobStatus, PostJob, RunResult
@@ -25,6 +26,47 @@ def sample_job() -> PostJob:
         cafe="카페",
         board="게시판",
     )
+
+
+def test_sheet_values_match_treats_thousands_comma_as_same_number() -> None:
+    assert sheet_values_match("5680", "5,680")
+    assert sheet_values_match("5,680", "5680")
+    assert sheet_values_match("5680", "5680")
+    assert sheet_values_match("0", "0")
+    assert not sheet_values_match("5680", "")
+    assert not sheet_values_match("5680", "5681")
+    assert not sheet_values_match(
+        "https://search.naver.com/search.naver?query=a",
+        "https://search.naver.com/search.naver?query=b",
+    )
+
+
+def test_sheet_values_match_treats_unpadded_sheet_time_as_same() -> None:
+    assert sheet_values_match("2026-08-28 02:22:14", "2026-08-28 2:22:14")
+    assert sheet_values_match("2026-08-28 2:22:14", "2026-08-28 02:22:14")
+    assert sheet_values_match("2026-08-28 16:05:09", "2026-08-28 16:05:09")
+    assert sheet_values_match("2026-08-28 02:22:14", "2026-8-28 2:22:14")
+    assert sheet_values_match("2026-08-28 02:22:14", "2026/8/28 2:22:14")
+    assert not sheet_values_match("2026-08-28 02:22:14", "2026-08-28 02:22:15")
+    assert not sheet_values_match("2026-08-28 02:22:14", "5680")
+
+
+def test_sheet_values_match_treats_url_encoding_and_hyperlink_as_same() -> None:
+    encoded = "https://search.naver.com/search.naver?query=%EB%B9%84%EB%A7%8C"
+    hangul = "https://search.naver.com/search.naver?query=비만"
+    lower = "https://search.naver.com/search.naver?query=%eb%b9%84%eb%a7%8c"
+    wrapped = f'=HYPERLINK("{encoded}")'
+    apostrophe = "'" + encoded
+    longer = "https://search.naver.com/search.naver?query=%EB%B9%84%EB%A7%8C+%EA%B3%84%EC%82%B0%EA%B8%B0"
+    plus_space = "https://search.naver.com/search.naver?query=%EB%B9%84%EB%A7%8C+%EA%B3%84%EC%82%B0%EA%B8%B0"
+    pct_space = "https://search.naver.com/search.naver?query=%EB%B9%84%EB%A7%8C%20%EA%B3%84%EC%82%B0%EA%B8%B0"
+    assert sheet_values_match(encoded, hangul)
+    assert sheet_values_match(encoded, lower)
+    assert sheet_values_match(encoded, wrapped)
+    assert sheet_values_match(encoded, apostrophe)
+    assert sheet_values_match(plus_space, pct_space)
+    assert not sheet_values_match(encoded, longer)
+    assert not sheet_values_match(encoded, "")
 
 
 def test_google_sheet_export_url() -> None:

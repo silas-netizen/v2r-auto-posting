@@ -14,10 +14,11 @@ from .exposure import (
     compact_text,
     is_cafe_article_url,
     is_clustered_sub_result,
+    naver_search_url,
     strip_parenthetical,
 )
 
-WRITABLE_KEYWORD_TYPES = {"title", "rich_text"}
+WRITABLE_KEYWORD_TYPES = {"title", "rich_text", "text"}
 _NOTE_TAIL_RE = re.compile(r"(\s*[\(（][\s\S]*)$")
 
 
@@ -45,6 +46,25 @@ def empty_volume_rows(rows: list[ExposureRow]) -> list[ExposureRow]:
     ]
 
 
+def missing_search_url(row: ExposureRow) -> bool:
+    return bool(row.search_url_property) and not str(row.search_url or "").strip()
+
+
+def rows_to_process(rows: list[ExposureRow]) -> list[ExposureRow]:
+    """빈 검색량 행, 또는 검색량은 있는데 통합검색 주소만 빠진 행."""
+    seen: set[str] = set()
+    selected: list[ExposureRow] = []
+    for row in rows:
+        needs_volume = bool(row.volume_property) and volume_is_empty(row.current_volume)
+        if not needs_volume and not missing_search_url(row):
+            continue
+        if row.page_id in seen:
+            continue
+        seen.add(row.page_id)
+        selected.append(row)
+    return selected
+
+
 def normalize_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
 
@@ -54,6 +74,11 @@ def keep_keyword_notes(original: str, spaced: str) -> str:
     if not match:
         return spaced
     return spaced + match.group(1)
+
+
+def is_spacing_only_suggestion(keyword: str, suggestion: str) -> bool:
+    """Autocomplete may change spaces, never add or drop other words."""
+    return bool(spacing_from_autocomplete(keyword, suggestion))
 
 
 def spacing_from_autocomplete(keyword: str, suggestion: str) -> str:
@@ -137,6 +162,7 @@ class SearchVolumeFiller:
         self.naver = naver
         self.logger = logger
         self.delay_seconds = delay_seconds
+        self.failed_rows = 0
 
     def run(
         self,
@@ -147,20 +173,24 @@ class SearchVolumeFiller:
         pause_event=None,
         progress=None,
     ) -> list[ExposureRow]:
-        targets = empty_volume_rows(rows)
+        targets = rows_to_process(rows)
         skipped = len(rows) - len(targets)
+        empty = empty_volume_rows(targets)
+        url_only = len(targets) - len(empty)
         if skipped:
             self.logger.info(
-                "검색량이 이미 있는 키워드 %s건은 건너뜁니다. 빈 검색량 %s건만 채웁니다",
+                "이미 끝난 키워드 %s건은 건너뜁니다. 빈 검색량 %s건, 통합검색만 비어 있는 행 %s건",
                 skipped,
-                len(targets),
+                len(empty),
+                url_only,
             )
         if not targets:
-            self.logger.info("검색량이 비어 있는 키워드가 없습니다")
+            self.logger.info("채울 검색량·통합검색이 없습니다")
             if progress:
                 progress(0, 0)
             return targets
         total = len(targets)
+        self.failed_rows = 0
         for index, row in enumerate(targets, start=1):
             if stop_event is not None and stop_event.is_set():
                 self.logger.info("중지 요청으로 검색량 채우기를 멈춥니다")
@@ -177,7 +207,15 @@ class SearchVolumeFiller:
                 continue
             if progress:
                 progress(index - 1, total)
-            self._fill_one(row, dry_run=dry_run)
+            try:
+                self._fill_one(row, dry_run=dry_run)
+            except Exception as exc:
+                self.failed_rows += 1
+                self.logger.error(
+                    "키워드 처리 실패, 다음으로 이어갑니다: %s (%s)",
+                    keyword,
+                    exc,
+                )
             self._wait_while_paused(pause_event, stop_event)
             if self.delay_seconds:
                 self._interruptible_delay(
@@ -185,6 +223,12 @@ class SearchVolumeFiller:
                 )
             if progress:
                 progress(index, total)
+        if self.failed_rows:
+            self.logger.warning(
+                "검색량 채우기를 마쳤습니다. %s건 중 %s건은 시트에 다 못 넣었습니다",
+                total,
+                self.failed_rows,
+            )
         return targets
 
     def _wait_while_paused(self, pause_event, stop_event) -> None:
@@ -215,6 +259,20 @@ class SearchVolumeFiller:
 
     def _fill_one(self, row: ExposureRow, *, dry_run: bool) -> None:
         keyword = strip_parenthetical(row.keyword)
+        if not volume_is_empty(row.current_volume):
+            search_url = naver_search_url(keyword)
+            self.logger.info(
+                "검색량은 이미 있어 통합검색 주소만 넣습니다: %s", keyword
+            )
+            self._write_result(
+                row,
+                written_keyword=None,
+                volume=None,
+                volume_found=False,
+                search_url=search_url,
+                dry_run=dry_run,
+            )
+            return
         self.logger.info("빈 검색량 키워드: %s", keyword)
         spacing = self._resolve_spacing(row.keyword)
         written_keyword = keep_keyword_notes(row.keyword, spacing.keyword)
@@ -255,6 +313,7 @@ class SearchVolumeFiller:
             written_keyword=written_keyword if keyword_changed else None,
             volume=volume,
             volume_found=volume_found,
+            search_url=naver_search_url(spacing.keyword),
             dry_run=dry_run,
         )
         if keyword_changed:
@@ -275,7 +334,7 @@ class SearchVolumeFiller:
             return SpacingFix(keyword=spaced, source="자동완성")
         if suggestion:
             self.logger.info(
-                "자동완성 첫 항목이 다른 검색어라 통합검색 카페 글을 봅니다: %s",
+                "자동완성 첫 항목에 다른 단어가 붙어 무시하고 통합검색 카페 글을 봅니다: %s",
                 suggestion.split("\n")[0][:40],
             )
         else:
@@ -312,25 +371,54 @@ class SearchVolumeFiller:
         written_keyword: str | None,
         volume: int | None,
         volume_found: bool,
+        search_url: str,
         dry_run: bool,
     ) -> None:
+        label = getattr(self.notion, "label", "노션")
         if dry_run:
             self.logger.info(
-                "검증 모드: %s / 검색량 %s (노션에 쓰지 않음)",
+                "검증 모드: %s / 검색량 %s / 통합검색 %s (%s에 쓰지 않음)",
                 written_keyword or row.keyword,
                 volume if volume_found else "(조회 안 됨)",
+                search_url,
+                label,
             )
             return
+        failed = 0
         if hasattr(self.notion, "update_volume_and_keyword"):
-            self.notion.update_volume_and_keyword(
-                row,
-                keyword=written_keyword,
-                search_volume=volume,
-                volume_found=volume_found,
+            try:
+                failed = (
+                    self.notion.update_volume_and_keyword(
+                        row,
+                        keyword=written_keyword,
+                        search_volume=volume,
+                        volume_found=volume_found,
+                        search_url=search_url,
+                    )
+                    or 0
+                )
+            except Exception as exc:
+                failed = 1
+                self.logger.error(
+                    "시트 저장 실패, 다음 키워드로 이어갑니다 (%s): %s",
+                    row.keyword,
+                    exc,
+                )
+        if failed:
+            self.failed_rows += 1
+            self.logger.warning(
+                "이 키워드는 시트에 다 못 넣었습니다. 다음으로 이어갑니다: %s",
+                row.keyword,
             )
+            return
         if written_keyword:
-            self.logger.info("노션 키워드 띄어쓰기 변경: %s", written_keyword)
+            self.logger.info("%s 키워드 띄어쓰기 변경: %s", label, written_keyword)
+        if search_url:
+            self.logger.info("%s 통합검색 반영: %s", label, search_url)
+            row.search_url = search_url
         if volume_found:
-            self.logger.info("노션 검색량 반영: %s = %s", row.keyword, volume)
+            self.logger.info("%s 검색량 반영: %s = %s", label, row.keyword, volume)
         elif not written_keyword:
-            self.logger.warning("검색량을 못 읽어 노션은 그대로 둡니다: %s", row.keyword)
+            self.logger.warning(
+                "검색량을 못 읽어 검색량 칸은 그대로 둡니다: %s", row.keyword
+            )

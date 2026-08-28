@@ -7,10 +7,11 @@ import logging
 import random
 import re
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlparse
 from urllib.request import urlopen
 
 from selenium import webdriver
@@ -42,6 +43,121 @@ SE_ONE_SELECTION_INDEX = {"카페": 0, "계정": 1, "게시판": 2, "말머리":
 
 class AutomationError(RuntimeError):
     pass
+
+
+def sheet_values_match(expected: str, actual: str) -> bool:
+    """Treat Sheets display variants as the same saved value.
+
+    Numbers may gain commas, times may drop a leading zero, and URLs may be
+    wrapped as HYPERLINK or re-encoded (+ vs %20). Different search queries
+    are still different values.
+    """
+    left = str(expected or "")
+    right = str(actual or "")
+    if left == right:
+        return True
+    left_text = _sheet_plain_text(left)
+    right_text = _sheet_plain_text(right)
+    if left_text and left_text == right_text:
+        return True
+    left_number = _sheet_number(left_text or left)
+    right_number = _sheet_number(right_text or right)
+    if (
+        left_number is not None
+        and right_number is not None
+        and left_number == right_number
+    ):
+        return True
+    left_time = _sheet_datetime(left_text or left)
+    right_time = _sheet_datetime(right_text or right)
+    if left_time is not None and right_time is not None and left_time == right_time:
+        return True
+    left_url = _sheet_url_key(left)
+    right_url = _sheet_url_key(right)
+    return left_url is not None and right_url is not None and left_url == right_url
+
+
+def _sheet_plain_text(value: str) -> str:
+    text = unicodedata.normalize("NFC", str(value or ""))
+    text = text.replace("\u00a0", " ").replace("\r\n", "\n").replace("\r", "\n")
+    text = text.strip()
+    if text.startswith("'"):
+        text = text[1:]
+    return text.strip()
+
+
+_HYPERLINK_RE = re.compile(r'(?is)=\s*HYPERLINK\s*\(\s*"([^"]+)"')
+
+
+def _unwrap_sheet_url(value: str) -> str:
+    text = _sheet_plain_text(value)
+    match = _HYPERLINK_RE.match(text)
+    if match:
+        return match.group(1).strip()
+    if text.startswith("="):
+        inner = text[1:].strip().strip('"').strip("'")
+        if re.match(r"https?://", inner, re.I):
+            return inner
+    return text
+
+
+def _sheet_url_key(value: str) -> tuple | None:
+    text = _unwrap_sheet_url(value)
+    if not re.match(r"https?://", text, re.I):
+        return None
+    parsed = urlparse(text)
+    query = tuple(
+        sorted(
+            (
+                unicodedata.normalize("NFC", key),
+                unicodedata.normalize("NFC", val),
+            )
+            for key, val in parse_qsl(parsed.query, keep_blank_values=True)
+        )
+    )
+    return (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, query)
+
+
+def _sheet_number(value: str) -> float | None:
+    text = (
+        (value or "")
+        .replace(",", "")
+        .replace(" ", "")
+        .replace("\u00a0", "")
+    )
+    if not text:
+        return None
+    # 날짜/시각은 숫자로 비교하지 않는다. 2026-08-28 02:22:14 와 2:22:14가
+    # 하이픈을 빼면 다른 숫자가 된다.
+    if any(mark in text for mark in (":", "-", "/")):
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+_SHEET_DATETIME_RE = re.compile(
+    r"(?P<year>\d{4})\D+(?P<month>\d{1,2})\D+(?P<day>\d{1,2})"
+    r"\s+(?P<hour>\d{1,2}):(?P<minute>\d{2})(?::(?P<second>\d{2}))?"
+)
+
+
+def _sheet_datetime(value: str) -> datetime | None:
+    match = _SHEET_DATETIME_RE.search(value or "")
+    if not match:
+        return None
+    try:
+        return datetime(
+            int(match.group("year")),
+            int(match.group("month")),
+            int(match.group("day")),
+            int(match.group("hour")),
+            int(match.group("minute")),
+            int(match.group("second") or 0),
+        )
+    except ValueError:
+        return None
 
 
 @dataclass(slots=True)
@@ -224,69 +340,94 @@ class V2RBrowser:
         )
         cell_label = f"{column}{row_number}"
         last_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self._navigate(sheet_url_with_range, self.google_handle)
+                self.google_handle = self.driver.current_window_handle
+                self.wait.until(
+                    lambda driver: driver.execute_script("return document.readyState")
+                    == "complete"
+                )
+                self.wait.until(
+                    EC.presence_of_element_located((By.ID, "waffle-rich-text-editor"))
+                )
+                self.driver.execute_script("window.focus();")
+                time.sleep(0.25)
+                self._enter_sheet_value(value)
+                self._verify_sheet_cell(
+                    sheet_url,
+                    column,
+                    row_number,
+                    value,
+                    checks=verify_checks,
+                )
+                self.logger.info("시트 %s에 값을 입력했습니다", cell_label)
+                return
+            except Exception as exc:
+                last_error = exc
+                self.logger.warning(
+                    "시트 %s 저장 재시도 (%s/%s): %s",
+                    cell_label,
+                    attempt,
+                    max_attempts,
+                    exc,
+                )
+                time.sleep(attempt)
+        raise AutomationError(
+            f"시트 {cell_label} 저장에 {max_attempts}회 실패했습니다: "
+            f"{last_error}"
+        )
+
+    def _visible_sheet_editor(self):
+        assert self.driver
+        return [
+            element
+            for element in self.driver.find_elements(By.ID, "waffle-rich-text-editor")
+            if element.is_displayed() and element.is_enabled()
+        ]
+
+    def _enter_sheet_value(self, value: str) -> None:
+        """Put the whole value in at once so column autocomplete cannot steal it.
+
+        Clipboard paste is unreliable in Sheets and a failed copy can clear the
+        cell, then leave it empty. Insert the text in one shot instead.
+        """
+        self._begin_sheet_cell_edit()
+        if self._insert_sheet_text(value):
+            self._finish_sheet_cell_edit()
+            return
+        self._type_sheet_text(value)
+        ActionChains(self.driver).send_keys("|").send_keys(Keys.BACKSPACE).perform()
+        self._finish_sheet_cell_edit()
+
+    def _begin_sheet_cell_edit(self) -> None:
+        assert self.driver
+        editors = self._visible_sheet_editor()
+        if not editors:
+            return
+        editor = editors[0]
+        editor.click()
+        editor.send_keys(Keys.CONTROL, "a")
+
+    def _insert_sheet_text(self, value: str) -> bool:
+        assert self.driver
         try:
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    self._navigate(sheet_url_with_range, self.google_handle)
-                    self.google_handle = self.driver.current_window_handle
-                    self.wait.until(
-                        lambda driver: driver.execute_script(
-                            "return document.readyState"
-                        )
-                        == "complete"
-                    )
-                    self.wait.until(
-                        EC.presence_of_element_located(
-                            (By.ID, "waffle-rich-text-editor")
-                        )
-                    )
-                    self.driver.execute_script("window.focus();")
-                    editors = [
-                        element
-                        for element in self.driver.find_elements(
-                            By.ID,
-                            "waffle-rich-text-editor",
-                        )
-                        if element.is_displayed() and element.is_enabled()
-                    ]
-                    if editors:
-                        editor = editors[0]
-                        editor.click()
-                        editor.send_keys(Keys.CONTROL, "a")
-                        editor.send_keys(value)
-                        editor.send_keys(Keys.ENTER)
-                    else:
-                        # Sheets keeps a hidden rich-text editor while a grid
-                        # cell is selected. Send typing to its global active-cell
-                        # keyboard handler instead of that hidden element.
-                        ActionChains(self.driver).send_keys(value).send_keys(
-                            Keys.ENTER
-                        ).perform()
-                    self._verify_sheet_cell(
-                        sheet_url,
-                        column,
-                        row_number,
-                        value,
-                        checks=verify_checks,
-                    )
-                    self.logger.info("시트 %s에 값을 입력했습니다", cell_label)
-                    return
-                except Exception as exc:
-                    last_error = exc
-                    self.logger.warning(
-                        "시트 %s 저장 재시도 (%s/%s): %s",
-                        cell_label,
-                        attempt,
-                        max_attempts,
-                        exc,
-                    )
-                    time.sleep(attempt)
-            raise AutomationError(
-                f"시트 {cell_label} 저장에 {max_attempts}회 실패했습니다: "
-                f"{last_error}"
-            )
-        finally:
-            self._switch_to_handle(self.v2r_handle)
+            self.driver.execute_cdp_cmd("Input.insertText", {"text": value})
+            return True
+        except Exception:
+            return False
+
+    def _type_sheet_text(self, value: str) -> None:
+        assert self.driver
+        editors = self._visible_sheet_editor()
+        if editors:
+            editors[0].send_keys(value)
+            return
+        ActionChains(self.driver).send_keys(value).perform()
+
+    def _finish_sheet_cell_edit(self) -> None:
+        assert self.driver
+        ActionChains(self.driver).send_keys(Keys.ENTER).perform()
 
     def _verify_sheet_cell(
         self,
@@ -302,6 +443,7 @@ class V2RBrowser:
             column_index = column_index * 26 + (ord(letter) - ord("A") + 1)
         column_index -= 1
         export_url = self._sheet_export_url(sheet_url)
+        actual = ""
         for _ in range(checks):
             separator = "&" if "?" in export_url else "?"
             with urlopen(
@@ -313,11 +455,13 @@ class V2RBrowser:
                     )
                 )
             if len(rows) >= row_number and len(rows[row_number - 1]) > column_index:
-                if rows[row_number - 1][column_index] == expected:
+                actual = rows[row_number - 1][column_index]
+                if sheet_values_match(expected, actual):
                     return
             time.sleep(0.5)
         raise AutomationError(
-            f"시트 {column}{row_number} 저장값을 다시 확인하지 못했습니다"
+            f"시트 {column}{row_number} 저장값을 다시 확인하지 못했습니다 "
+            f"(기대 {expected} / 실제 {actual or '(비어 있음)'})"
         )
 
     def ensure_v2r_login(self, email: str, password: str) -> None:

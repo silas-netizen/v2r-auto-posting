@@ -20,6 +20,7 @@ from .exposure import (
     strip_parenthetical,
     volume_from_result_cells,
 )
+from .search_volume import is_spacing_only_suggestion
 
 FIND_KEYWORD_TOOL_BOX_JS = r"""
 const compact = (s) => (s || '').replace(/\s+/g, '');
@@ -235,6 +236,7 @@ class SeleniumNaverSearch:
         self.timeout = timeout
         self._naver_handle: str | None = None
         self._ads_handle: str | None = None
+        self._sheet_handle: str | None = None
         self._volume_unavailable = False
         self._last_visible_cafe_urls: list[str] | None = None
 
@@ -261,38 +263,46 @@ class SeleniumNaverSearch:
                 self.browser.driver = None
                 self._naver_handle = None
                 self._ads_handle = None
+                self._sheet_handle = None
                 self._volume_unavailable = False
         self.browser.start()
 
-    def prepare_login(self, wait_seconds: float = 300) -> None:
-        driver = self._driver()
-        if not self._has_naver_tab(driver):
-            driver.get("https://www.naver.com/")
-            self._naver_handle = driver.current_window_handle
-        if self.is_logged_in():
-            self.logger.info(
-                "네이버 로그인이 이미 되어 있습니다. 프로그램을 끄기 전까지 유지됩니다"
-            )
-            self._open_keyword_tool_tab()
-            return
-        self.logger.info(
-            "네이버에 한 번만 로그인하세요. 프로그램을 끄기 전까지 다시 묻지 않습니다"
-        )
-        deadline = time.time() + wait_seconds
-        next_notice = time.time() + 20
-        while time.time() < deadline:
+    def prepare_login(self, wait_seconds: float = 300, sheet_url: str = "") -> None:
+        try:
+            driver = self._driver()
+            if not self._has_naver_tab(driver):
+                driver.get("https://www.naver.com/")
+                self._naver_handle = driver.current_window_handle
             if self.is_logged_in():
-                self.logger.info("네이버 로그인을 확인했습니다. 이 크롬 창은 닫지 마세요")
+                self.logger.info(
+                    "네이버 로그인이 이미 되어 있습니다. 프로그램을 끄기 전까지 유지됩니다"
+                )
                 self._open_keyword_tool_tab()
                 return
-            time.sleep(1.2)
-            if time.time() >= next_notice:
-                self.logger.info("크롬 창에서 네이버 로그인을 기다리는 중입니다")
-                next_notice = time.time() + 20
-        self.logger.warning(
-            "아직 로그인이 확인되지 않았습니다. 크롬에서 로그인하면 그때부터 유지됩니다"
-        )
-        self._open_keyword_tool_tab()
+            self.logger.info(
+                "네이버에 한 번만 로그인하세요. 프로그램을 끄기 전까지 다시 묻지 않습니다"
+            )
+            deadline = time.time() + wait_seconds
+            next_notice = time.time() + 20
+            while time.time() < deadline:
+                if self.is_logged_in():
+                    self.logger.info("네이버 로그인을 확인했습니다. 이 크롬 창은 닫지 마세요")
+                    self._open_keyword_tool_tab()
+                    return
+                time.sleep(1.2)
+                if time.time() >= next_notice:
+                    self.logger.info("크롬 창에서 네이버 로그인을 기다리는 중입니다")
+                    next_notice = time.time() + 20
+            self.logger.warning(
+                "아직 로그인이 확인되지 않았습니다. 크롬에서 로그인하면 그때부터 유지됩니다"
+            )
+            self._open_keyword_tool_tab()
+        finally:
+            if sheet_url:
+                try:
+                    self._open_sheet_tab(sheet_url)
+                except Exception as exc:
+                    self.logger.warning("구글 시트 탭을 열지 못했습니다: %s", exc)
 
     def require_login(self, wait_seconds: float = 90) -> None:
         self._driver()
@@ -343,7 +353,9 @@ class SeleniumNaverSearch:
         box.send_keys(query)
         time.sleep(0.55)
         if not self._click_spacing_autocomplete(driver, query):
-            box.send_keys(Keys.ENTER)
+            # Enter would accept a highlighted different-word suggestion
+            # such as 비만 → 비만 계산기. Search the typed keyword only.
+            driver.get(naver_search_url(query))
         self._wait_for_integrated_results(driver, query)
         self._last_visible_cafe_urls = self._collect_visible_cafe_urls(driver)
         return driver.page_source
@@ -455,6 +467,38 @@ class SeleniumNaverSearch:
                     driver.switch_to.window(naver)
                 except Exception:
                     self._focus_naver_tab(driver)
+
+    def _open_sheet_tab(self, sheet_url: str) -> None:
+        driver = self._driver()
+        try:
+            handle = self._existing_sheet_handle(driver)
+            if handle:
+                driver.switch_to.window(handle)
+            else:
+                driver.switch_to.new_window("tab")
+                driver.get(sheet_url)
+                self._sheet_handle = driver.current_window_handle
+            self.browser.google_handle = self._sheet_handle or driver.current_window_handle
+            self.logger.info(
+                "구글 시트 탭을 열었습니다. 링크가 막혀 있으면 이 탭에서 구글 로그인하세요"
+            )
+        finally:
+            self._focus_naver_tab(driver)
+
+    def _existing_sheet_handle(self, driver) -> str | None:
+        handles = list(driver.window_handles)
+        if self._sheet_handle in handles:
+            return self._sheet_handle
+        for handle in handles:
+            try:
+                driver.switch_to.window(handle)
+            except Exception:
+                continue
+            url = (driver.current_url or "").lower()
+            if "docs.google.com/spreadsheets" in url:
+                self._sheet_handle = handle
+                return handle
+        return None
 
     def _open_keyword_tool_tab(self) -> None:
         driver = self._driver()
@@ -923,9 +967,9 @@ class SeleniumNaverSearch:
                             suggestion = (element.text or "").strip()
                             if not suggestion:
                                 continue
-                            if compact_text(suggestion) != compact_text(query):
+                            if not is_spacing_only_suggestion(query, suggestion):
                                 self.logger.info(
-                                    "자동완성 첫 항목이 다른 검색어라 입력한 키워드 그대로 검색합니다: %s",
+                                    "자동완성 첫 항목에 다른 단어가 붙어 입력한 키워드 그대로 검색합니다: %s",
                                     suggestion.split("\n")[0][:40],
                                 )
                                 return False
