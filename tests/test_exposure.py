@@ -457,7 +457,7 @@ def test_yangmom_comment_marker_marks_exposed() -> None:
 
 
 def test_donut_cushion_comment_marker_marks_exposed() -> None:
-    post = "https://cafe.naver.com/yangmom/728000"
+    post = "https://cafe.naver.com/yangmom/730560"
     html = f"""
     <a href="https://cafe.naver.com/yangmom">양평맘</a>
     <a href="{post}">다이소 도넛방석</a>
@@ -472,7 +472,12 @@ def test_donut_cushion_comment_marker_marks_exposed() -> None:
 
     naver = FakeNaver(
         html,
-        {post: "본문 없음\n저는 자연방패 항문세정제 쓰고 있어요."},
+        {
+            post: (
+                "본문에는 식별어가 없습니다.\n"
+                "룽지어멈 저는 자연방패 항문세정제 쓰고 있어요 세정제도 아무거나 쓰면 소용없더라구요"
+            )
+        },
         visible_urls=[post],
     )
     ExposureChecker(
