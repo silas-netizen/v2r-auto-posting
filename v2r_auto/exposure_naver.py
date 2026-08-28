@@ -147,6 +147,38 @@ CAFE_IFRAME_SELECTORS = (
     "iframe[name='cafe_main']",
     "iframe#cafe_content",
 )
+COMMENT_READY_SELECTORS = (
+    ".CommentItem",
+    ".text_comment",
+    ".CommentBox",
+    ".comment_list",
+    ".box-reply",
+    "#cmt_list",
+    "li.comment",
+)
+COMMENTS_READY_JS = r"""
+const sels = [
+  '.CommentItem', '.text_comment', '.CommentBox', '.comment_list',
+  '.box-reply', '#cmt_list', 'li.comment'
+];
+return sels.some((sel) => document.querySelector(sel));
+"""
+COLLECT_CAFE_POST_TEXT_JS = r"""
+const parts = [];
+const push = (value) => {
+  const text = (value || '').trim();
+  if (text) parts.push(text);
+};
+if (document.body) {
+  push(document.body.innerText || document.body.textContent || '');
+}
+document.querySelectorAll(
+  '.text_comment, .CommentItem, .comment_text, .box-reply .comment'
+).forEach((el) => {
+  push(el.innerText || el.textContent || '');
+});
+return parts.join('\n');
+"""
 NAVER_LOGIN_COOKIES = {"NID_AUT", "NID_SES"}
 ADS_HOME_URL = "https://ads.naver.com/"
 VISIBLE_CAFE_LINKS_JS = r"""
@@ -195,6 +227,110 @@ def ads_account_id(url: str) -> str:
         return match.group(1)
     match = re.search(r"customers/(\d+)", text, flags=re.I)
     return match.group(1) if match else ""
+
+
+def find_cafe_frame(driver):
+    for selector in CAFE_IFRAME_SELECTORS:
+        frames = driver.find_elements(By.CSS_SELECTOR, selector)
+        if frames:
+            return frames[0]
+    return None
+
+
+def comments_ready(driver) -> bool:
+    try:
+        return bool(driver.execute_script(COMMENTS_READY_JS))
+    except Exception:
+        for selector in COMMENT_READY_SELECTORS:
+            if driver.find_elements(By.CSS_SELECTOR, selector):
+                return True
+        return False
+
+
+def document_text(driver) -> str:
+    try:
+        text = driver.execute_script(
+            "return (document.body && (document.body.innerText"
+            " || document.body.textContent)) || '';"
+        )
+        if text:
+            return str(text)
+    except Exception:
+        pass
+    try:
+        return driver.find_element(By.TAG_NAME, "body").text or ""
+    except Exception:
+        return ""
+
+
+def collect_cafe_post_text(driver) -> str:
+    try:
+        text = driver.execute_script(COLLECT_CAFE_POST_TEXT_JS)
+        if text:
+            return str(text)
+    except Exception:
+        pass
+    return document_text(driver)
+
+
+def wait_for_cafe_frame(driver, timeout: float):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        frame = find_cafe_frame(driver)
+        if frame is not None:
+            return frame
+        time.sleep(0.2)
+    return find_cafe_frame(driver)
+
+
+def wait_for_comments(driver, timeout: float) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if comments_ready(driver):
+            time.sleep(0.2)
+            return True
+        time.sleep(0.2)
+    return comments_ready(driver)
+
+
+def collect_frame_tree_text(driver, depth: int = 0) -> str:
+    parts = [collect_cafe_post_text(driver)]
+    if depth >= 2:
+        return "\n".join(part for part in parts if part)
+    for frame in driver.find_elements(By.CSS_SELECTOR, "iframe, frame"):
+        try:
+            driver.switch_to.frame(frame)
+            parts.append(collect_frame_tree_text(driver, depth + 1))
+        except Exception:
+            continue
+        finally:
+            try:
+                driver.switch_to.parent_frame()
+            except Exception:
+                driver.switch_to.default_content()
+    return "\n".join(part for part in parts if part)
+
+
+def read_opened_cafe_article(driver, timeout: float = 15) -> str:
+    """Read title/body/comments of an already opened cafe post. No extra clicks."""
+    chunks = [document_text(driver)]
+    frame = wait_for_cafe_frame(driver, timeout)
+    if frame is None:
+        wait_for_comments(driver, timeout)
+        chunks.append(collect_cafe_post_text(driver))
+        return "\n".join(part for part in chunks if part)
+    try:
+        driver.switch_to.frame(frame)
+        wait_for_comments(driver, timeout)
+        try:
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        except Exception:
+            pass
+        time.sleep(0.25)
+        chunks.append(collect_frame_tree_text(driver))
+    finally:
+        driver.switch_to.default_content()
+    return "\n".join(part for part in chunks if part)
 
 
 class SeleniumNaverSearch:
@@ -781,24 +917,7 @@ class SeleniumNaverSearch:
             WebDriverWait(driver, self.timeout).until(
                 lambda item: item.find_elements(By.CSS_SELECTOR, "body")
             )
-            time.sleep(0.45)
-            chunks = [self._visible_text(driver)]
-            for selector in CAFE_IFRAME_SELECTORS:
-                frames = driver.find_elements(By.CSS_SELECTOR, selector)
-                if not frames:
-                    continue
-                try:
-                    driver.switch_to.frame(frames[0])
-                    time.sleep(0.35)
-                    driver.execute_script(
-                        "window.scrollTo(0, document.body.scrollHeight);"
-                    )
-                    time.sleep(0.25)
-                    chunks.append(self._visible_text(driver))
-                finally:
-                    driver.switch_to.default_content()
-                break
-            return "\n".join(part for part in chunks if part)
+            return read_opened_cafe_article(driver, self.timeout)
         finally:
             if extra_tab:
                 try:
