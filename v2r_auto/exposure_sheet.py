@@ -12,6 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
+from .sheet_values import parse_sheet_int
 from .exposure import (
     CAFE_HEADERS,
     EDITED_HEADERS,
@@ -79,6 +80,12 @@ def _find_header(headers: list[str], names: tuple[str, ...]) -> tuple[str, int]:
         if _norm_header(header) in wanted:
             return column_letter(index), index
     return "", -1
+
+
+def _sum_column(table: list[list[str]], index: int) -> int:
+    if index < 0 or len(table) < 2:
+        return 0
+    return sum(parse_sheet_int(_cell(row, index)) for row in table[1:])
 
 
 def _cell(row: list[str], index: int) -> str:
@@ -268,6 +275,25 @@ class GoogleSheetExposureStore:
             self.writer.write_cell(
                 self.sheet_url, write.column, row_number, write.value
             )
+
+    def write_volume_totals(self) -> None:
+        if self.writer is None:
+            raise SheetError("구글 시트에 쓸 브라우저가 없습니다")
+        text = self._read_csv()
+        table = list(csv.reader(io.StringIO(text)))
+        if not table:
+            raise SheetError("구글 시트에서 열 이름을 찾지 못했습니다")
+        bind = self._bind or self._bind_headers(
+            [str(header or "").strip() for header in table[0]]
+        )
+        keyword_total = _sum_column(table, bind.volume_idx)
+        exposed_total = _sum_column(table, bind.exposed_volume_idx)
+        if bind.volume_idx >= 0:
+            self.writer.write_cell(self.sheet_url, "P", 1, _sheet_text(keyword_total))
+            self.logger.info("키워드 검색량 합 P1=%s", keyword_total)
+        if bind.exposed_volume_idx >= 0:
+            self.writer.write_cell(self.sheet_url, "Q", 1, _sheet_text(exposed_total))
+            self.logger.info("노출된 검색량 합 Q1=%s", exposed_total)
 
     def _bind_headers(self, headers: list[str]) -> _SheetBind:
         keyword_col, keyword_idx = _find_header(headers, KEYWORD_HEADERS)

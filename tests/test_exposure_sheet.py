@@ -338,6 +338,87 @@ def test_store_hidden_does_not_touch_cafe() -> None:
     assert writer.writes[1] == (PATSOON_URL, "L", 2, "")
 
 
+def test_store_writes_volume_totals_to_p1_and_q1() -> None:
+    csv_text = (
+        "카페,노출 상태,키워드,최종 편집 일시,키워드 검색량,노출된 검색량\n"
+        '씨씨앙,밀려남,코숨핏,,"1,000",0\n'
+        "양평맘,노출완,항문세정제,,290,290\n"
+        "씨씨앙,밀려남,치질,,,\n"
+    )
+    writer = RecordingWriter()
+
+    def opener(request, timeout=30):
+        return FakeResponse(csv_text.encode("utf-8"))
+
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        __import__("logging").getLogger("test"),
+        opener=opener,
+        writer=writer,
+    )
+    store.load_rows()
+    store.write_volume_totals()
+    assert writer.writes == [
+        (PATSOON_URL, "P", 1, "1290"),
+        (PATSOON_URL, "Q", 1, "290"),
+    ]
+
+
+def test_checker_writes_volume_totals_after_run() -> None:
+    class FakeSheet:
+        label = "구글 시트"
+
+        def __init__(self):
+            self.totals = 0
+
+        def update_check_result(self, *_args, **_kwargs):
+            return None
+
+        def write_volume_totals(self) -> None:
+            self.totals += 1
+
+    class FakeNaver:
+        def search_integrated(self, keyword: str) -> str:
+            return "<div id='main_pack'></div>"
+
+        def open_post_text(self, url: str) -> str:
+            return ""
+
+    store = FakeSheet()
+    ExposureChecker(
+        store,
+        FakeNaver(),
+        __import__("logging").getLogger("v2r_auto.exposure"),
+        delay_seconds=0,
+    ).run([_sheet_row()], dry_run=False)
+    assert store.totals == 1
+
+
+def test_checker_skips_volume_totals_in_dry_run() -> None:
+    class FakeSheet:
+        label = "구글 시트"
+
+        def update_check_result(self, *_args, **_kwargs):
+            raise AssertionError("dry-run must not write")
+
+        def write_volume_totals(self) -> None:
+            raise AssertionError("dry-run must not write totals")
+
+    class FakeNaver:
+        def search_integrated(self, keyword: str) -> str:
+            return "<div id='main_pack'></div>"
+
+        def open_post_text(self, url: str) -> str:
+            return ""
+
+    ExposureChecker(
+        FakeSheet(),
+        FakeNaver(),
+        __import__("logging").getLogger("v2r_auto.exposure"),
+        delay_seconds=0,
+    ).run([_sheet_row()], dry_run=True)
+
+
 def test_checker_uses_sheet_label_in_dry_run(caplog) -> None:
     class FakeSheet:
         label = "구글 시트"
