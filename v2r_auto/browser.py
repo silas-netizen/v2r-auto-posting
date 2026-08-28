@@ -30,6 +30,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from .content import ParsedArticle
 from .models import AffiliateJob, JobStatus, PostJob
+from .sheet_values import sheet_cell_values_match
 
 
 V2R_LIST_URL = "https://v2r.daboja.im/nc/board?view=list"
@@ -313,7 +314,9 @@ class V2RBrowser:
                     )
                 )
             if len(rows) >= row_number and len(rows[row_number - 1]) > column_index:
-                if rows[row_number - 1][column_index] == expected:
+                if sheet_cell_values_match(
+                    rows[row_number - 1][column_index], expected
+                ):
                     return
             time.sleep(0.5)
         raise AutomationError(
