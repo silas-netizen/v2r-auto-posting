@@ -143,6 +143,11 @@ def test_brand_found_ignores_spaces() -> None:
     assert brand_found("일반 글", ["코숨핏"]) == ""
 
 
+def test_brand_found_reads_yangmom_comment_quote() -> None:
+    text = "제목\n본문에는 식별어가 없습니다.\n저는 자연방패 항문세정제 쓰고 있어요."
+    assert brand_found(text, ["자연방패 항문세정제"]) == "자연방패 항문세정제"
+
+
 def test_article_url_detection() -> None:
     assert is_cafe_article_url("https://cafe.naver.com/ccang/12345")
     assert is_cafe_article_url(
@@ -420,6 +425,68 @@ def test_our_cafe_with_brand_is_exposed() -> None:
     ).run([_row("키워드")], dry_run=False)
     assert naver.opened == [first, second]
     assert updated == [("키워드", "노출완")]
+
+
+def test_yangmom_comment_marker_marks_exposed() -> None:
+    post = "https://cafe.naver.com/yangmom/728286"
+    html = f"""
+    <a href="https://cafe.naver.com/yangmom">양평맘</a>
+    <a href="{post}">항문 주변 가려움</a>
+    """
+    written = []
+
+    class FakeNotion:
+        def update_check_result(
+            self, row, *, status, cafe_name=None, search_volume=None, volume_found=False
+        ):
+            written.append((status, cafe_name))
+
+    naver = FakeNaver(
+        html,
+        {post: "본문에는 식별어가 없습니다.\n저는 자연방패 항문세정제 쓰고 있어요."},
+        visible_urls=[post],
+    )
+    ExposureChecker(
+        FakeNotion(),
+        naver,
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    ).run([_row("항문 주변 가려움")], dry_run=False)
+    assert naver.opened == [post]
+    assert written == [("노출완", "양평맘")]
+
+
+def test_donut_cushion_comment_marker_marks_exposed() -> None:
+    post = "https://cafe.naver.com/yangmom/730560"
+    html = f"""
+    <a href="https://cafe.naver.com/yangmom">양평맘</a>
+    <a href="{post}">다이소 도넛방석</a>
+    """
+    written = []
+
+    class FakeNotion:
+        def update_check_result(
+            self, row, *, status, cafe_name=None, search_volume=None, volume_found=False
+        ):
+            written.append((status, cafe_name))
+
+    naver = FakeNaver(
+        html,
+        {
+            post: (
+                "본문에는 식별어가 없습니다.\n"
+                "룽지어멈 저는 자연방패 항문세정제 쓰고 있어요 세정제도 아무거나 쓰면 소용없더라구요"
+            )
+        },
+        visible_urls=[post],
+    )
+    ExposureChecker(
+        FakeNotion(),
+        naver,
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    ).run([_row("다이소 도넛방석")], dry_run=False)
+    assert written == [("노출완", "양평맘")]
 
 
 def test_dry_run_does_not_write_notion() -> None:
