@@ -150,18 +150,32 @@ CAFE_IFRAME_SELECTORS = (
 COMMENT_READY_SELECTORS = (
     ".CommentItem",
     ".text_comment",
+)
+COMMENT_SHELL_SELECTORS = (
     ".CommentBox",
     ".comment_list",
     ".box-reply",
     "#cmt_list",
-    "li.comment",
 )
+EXTRA_WAIT_AFTER_COMMENT_BOX = 8.0
 COMMENTS_READY_JS = r"""
-const sels = [
-  '.CommentItem', '.text_comment', '.CommentBox', '.comment_list',
-  '.box-reply', '#cmt_list', 'li.comment'
-];
-return sels.some((sel) => document.querySelector(sel));
+const nodes = document.querySelectorAll('.CommentItem, .text_comment');
+for (const el of nodes) {
+  const text = ((el.innerText || el.textContent || '') + '').trim();
+  if (!text) continue;
+  const compact = text.replace(/\s+/g, '');
+  if (compact === '댓글0') continue;
+  return true;
+}
+return false;
+"""
+COMMENT_SHELL_JS = r"""
+return !!(
+  document.querySelector('.CommentBox')
+  || document.querySelector('.comment_list')
+  || document.querySelector('.box-reply')
+  || document.querySelector('#cmt_list')
+);
 """
 COLLECT_CAFE_POST_TEXT_JS = r"""
 const parts = [];
@@ -242,9 +256,24 @@ def comments_ready(driver) -> bool:
         return bool(driver.execute_script(COMMENTS_READY_JS))
     except Exception:
         for selector in COMMENT_READY_SELECTORS:
-            if driver.find_elements(By.CSS_SELECTOR, selector):
-                return True
+            for element in driver.find_elements(By.CSS_SELECTOR, selector):
+                try:
+                    text = (element.text or "").strip()
+                except Exception:
+                    text = ""
+                if text and compact_text(text) != "댓글0":
+                    return True
         return False
+
+
+def comment_shell_present(driver) -> bool:
+    try:
+        return bool(driver.execute_script(COMMENT_SHELL_JS))
+    except Exception:
+        return any(
+            driver.find_elements(By.CSS_SELECTOR, selector)
+            for selector in COMMENT_SHELL_SELECTORS
+        )
 
 
 def document_text(driver) -> str:
@@ -283,12 +312,24 @@ def wait_for_cafe_frame(driver, timeout: float):
     return find_cafe_frame(driver)
 
 
-def wait_for_comments(driver, timeout: float) -> bool:
+def wait_for_comments(
+    driver,
+    timeout: float,
+    extra_after_box: float = EXTRA_WAIT_AFTER_COMMENT_BOX,
+) -> bool:
     deadline = time.time() + timeout
-    while time.time() < deadline:
+    box_deadline = None
+    while True:
         if comments_ready(driver):
             time.sleep(0.2)
             return True
+        now = time.time()
+        if box_deadline is None and comment_shell_present(driver):
+            box_deadline = now + extra_after_box
+        if box_deadline is not None and now >= box_deadline:
+            break
+        if box_deadline is None and now >= deadline:
+            break
         time.sleep(0.2)
     return comments_ready(driver)
 

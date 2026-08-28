@@ -6,9 +6,11 @@ from pathlib import Path
 import pytest
 
 from v2r_auto.exposure import brand_found
+from v2r_auto.exposure import STATUS_EXPOSED
 from v2r_auto.exposure_naver import (
     SeleniumNaverSearch,
     collect_cafe_post_text,
+    comment_shell_present,
     comments_ready,
     document_text,
     find_cafe_frame,
@@ -54,19 +56,32 @@ def test_early_cafe_main_body_text_misses_delayed_comments() -> None:
         driver.switch_to.frame(frame)
         early = document_text(driver)
         assert QUOTE not in early
+        assert comment_shell_present(driver)
         assert not comments_ready(driver)
         assert brand_found(early, ["자연방패 항문세정제"]) == ""
     finally:
         driver.quit()
 
 
-def test_read_opened_cafe_article_waits_for_delayed_comments() -> None:
+def test_empty_comment_box_is_not_ready() -> None:
+    driver = _chrome()
+    try:
+        driver.get(INNER.as_uri())
+        assert comment_shell_present(driver)
+        assert not comments_ready(driver)
+        assert QUOTE not in document_text(driver)
+    finally:
+        driver.quit()
+
+
+def test_read_opened_cafe_article_waits_past_empty_comment_box() -> None:
     driver = _chrome()
     try:
         driver.get(OUTER.as_uri())
         text = read_opened_cafe_article(driver, timeout=8)
         assert QUOTE in text
         assert brand_found(text, ["자연방패 항문세정제"]) == "자연방패 항문세정제"
+        assert STATUS_EXPOSED == "노출완"
     finally:
         driver.quit()
 
