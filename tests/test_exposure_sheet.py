@@ -92,6 +92,14 @@ def test_parse_spreadsheet_ref_fragment_gid() -> None:
     assert gid == "5"
 
 
+def test_parse_spreadsheet_ref_ignores_range_in_fragment() -> None:
+    sheet_id, gid = parse_spreadsheet_ref(
+        "https://docs.google.com/spreadsheets/d/abc_123/edit#gid=5&range=L141"
+    )
+    assert sheet_id == "abc_123"
+    assert gid == "5"
+
+
 def test_parse_spreadsheet_ref_defaults_gid() -> None:
     sheet_id, gid = parse_spreadsheet_ref(
         "https://docs.google.com/spreadsheets/d/abc_123/edit"
@@ -299,6 +307,7 @@ def test_store_writes_current_time_and_same_fields() -> None:
     store = GoogleSheetExposureStore(
         PATSOON_URL,
         __import__("logging").getLogger("test"),
+        opener=lambda request, timeout=30: FakeResponse(SAMPLE_CSV.encode("utf-8-sig")),
         writer=writer,
         now=lambda: datetime(2026, 8, 27, 16, 32, 5),
     )
@@ -319,10 +328,16 @@ def test_store_writes_current_time_and_same_fields() -> None:
 
 
 def test_store_hidden_does_not_touch_cafe() -> None:
+    csv_text = (
+        "카페명,url,발행시간,작성자 아이디,작성자 비밀번호,발행 URL,"
+        "노출 상태,키워드,통합검색,최종 편집 일시,키워드 검색량,노출된 검색량\n"
+        "씨씨앙/dtsx,,,,,,노출완,코숨핏,,,100,50\n"
+    )
     writer = RecordingWriter()
     store = GoogleSheetExposureStore(
         PATSOON_URL,
         __import__("logging").getLogger("test"),
+        opener=lambda request, timeout=30: FakeResponse(csv_text.encode("utf-8")),
         writer=writer,
         now=lambda: datetime(2026, 8, 27, 16, 32, 5),
     )
@@ -336,6 +351,174 @@ def test_store_hidden_does_not_touch_cafe() -> None:
     columns = [item[1] for item in writer.writes]
     assert columns == ["G", "L", "J"]
     assert writer.writes[1] == (PATSOON_URL, "L", 2, "")
+
+
+def test_store_skips_cells_that_already_match_locale() -> None:
+    csv_text = (
+        "카페명,url,발행시간,작성자 아이디,작성자 비밀번호,발행 URL,"
+        "노출 상태,키워드,통합검색,최종 편집 일시,키워드 검색량,노출된 검색량\n"
+        "양평맘,,,,,,밀려남,코숨핏,,2026-08-29 7:33:10,\"5,760\",\n"
+    )
+    writer = RecordingWriter()
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        __import__("logging").getLogger("test"),
+        opener=lambda request, timeout=30: FakeResponse(csv_text.encode("utf-8")),
+        writer=writer,
+        now=lambda: datetime(2026, 8, 29, 7, 33, 10),
+    )
+    store.update_check_result(
+        _sheet_row(status="밀려남", cafe="양평맘"),
+        status="밀려남",
+        cafe_name=None,
+        search_volume=5760,
+        volume_found=True,
+    )
+    assert writer.writes == []
+
+
+def test_store_does_not_fail_row_when_only_j_time_cannot_be_verified() -> None:
+    csv_text = (
+        "카페명,url,발행시간,작성자 아이디,작성자 비밀번호,발행 URL,"
+        "노출 상태,키워드,통합검색,최종 편집 일시,키워드 검색량,노출된 검색량\n"
+        "씨씨앙/dtsx,,,,,,밀려남,임산부 항문 가려움,,2026-08-29 7:52:45,210,\n"
+    )
+
+    class StaleJWriter(RecordingWriter):
+        def write_cell(self, sheet_url: str, column: str, row_number: int, value: str) -> None:
+            if column == "J":
+                raise RuntimeError(
+                    "시트 J3 저장값을 다시 확인하지 못했습니다 "
+                    "(기대 2026-08-29 11:39:20 / 실제 2026-08-29 7:52:45)"
+                )
+            super().write_cell(sheet_url, column, row_number, value)
+
+    writer = StaleJWriter()
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        __import__("logging").getLogger("test"),
+        opener=lambda request, timeout=30: FakeResponse(csv_text.encode("utf-8")),
+        writer=writer,
+        now=lambda: datetime(2026, 8, 29, 11, 39, 20),
+    )
+    store.update_check_result(
+        _sheet_row(keyword="임산부 항문 가려움", status="밀려남", page_id="2"),
+        status="밀려남",
+        cafe_name=None,
+        search_volume=210,
+        volume_found=True,
+    )
+    assert writer.writes == []
+
+
+def test_store_keeps_writing_other_cells_when_one_column_fails() -> None:
+    class BoomWriter(RecordingWriter):
+        def write_cell(self, sheet_url: str, column: str, row_number: int, value: str) -> None:
+            if column == "L":
+                raise RuntimeError("locked")
+            super().write_cell(sheet_url, column, row_number, value)
+
+    csv_text = (
+        "카페명,url,발행시간,작성자 아이디,작성자 비밀번호,발행 URL,"
+        "노출 상태,키워드,통합검색,최종 편집 일시,키워드 검색량,노출된 검색량\n"
+        "씨씨앙/dtsx,,,,,,노출완,코숨핏,,,100,50\n"
+    )
+    writer = BoomWriter()
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        __import__("logging").getLogger("test"),
+        opener=lambda request, timeout=30: FakeResponse(csv_text.encode("utf-8")),
+        writer=writer,
+        now=lambda: datetime(2026, 8, 27, 16, 32, 5),
+    )
+    try:
+        store.update_check_result(
+            _sheet_row(status="노출완"),
+            status="밀려남",
+            cafe_name=None,
+            search_volume=100,
+            volume_found=True,
+        )
+    except SheetError as exc:
+        assert "L2" in str(exc)
+    else:
+        raise AssertionError("expected SheetError")
+    columns = [item[1] for item in writer.writes]
+    assert columns == ["G", "J"]
+
+
+def test_volume_totals_use_written_values_when_csv_is_stale() -> None:
+    csv_text = (
+        "카페,노출 상태,키워드,최종 편집 일시,키워드 검색량,노출된 검색량\n"
+        "씨씨앙,노출완,항문농양,,5760,5800\n"
+    )
+    writer = RecordingWriter()
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        __import__("logging").getLogger("test"),
+        opener=lambda request, timeout=30: FakeResponse(csv_text.encode("utf-8")),
+        writer=writer,
+        now=lambda: datetime(2026, 8, 27, 16, 32, 5),
+    )
+    store.load_rows()
+    store.update_check_result(
+        ExposureRow(
+            "2",
+            "항문농양",
+            "",
+            "",
+            "노출완",
+            "B",
+            "select",
+            current_cafe="씨씨앙",
+            cafe_property="A",
+            cafe_type="select",
+            volume_property="E",
+            volume_type="number",
+            exposed_volume_property="F",
+            exposed_volume_type="number",
+            edited_property="D",
+        ),
+        status="밀려남",
+        cafe_name=None,
+        search_volume=5760,
+        volume_found=True,
+    )
+    store.write_volume_totals()
+    assert (PATSOON_URL, "F", 2, "") in writer.writes
+    assert (PATSOON_URL, "P", 1, "5760") in writer.writes
+    assert (PATSOON_URL, "Q", 1, "0") in writer.writes
+
+
+def test_store_skips_volume_totals_when_p1_q1_already_match() -> None:
+    header = [
+        "카페",
+        "노출 상태",
+        "키워드",
+        "최종 편집 일시",
+        "키워드 검색량",
+        "노출된 검색량",
+        *([""] * 9),
+        "1,290",
+        "290",
+    ]
+    csv_text = (
+        ",".join(f'"{item}"' if item else "" for item in header)
+        + "\n"
+        + '씨씨앙,밀려남,코숨핏,,"1,000",0\n'
+        + "양평맘,노출완,항문세정제,,290,290\n"
+        + "씨씨앙,밀려남,치질,,,\n"
+    )
+    writer = RecordingWriter()
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        __import__("logging").getLogger("test"),
+        opener=lambda request, timeout=30: FakeResponse(csv_text.encode("utf-8")),
+        writer=writer,
+    )
+    store.load_rows()
+    store.write_volume_totals()
+    assert writer.writes == []
 
 
 def test_store_writes_volume_totals_to_p1_and_q1() -> None:
@@ -362,6 +545,44 @@ def test_store_writes_volume_totals_to_p1_and_q1() -> None:
         (PATSOON_URL, "P", 1, "1290"),
         (PATSOON_URL, "Q", 1, "290"),
     ]
+
+
+def test_checker_keeps_running_when_one_sheet_write_fails() -> None:
+    class FakeSheet:
+        label = "구글 시트"
+
+        def __init__(self):
+            self.calls = 0
+
+        def update_check_result(self, row, **_kwargs):
+            self.calls += 1
+            if row.keyword == "항문농양":
+                raise RuntimeError("시트 L141 저장에 3회 실패했습니다")
+
+        def write_volume_totals(self) -> None:
+            self.calls += 100
+
+    class FakeNaver:
+        def search_integrated(self, keyword: str) -> str:
+            return "<div id='main_pack'></div>"
+
+        def open_post_text(self, url: str) -> str:
+            return ""
+
+    store = FakeSheet()
+    ExposureChecker(
+        store,
+        FakeNaver(),
+        __import__("logging").getLogger("v2r_auto.exposure"),
+        delay_seconds=0,
+    ).run(
+        [
+            _sheet_row(keyword="항문농양", page_id="141"),
+            _sheet_row(keyword="코숨핏", page_id="142"),
+        ],
+        dry_run=False,
+    )
+    assert store.calls == 102
 
 
 def test_checker_writes_volume_totals_after_run() -> None:
@@ -392,6 +613,31 @@ def test_checker_writes_volume_totals_after_run() -> None:
         delay_seconds=0,
     ).run([_sheet_row()], dry_run=False)
     assert store.totals == 1
+
+
+def test_checker_finishes_when_volume_totals_fail() -> None:
+    class FakeSheet:
+        label = "구글 시트"
+
+        def update_check_result(self, *_args, **_kwargs):
+            return None
+
+        def write_volume_totals(self) -> None:
+            raise RuntimeError("P1 locked")
+
+    class FakeNaver:
+        def search_integrated(self, keyword: str) -> str:
+            return "<div id='main_pack'></div>"
+
+        def open_post_text(self, url: str) -> str:
+            return ""
+
+    ExposureChecker(
+        FakeSheet(),
+        FakeNaver(),
+        __import__("logging").getLogger("v2r_auto.exposure"),
+        delay_seconds=0,
+    ).run([_sheet_row()], dry_run=False)
 
 
 def test_checker_skips_volume_totals_in_dry_run() -> None:

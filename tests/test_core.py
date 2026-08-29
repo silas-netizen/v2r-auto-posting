@@ -34,6 +34,13 @@ def test_google_sheet_export_url() -> None:
     assert url == "https://docs.google.com/spreadsheets/d/abc_123/export?format=csv&gid=987"
 
 
+def test_google_sheet_export_url_strips_range_fragment() -> None:
+    url = V2RBrowser._sheet_export_url(
+        "https://docs.google.com/spreadsheets/d/abc_123/edit?gid=987#gid=987&range=L141"
+    )
+    assert url == "https://docs.google.com/spreadsheets/d/abc_123/export?format=csv&gid=987"
+
+
 def test_se_one_uses_direct_v2r_url() -> None:
     assert V2R_SE_ONE_URL == "https://v2r.daboja.im/nc/seone"
 

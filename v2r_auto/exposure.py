@@ -518,7 +518,10 @@ class ExposureChecker:
             and (stop_event is None or not stop_event.is_set())
             and hasattr(self.notion, "write_volume_totals")
         ):
-            self.notion.write_volume_totals()
+            try:
+                self.notion.write_volume_totals()
+            except Exception as exc:
+                self.logger.error("검색량 합 저장 실패: %s", exc)
         return rows
 
     def _wait_while_paused(self, pause_event, stop_event) -> None:
@@ -663,16 +666,20 @@ class ExposureChecker:
                 label,
             )
             return
-        if hasattr(self.notion, "update_check_result"):
-            self.notion.update_check_result(
-                row,
-                status=status,
-                cafe_name=cafe_write,
-                search_volume=volume,
-                volume_found=volume_found,
-            )
-        elif row.current_status != status:
-            self.notion.update_status(row, status)
+        try:
+            if hasattr(self.notion, "update_check_result"):
+                self.notion.update_check_result(
+                    row,
+                    status=status,
+                    cafe_name=cafe_write,
+                    search_volume=volume,
+                    volume_found=volume_found,
+                )
+            elif row.current_status != status:
+                self.notion.update_status(row, status)
+        except Exception as exc:
+            self.logger.error("시트 저장 실패 (%s): %s", row.keyword, exc)
+            return
         if row.current_status != status:
             self.logger.info("%s 노출상태 변경: %s → %s", label, row.keyword, status)
         else:

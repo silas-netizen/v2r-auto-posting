@@ -1,18 +1,26 @@
 from __future__ import annotations
 
-import csv
-import io
 import logging
-import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
-from .sheet_values import parse_sheet_int
+from .sheet_values import (
+    apply_sheet_overlay,
+    column_index_from_letter,
+    csv_sheet_cell,
+    looks_like_html,
+    parse_sheet_int,
+    parse_sheet_table,
+    sheet_cell_values_match,
+    sheet_gid_from_url,
+    sheet_plain_text,
+    spreadsheet_id_from_url,
+)
 from .exposure import (
     CAFE_HEADERS,
     EDITED_HEADERS,
@@ -33,19 +41,11 @@ class SheetError(RuntimeError):
     pass
 
 
-_SHEET_ID_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9_-]+)")
-
-
 def parse_spreadsheet_ref(value: str) -> tuple[str, str]:
-    text = (value or "").strip()
-    match = _SHEET_ID_RE.search(text)
-    if not match:
-        raise SheetError("구글 시트 주소를 확인하세요")
-    parsed = urlparse(text)
-    gid = (parse_qs(parsed.query).get("gid") or ["0"])[0]
-    if parsed.fragment.startswith("gid="):
-        gid = parsed.fragment.split("=", 1)[1].split("&", 1)[0]
-    return match.group(1), gid or "0"
+    try:
+        return spreadsheet_id_from_url(value), sheet_gid_from_url(value)
+    except ValueError as exc:
+        raise SheetError("구글 시트 주소를 확인하세요") from exc
 
 
 def sheet_export_url(sheet_id: str, gid: str) -> str:
@@ -71,7 +71,7 @@ def now_stamp(now: datetime | None = None) -> str:
 
 
 def _norm_header(name: str) -> str:
-    return (name or "").replace(" ", "").replace("#", "")
+    return sheet_plain_text(name).replace(" ", "").replace("#", "")
 
 
 def _find_header(headers: list[str], names: tuple[str, ...]) -> tuple[str, int]:
@@ -92,11 +92,6 @@ def _cell(row: list[str], index: int) -> str:
     if index < 0 or index >= len(row):
         return ""
     return str(row[index] or "").strip()
-
-
-def _looks_like_html(text: str) -> bool:
-    head = (text or "").lstrip()[:200].casefold()
-    return head.startswith("<!doctype") or head.startswith("<html") or "<html" in head[:80]
 
 
 def _sheet_text(value: Any) -> str:
@@ -198,13 +193,14 @@ class GoogleSheetExposureStore:
         self._bind: _SheetBind | None = None
         self._status_options: list[str] = []
         self._cafe_options: list[str] = []
+        self._written: dict[tuple[int, int], str] = {}
 
     def load_rows(self) -> list[ExposureRow]:
         text = self._read_csv()
-        table = list(csv.reader(io.StringIO(text)))
+        table = parse_sheet_table(text)
         if not table:
             raise SheetError("구글 시트에서 열 이름을 찾지 못했습니다")
-        headers = [str(header or "").strip() for header in table[0]]
+        headers = [sheet_plain_text(header) for header in table[0]]
         bind = self._bind_headers(headers)
         self._bind = bind
         rows: list[ExposureRow] = []
@@ -271,16 +267,55 @@ class GoogleSheetExposureStore:
             cafe_options=self._cafe_options,
         )
         row_number = int(row.page_id)
+        table = apply_sheet_overlay(
+            parse_sheet_table(self._read_csv()), self._written
+        )
+        errors: list[str] = []
         for write in writes:
-            self.writer.write_cell(
-                self.sheet_url, write.column, row_number, write.value
+            current = csv_sheet_cell(
+                table, row_number, column_index_from_letter(write.column)
+            )
+            if sheet_cell_values_match(current, write.value):
+                self.logger.info(
+                    "시트 %s%s는 이미 같아서 건너뜁니다",
+                    write.column,
+                    row_number,
+                )
+                self._remember_write(row_number, write.column, write.value)
+                continue
+            try:
+                self.writer.write_cell(
+                    self.sheet_url, write.column, row_number, write.value
+                )
+                self._remember_write(row_number, write.column, write.value)
+            except Exception as exc:
+                if write.column == (row.edited_property or ""):
+                    self.logger.warning(
+                        "시트 %s%s 시각 확인을 건너뛰고 검사를 이어갑니다: %s",
+                        write.column,
+                        row_number,
+                        exc,
+                    )
+                    self._remember_write(row_number, write.column, write.value)
+                    continue
+                self.logger.error(
+                    "시트 %s%s 저장 실패: %s",
+                    write.column,
+                    row_number,
+                    exc,
+                )
+                errors.append(f"{write.column}{row_number}: {exc}")
+        if errors:
+            raise SheetError(
+                "시트 일부 칸을 저장하지 못했습니다: " + "; ".join(errors)
             )
 
     def write_volume_totals(self) -> None:
         if self.writer is None:
             raise SheetError("구글 시트에 쓸 브라우저가 없습니다")
-        text = self._read_csv()
-        table = list(csv.reader(io.StringIO(text)))
+        table = apply_sheet_overlay(
+            parse_sheet_table(self._read_csv()), self._written
+        )
         if not table:
             raise SheetError("구글 시트에서 열 이름을 찾지 못했습니다")
         bind = self._bind or self._bind_headers(
@@ -289,11 +324,29 @@ class GoogleSheetExposureStore:
         keyword_total = _sum_column(table, bind.volume_idx)
         exposed_total = _sum_column(table, bind.exposed_volume_idx)
         if bind.volume_idx >= 0:
-            self.writer.write_cell(self.sheet_url, "P", 1, _sheet_text(keyword_total))
+            self._write_if_changed("P", 1, _sheet_text(keyword_total), table)
             self.logger.info("키워드 검색량 합 P1=%s", keyword_total)
         if bind.exposed_volume_idx >= 0:
-            self.writer.write_cell(self.sheet_url, "Q", 1, _sheet_text(exposed_total))
+            self._write_if_changed("Q", 1, _sheet_text(exposed_total), table)
             self.logger.info("노출된 검색량 합 Q1=%s", exposed_total)
+
+    def _write_if_changed(
+        self,
+        column: str,
+        row_number: int,
+        value: str,
+        table: list[list[str]],
+    ) -> None:
+        current = csv_sheet_cell(
+            table, row_number, column_index_from_letter(column)
+        )
+        if sheet_cell_values_match(current, value):
+            return
+        self.writer.write_cell(self.sheet_url, column, row_number, value)
+        self._remember_write(row_number, column, value)
+
+    def _remember_write(self, row_number: int, column: str, value: str) -> None:
+        self._written[(row_number, column_index_from_letter(column))] = value
 
     def _bind_headers(self, headers: list[str]) -> _SheetBind:
         keyword_col, keyword_idx = _find_header(headers, KEYWORD_HEADERS)
@@ -331,7 +384,7 @@ class GoogleSheetExposureStore:
         )
 
     def _read_csv(self) -> str:
-        export = sheet_export_url(self.sheet_id, self.gid)
+        export = f"{sheet_export_url(self.sheet_id, self.gid)}&cache={time.time_ns()}"
         request = Request(
             export,
             headers={"User-Agent": "Mozilla/5.0 (compatible; V2R-Exposure-Checker)"},
@@ -344,7 +397,7 @@ class GoogleSheetExposureStore:
                 if isinstance(raw, (bytes, bytearray))
                 else str(raw)
             )
-            if _looks_like_html(text):
+            if looks_like_html(text):
                 return self._download_via_browser()
             return text
         except SheetError:
@@ -363,7 +416,7 @@ class GoogleSheetExposureStore:
             )
         path = self.browser.download_sheet(self.sheet_url)
         text = Path(path).read_text(encoding="utf-8-sig")
-        if _looks_like_html(text):
+        if looks_like_html(text):
             raise SheetError(
                 "구글 시트를 읽지 못했습니다. 공유 권한 또는 구글 로그인을 확인하세요"
             )

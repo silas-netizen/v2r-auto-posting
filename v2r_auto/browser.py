@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import csv
-import io
 import json
 import logging
 import random
@@ -11,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from selenium import webdriver
 from selenium.common.exceptions import (
@@ -30,7 +28,15 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from .content import ParsedArticle
 from .models import AffiliateJob, JobStatus, PostJob
-from .sheet_values import sheet_cell_values_match
+from .sheet_values import (
+    column_index_from_letter,
+    csv_sheet_cell,
+    looks_like_html,
+    parse_sheet_table,
+    sheet_cell_values_match,
+    sheet_csv_export_url,
+    sheet_write_confirmed,
+)
 
 
 V2R_LIST_URL = "https://v2r.daboja.im/nc/board?view=list"
@@ -145,17 +151,10 @@ class V2RBrowser:
 
     @staticmethod
     def _sheet_export_url(sheet_url: str) -> str:
-        match = re.search(r"/spreadsheets/d/([a-zA-Z0-9_-]+)", sheet_url)
-        if not match:
-            raise AutomationError("올바른 Google Sheets 주소가 아닙니다")
-        parsed = urlparse(sheet_url)
-        gid = parse_qs(parsed.query).get("gid", ["0"])[0]
-        if parsed.fragment.startswith("gid="):
-            gid = parsed.fragment.split("=", 1)[1]
-        return (
-            f"https://docs.google.com/spreadsheets/d/{match.group(1)}"
-            f"/export?format=csv&gid={gid}"
-        )
+        try:
+            return sheet_csv_export_url(sheet_url)
+        except ValueError as exc:
+            raise AutomationError("올바른 Google Sheets 주소가 아닙니다") from exc
 
     def download_sheet(self, sheet_url: str) -> Path:
         self.start()
@@ -251,23 +250,20 @@ class V2RBrowser:
                         if element.is_displayed() and element.is_enabled()
                     ]
                     if editors:
-                        editor = editors[0]
-                        editor.click()
-                        editor.send_keys(Keys.CONTROL, "a")
-                        editor.send_keys(value)
-                        editor.send_keys(Keys.ENTER)
+                        typed_ok = self._type_sheet_value(value, editors[0])
                     else:
                         # Sheets keeps a hidden rich-text editor while a grid
                         # cell is selected. Send typing to its global active-cell
                         # keyboard handler instead of that hidden element.
-                        ActionChains(self.driver).send_keys(value).send_keys(
-                            Keys.ENTER
-                        ).perform()
+                        typed_ok = self._type_sheet_value(value)
+                    time.sleep(0.3)
                     self._verify_sheet_cell(
                         sheet_url,
                         column,
                         row_number,
                         value,
+                        gid=gid,
+                        typed_ok=typed_ok,
                         checks=verify_checks,
                     )
                     self.logger.info("시트 %s에 값을 입력했습니다", cell_label)
@@ -289,6 +285,133 @@ class V2RBrowser:
         finally:
             self._switch_to_handle(self.v2r_handle)
 
+    def _type_sheet_value(self, value: str, editor=None) -> bool:
+        # Empty send_keys() after Ctrl+A does not clear a Sheets cell.
+        # Always delete first, then insertText so Korean IME and empty L both work.
+        if editor is not None:
+            try:
+                editor.click()
+            except Exception:
+                pass
+        inserted = False
+        try:
+            inserted = bool(
+                self.driver.execute_script(
+                    "const text = arguments[0];"
+                    "const el = arguments[1] || document.activeElement;"
+                    "if (el && el.focus) el.focus();"
+                    "try { document.execCommand('selectAll', false, null); } catch (e) {}"
+                    "try { document.execCommand('delete', false, null); } catch (e) {}"
+                    "if (!text) { return true; }"
+                    "try { return document.execCommand('insertText', false, text); }"
+                    "catch (e) { return false; }",
+                    value,
+                    editor,
+                )
+            )
+        except Exception:
+            inserted = False
+        if not inserted:
+            target = editor
+            if target is not None:
+                target.send_keys(Keys.CONTROL, "a")
+                target.send_keys(Keys.DELETE)
+                target.send_keys(Keys.BACKSPACE)
+                if value:
+                    target.send_keys(value)
+            else:
+                actions = (
+                    ActionChains(self.driver)
+                    .send_keys(Keys.CONTROL, "a")
+                    .send_keys(Keys.DELETE)
+                    .send_keys(Keys.BACKSPACE)
+                )
+                if value:
+                    actions.send_keys(value)
+                actions.send_keys(Keys.ENTER).perform()
+                return inserted
+        shown = self._waffle_editor_text()
+        typed_ok = inserted or sheet_cell_values_match(shown or "", value)
+        if editor is not None:
+            editor.send_keys(Keys.ENTER)
+        else:
+            ActionChains(self.driver).send_keys(Keys.ENTER).perform()
+        return typed_ok
+
+    def _waffle_editor_text(self) -> str:
+        try:
+            text = self.driver.execute_script(
+                "const el = document.getElementById('waffle-rich-text-editor');"
+                "return el ? String(el.innerText || el.textContent || '') : '';"
+            )
+        except Exception:
+            return ""
+        return str(text or "").replace("\n", "").strip()
+
+    def _read_sheet_rows(self, sheet_url: str) -> list[list[str]]:
+        export_url = self._sheet_export_url(sheet_url)
+        try:
+            request = Request(
+                f"{export_url}&cache={time.time_ns()}",
+                headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; V2R-Exposure-Checker)"
+                },
+            )
+            with urlopen(request, timeout=20) as response:
+                raw = response.read()
+            text = (
+                raw.decode("utf-8-sig")
+                if isinstance(raw, (bytes, bytearray))
+                else str(raw)
+            )
+            if looks_like_html(text):
+                raise ValueError("html export")
+            return parse_sheet_table(text)
+        except Exception:
+            path = self.download_sheet(sheet_url)
+            text = Path(path).read_text(encoding="utf-8-sig")
+            if looks_like_html(text):
+                raise AutomationError(
+                    "구글 시트를 읽지 못했습니다. 공유 권한 또는 구글 로그인을 확인하세요"
+                )
+            return parse_sheet_table(text)
+
+    def _ui_sheet_cell_text(self, gid: str, column: str, row_number: int) -> str | None:
+        wanted = f"{column}{row_number}"
+        try:
+            self.driver.execute_script(
+                "location.hash = arguments[0];",
+                f"gid={gid}&range={wanted}",
+            )
+            time.sleep(0.25)
+            ActionChains(self.driver).send_keys(Keys.F2).perform()
+            time.sleep(0.2)
+            payload = self.driver.execute_script(
+                """
+                const nameBox = document.getElementById('t-name-box');
+                const name = nameBox
+                  ? String(nameBox.value || nameBox.textContent || '').trim()
+                  : '';
+                const editor = document.getElementById('waffle-rich-text-editor');
+                const text = editor
+                  ? String(editor.innerText || editor.textContent || '')
+                  : '';
+                return {name: name, text: text.replace(/\\n+$/, '')};
+                """
+            )
+            ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        name = str(payload.get("name") or "").strip().upper()
+        text = str(payload.get("text") or "")
+        if name and name != wanted.upper():
+            return None
+        if not name:
+            return None
+        return text
+
     def _verify_sheet_cell(
         self,
         sheet_url: str,
@@ -296,31 +419,38 @@ class V2RBrowser:
         row_number: int,
         expected: str,
         *,
+        gid: str = "",
+        typed_ok: bool = False,
         checks: int = 10,
     ) -> None:
-        column_index = 0
-        for letter in column:
-            column_index = column_index * 26 + (ord(letter) - ord("A") + 1)
-        column_index -= 1
-        export_url = self._sheet_export_url(sheet_url)
+        if gid:
+            ui_text = self._ui_sheet_cell_text(gid, column, row_number)
+            if ui_text is not None and sheet_write_confirmed(
+                ui_text, expected, typed_ok=True
+            ):
+                return
+        column_index = column_index_from_letter(column)
+        actual = ""
         for _ in range(checks):
-            separator = "&" if "?" in export_url else "?"
-            with urlopen(
-                f"{export_url}{separator}cache={time.time_ns()}", timeout=20
-            ) as response:
-                rows = list(
-                    csv.reader(
-                        io.StringIO(response.read().decode("utf-8-sig"))
+            rows = self._read_sheet_rows(sheet_url)
+            actual = csv_sheet_cell(rows, row_number, column_index)
+            if sheet_write_confirmed(actual, expected, typed_ok=typed_ok):
+                if not sheet_cell_values_match(actual, expected):
+                    self.logger.info(
+                        "시트 %s%s 내려받기가 예전 값이라 방금 입력을 따릅니다 "
+                        "(기대 %s / 내려받기 %s)",
+                        column,
+                        row_number,
+                        expected or "(비어 있음)",
+                        actual or "(비어 있음)",
                     )
-                )
-            if len(rows) >= row_number and len(rows[row_number - 1]) > column_index:
-                if sheet_cell_values_match(
-                    rows[row_number - 1][column_index], expected
-                ):
-                    return
+                return
             time.sleep(0.5)
+        shown = actual if str(actual or "").strip() else "(비어 있음)"
+        wanted = expected if str(expected or "").strip() else "(비어 있음)"
         raise AutomationError(
-            f"시트 {column}{row_number} 저장값을 다시 확인하지 못했습니다"
+            f"시트 {column}{row_number} 저장값을 다시 확인하지 못했습니다 "
+            f"(기대 {wanted} / 실제 {shown})"
         )
 
     def ensure_v2r_login(self, email: str, password: str) -> None:
