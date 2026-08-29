@@ -364,6 +364,44 @@ def test_store_writes_volume_totals_to_p1_and_q1() -> None:
     ]
 
 
+def test_checker_keeps_running_when_one_sheet_write_fails() -> None:
+    class FakeSheet:
+        label = "구글 시트"
+
+        def __init__(self):
+            self.calls = 0
+
+        def update_check_result(self, row, **_kwargs):
+            self.calls += 1
+            if row.keyword == "항문농양":
+                raise RuntimeError("시트 L141 저장에 3회 실패했습니다")
+
+        def write_volume_totals(self) -> None:
+            self.calls += 100
+
+    class FakeNaver:
+        def search_integrated(self, keyword: str) -> str:
+            return "<div id='main_pack'></div>"
+
+        def open_post_text(self, url: str) -> str:
+            return ""
+
+    store = FakeSheet()
+    ExposureChecker(
+        store,
+        FakeNaver(),
+        __import__("logging").getLogger("v2r_auto.exposure"),
+        delay_seconds=0,
+    ).run(
+        [
+            _sheet_row(keyword="항문농양", page_id="141"),
+            _sheet_row(keyword="코숨핏", page_id="142"),
+        ],
+        dry_run=False,
+    )
+    assert store.calls == 102
+
+
 def test_checker_writes_volume_totals_after_run() -> None:
     class FakeSheet:
         label = "구글 시트"

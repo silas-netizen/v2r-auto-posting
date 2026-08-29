@@ -9,7 +9,8 @@ a = Analysis(
     pathex=[],
     binaries=selenium_binaries,
     datas=selenium_datas,
-    hiddenimports=list(selenium_hiddenimports) + ["v2r_auto.exposure_sheet"],
+    hiddenimports=list(selenium_hiddenimports)
+    + ["v2r_auto.exposure_sheet", "v2r_auto.sheet_values"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

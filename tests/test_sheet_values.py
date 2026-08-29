@@ -1,8 +1,21 @@
 from v2r_auto.sheet_values import (
+    csv_sheet_cell,
     parse_sheet_datetime,
     parse_sheet_int,
     sheet_cell_values_match,
 )
+
+
+def test_csv_sheet_cell_missing_column_is_empty() -> None:
+    rows = [["카페", "노출 상태", "키워드", "키워드 검색량"], ["양평맘", "밀려남", "항문농양", "5,760"]]
+    assert csv_sheet_cell(rows, 2, 4) == ""
+    assert csv_sheet_cell(rows, 2, 3) == "5,760"
+    assert sheet_cell_values_match(csv_sheet_cell(rows, 2, 4), "")
+
+
+def test_empty_does_not_match_old_exposed_volume() -> None:
+    assert not sheet_cell_values_match("5,800", "")
+    assert sheet_cell_values_match("5,760", "5760")
 
 
 def test_sheet_cell_values_match_j_hour_without_leading_zero() -> None:

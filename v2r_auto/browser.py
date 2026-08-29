@@ -30,7 +30,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from .content import ParsedArticle
 from .models import AffiliateJob, JobStatus, PostJob
-from .sheet_values import sheet_cell_values_match
+from .sheet_values import csv_sheet_cell, sheet_cell_values_match
 
 
 V2R_LIST_URL = "https://v2r.daboja.im/nc/board?view=list"
@@ -251,18 +251,12 @@ class V2RBrowser:
                         if element.is_displayed() and element.is_enabled()
                     ]
                     if editors:
-                        editor = editors[0]
-                        editor.click()
-                        editor.send_keys(Keys.CONTROL, "a")
-                        editor.send_keys(value)
-                        editor.send_keys(Keys.ENTER)
+                        self._type_sheet_value(value, editors[0])
                     else:
                         # Sheets keeps a hidden rich-text editor while a grid
                         # cell is selected. Send typing to its global active-cell
                         # keyboard handler instead of that hidden element.
-                        ActionChains(self.driver).send_keys(value).send_keys(
-                            Keys.ENTER
-                        ).perform()
+                        self._type_sheet_value(value)
                     self._verify_sheet_cell(
                         sheet_url,
                         column,
@@ -289,6 +283,26 @@ class V2RBrowser:
         finally:
             self._switch_to_handle(self.v2r_handle)
 
+    def _type_sheet_value(self, value: str, editor=None) -> None:
+        # Empty send_keys() after Ctrl+A does not clear a Sheets cell.
+        # 밀려남 must delete the old 노출된 검색량, so always delete first.
+        if editor is not None:
+            editor.click()
+            editor.send_keys(Keys.CONTROL, "a")
+            editor.send_keys(Keys.DELETE)
+            if value:
+                editor.send_keys(value)
+            editor.send_keys(Keys.ENTER)
+            return
+        actions = (
+            ActionChains(self.driver)
+            .send_keys(Keys.CONTROL, "a")
+            .send_keys(Keys.DELETE)
+        )
+        if value:
+            actions.send_keys(value)
+        actions.send_keys(Keys.ENTER).perform()
+
     def _verify_sheet_cell(
         self,
         sheet_url: str,
@@ -303,6 +317,7 @@ class V2RBrowser:
             column_index = column_index * 26 + (ord(letter) - ord("A") + 1)
         column_index -= 1
         export_url = self._sheet_export_url(sheet_url)
+        actual = ""
         for _ in range(checks):
             separator = "&" if "?" in export_url else "?"
             with urlopen(
@@ -313,14 +328,15 @@ class V2RBrowser:
                         io.StringIO(response.read().decode("utf-8-sig"))
                     )
                 )
-            if len(rows) >= row_number and len(rows[row_number - 1]) > column_index:
-                if sheet_cell_values_match(
-                    rows[row_number - 1][column_index], expected
-                ):
-                    return
+            actual = csv_sheet_cell(rows, row_number, column_index)
+            if sheet_cell_values_match(actual, expected):
+                return
             time.sleep(0.5)
+        shown = actual if str(actual or "").strip() else "(비어 있음)"
+        wanted = expected if str(expected or "").strip() else "(비어 있음)"
         raise AutomationError(
-            f"시트 {column}{row_number} 저장값을 다시 확인하지 못했습니다"
+            f"시트 {column}{row_number} 저장값을 다시 확인하지 못했습니다 "
+            f"(기대 {wanted} / 실제 {shown})"
         )
 
     def ensure_v2r_login(self, email: str, password: str) -> None:

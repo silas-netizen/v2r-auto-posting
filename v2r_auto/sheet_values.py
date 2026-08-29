@@ -10,6 +10,17 @@ _TIME_RE = re.compile(
 )
 
 
+def csv_sheet_cell(
+    rows: list[list[str]], row_number: int, column_index: int
+) -> str:
+    if row_number < 1 or row_number > len(rows):
+        return ""
+    row = rows[row_number - 1]
+    if column_index < 0 or column_index >= len(row):
+        return ""
+    return row[column_index]
+
+
 def sheet_cell_values_match(actual: str, expected: str) -> bool:
     left = (actual or "").strip()
     right = (expected or "").strip()
