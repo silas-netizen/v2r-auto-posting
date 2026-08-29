@@ -76,11 +76,17 @@ def test_sheet_cell_values_do_not_match_different_times() -> None:
     assert not sheet_cell_values_match("2026-08-29 7:33:10", "2026-08-29 07:33:11")
 
 
-def test_sheet_write_confirmed_accepts_stale_j_export() -> None:
-    assert sheet_write_confirmed("2026-08-29 7:52:45", "2026-08-29 11:39:20")
-    assert sheet_write_confirmed("2026-08-29 7:52:59", "2026-08-29 11:40:27")
+def test_sheet_write_confirmed_needs_the_new_time() -> None:
+    assert not sheet_write_confirmed("2026-08-29 7:52:45", "2026-08-29 20:35:37")
+    assert not sheet_write_confirmed("2026-08-29 7:52:59", "2026-08-29 20:35:49")
+    assert sheet_write_confirmed(
+        "2026-08-29 7:52:45",
+        "2026-08-29 20:35:37",
+        ui_value="2026-08-29 20:35:37",
+    )
+    assert sheet_write_confirmed("2026-08-29 8:35:37", "2026-08-29 08:35:37")
     assert not sheet_write_confirmed("5,800", "")
-    assert sheet_write_confirmed("5,800", "", typed_ok=True)
+    assert sheet_write_confirmed("5,800", "", ui_value="")
     assert not sheet_write_confirmed("100", "200")
 
 

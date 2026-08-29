@@ -119,23 +119,19 @@ def sheet_cell_values_match(actual: str, expected: str) -> bool:
 
 
 def sheet_write_confirmed(
-    actual: str, expected: str, *, typed_ok: bool = False
+    actual: str,
+    expected: str,
+    *,
+    ui_value: str | None = None,
 ) -> bool:
-    """A just-written cell is done when CSV matches, or when CSV is only late.
+    """A write is done only when the cell itself shows the new value.
 
-    Google Sheets public export keeps the previous 최종 편집 일시 for a while.
-    That is not a failed write. Clearing L can look the same: export still
-    shows the old number after the cell is already empty.
+    Public CSV can lag. That is allowed only after the open sheet cell
+    already matches. Two different timestamps are not a success.
     """
-    if sheet_cell_values_match(actual, expected):
+    if ui_value is not None and sheet_cell_values_match(ui_value, expected):
         return True
-    expected_time = parse_sheet_datetime(expected)
-    actual_time = parse_sheet_datetime(actual)
-    if expected_time is not None and actual_time is not None:
-        return True
-    if typed_ok and not sheet_plain_text(expected) and parse_sheet_number(actual) is not None:
-        return True
-    return typed_ok
+    return sheet_cell_values_match(actual, expected)
 
 
 def parse_sheet_number(value: str) -> float | None:
