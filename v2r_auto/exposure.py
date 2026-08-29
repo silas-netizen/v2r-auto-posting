@@ -518,7 +518,10 @@ class ExposureChecker:
             and (stop_event is None or not stop_event.is_set())
             and hasattr(self.notion, "write_volume_totals")
         ):
-            self.notion.write_volume_totals()
+            try:
+                self.notion.write_volume_totals()
+            except Exception as exc:
+                self.logger.error("검색량 합 저장 실패: %s", exc)
         return rows
 
     def _wait_while_paused(self, pause_event, stop_event) -> None:
