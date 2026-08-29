@@ -32,6 +32,7 @@ from .sheet_values import (
     column_index_from_letter,
     csv_sheet_cell,
     looks_like_html,
+    parse_sheet_datetime,
     parse_sheet_table,
     sheet_cell_values_match,
     sheet_csv_export_url,
@@ -241,32 +242,25 @@ class V2RBrowser:
                         )
                     )
                     self.driver.execute_script("window.focus();")
-                    editors = [
-                        element
-                        for element in self.driver.find_elements(
-                            By.ID,
-                            "waffle-rich-text-editor",
-                        )
-                        if element.is_displayed() and element.is_enabled()
-                    ]
-                    if editors:
-                        typed_ok = self._type_sheet_value(value, editors[0])
-                    else:
-                        # Sheets keeps a hidden rich-text editor while a grid
-                        # cell is selected. Send typing to its global active-cell
-                        # keyboard handler instead of that hidden element.
-                        typed_ok = self._type_sheet_value(value)
-                    time.sleep(0.3)
+                    to_type = value
+                    if attempt > 1 and parse_sheet_datetime(value) and not str(value).startswith("'"):
+                        to_type = "'" + value
+                    self._goto_sheet_cell(gid, column, row_number)
+                    self._type_sheet_value(to_type)
+                    time.sleep(0.4)
                     self._verify_sheet_cell(
                         sheet_url,
                         column,
                         row_number,
                         value,
                         gid=gid,
-                        typed_ok=typed_ok,
                         checks=verify_checks,
                     )
-                    self.logger.info("시트 %s에 값을 입력했습니다", cell_label)
+                    self.logger.info(
+                        "시트 %s에 %s를 입력했습니다",
+                        cell_label,
+                        value if str(value).strip() else "(비어 있음)",
+                    )
                     return
                 except Exception as exc:
                     last_error = exc
@@ -285,58 +279,96 @@ class V2RBrowser:
         finally:
             self._switch_to_handle(self.v2r_handle)
 
-    def _type_sheet_value(self, value: str, editor=None) -> bool:
-        # Empty send_keys() after Ctrl+A does not clear a Sheets cell.
-        # Always delete first, then insertText so Korean IME and empty L both work.
-        if editor is not None:
+    def _find_sheet_name_box(self):
+        assert self.driver
+        selectors = (
+            (By.ID, "t-name-box"),
+            (By.CSS_SELECTOR, 'input[aria-label="Name box"]'),
+            (By.CSS_SELECTOR, 'input[aria-label="이름 상자"]'),
+        )
+        for by, selector in selectors:
+            for element in self.driver.find_elements(by, selector):
+                if element.is_displayed():
+                    return element
+        return None
+
+    def _name_box_value(self) -> str:
+        box = self._find_sheet_name_box()
+        if box is None:
+            return ""
+        return str(
+            box.get_attribute("value") or box.text or ""
+        ).strip()
+
+    def _goto_sheet_cell(self, gid: str, column: str, row_number: int) -> None:
+        wanted = f"{column}{row_number}"
+        box = self._find_sheet_name_box()
+        if box is not None:
             try:
-                editor.click()
+                box.click()
+                box.send_keys(Keys.CONTROL, "a")
+                box.send_keys(wanted)
+                box.send_keys(Keys.ENTER)
+                time.sleep(0.25)
+                if self._name_box_value().upper() == wanted.upper():
+                    return
             except Exception:
                 pass
-        inserted = False
-        try:
-            inserted = bool(
-                self.driver.execute_script(
-                    "const text = arguments[0];"
-                    "const el = arguments[1] || document.activeElement;"
-                    "if (el && el.focus) el.focus();"
-                    "try { document.execCommand('selectAll', false, null); } catch (e) {}"
-                    "try { document.execCommand('delete', false, null); } catch (e) {}"
-                    "if (!text) { return true; }"
-                    "try { return document.execCommand('insertText', false, text); }"
-                    "catch (e) { return false; }",
-                    value,
-                    editor,
-                )
-            )
-        except Exception:
-            inserted = False
-        if not inserted:
-            target = editor
-            if target is not None:
-                target.send_keys(Keys.CONTROL, "a")
-                target.send_keys(Keys.DELETE)
-                target.send_keys(Keys.BACKSPACE)
-                if value:
+        self.driver.execute_script(
+            "location.hash = arguments[0];",
+            f"gid={gid}&range={wanted}",
+        )
+        time.sleep(0.35)
+
+    def _type_sheet_value(self, value: str, editor=None) -> None:
+        # F2 binds typing to the selected cell. insertText on a hidden
+        # waffle editor can look successful without changing J.
+        ActionChains(self.driver).send_keys(Keys.F2).perform()
+        time.sleep(0.15)
+        editors = [
+            element
+            for element in self.driver.find_elements(By.ID, "waffle-rich-text-editor")
+            if element.is_displayed() and element.is_enabled()
+        ]
+        target = editor if editor is not None and getattr(editor, "is_displayed", lambda: False)() else None
+        if target is None and editors:
+            target = editors[0]
+        if target is not None:
+            try:
+                target.click()
+            except Exception:
+                pass
+            target.send_keys(Keys.CONTROL, "a")
+            target.send_keys(Keys.DELETE)
+            target.send_keys(Keys.BACKSPACE)
+            if value:
+                inserted = False
+                try:
+                    inserted = bool(
+                        self.driver.execute_script(
+                            "const el = arguments[0]; const text = arguments[1];"
+                            "el.focus();"
+                            "try { return document.execCommand('insertText', false, text); }"
+                            "catch (e) { return false; }",
+                            target,
+                            value,
+                        )
+                    )
+                except Exception:
+                    inserted = False
+                if not inserted:
                     target.send_keys(value)
-            else:
-                actions = (
-                    ActionChains(self.driver)
-                    .send_keys(Keys.CONTROL, "a")
-                    .send_keys(Keys.DELETE)
-                    .send_keys(Keys.BACKSPACE)
-                )
-                if value:
-                    actions.send_keys(value)
-                actions.send_keys(Keys.ENTER).perform()
-                return inserted
-        shown = self._waffle_editor_text()
-        typed_ok = inserted or sheet_cell_values_match(shown or "", value)
-        if editor is not None:
-            editor.send_keys(Keys.ENTER)
-        else:
-            ActionChains(self.driver).send_keys(Keys.ENTER).perform()
-        return typed_ok
+            target.send_keys(Keys.ENTER)
+            return
+        actions = (
+            ActionChains(self.driver)
+            .send_keys(Keys.CONTROL, "a")
+            .send_keys(Keys.DELETE)
+            .send_keys(Keys.BACKSPACE)
+        )
+        if value:
+            actions.send_keys(value)
+        actions.send_keys(Keys.ENTER).perform()
 
     def _waffle_editor_text(self) -> str:
         try:
@@ -379,36 +411,15 @@ class V2RBrowser:
     def _ui_sheet_cell_text(self, gid: str, column: str, row_number: int) -> str | None:
         wanted = f"{column}{row_number}"
         try:
-            self.driver.execute_script(
-                "location.hash = arguments[0];",
-                f"gid={gid}&range={wanted}",
-            )
-            time.sleep(0.25)
+            self._goto_sheet_cell(gid, column, row_number)
             ActionChains(self.driver).send_keys(Keys.F2).perform()
             time.sleep(0.2)
-            payload = self.driver.execute_script(
-                """
-                const nameBox = document.getElementById('t-name-box');
-                const name = nameBox
-                  ? String(nameBox.value || nameBox.textContent || '').trim()
-                  : '';
-                const editor = document.getElementById('waffle-rich-text-editor');
-                const text = editor
-                  ? String(editor.innerText || editor.textContent || '')
-                  : '';
-                return {name: name, text: text.replace(/\\n+$/, '')};
-                """
-            )
+            text = self._waffle_editor_text()
+            name = self._name_box_value()
             ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
         except Exception:
             return None
-        if not isinstance(payload, dict):
-            return None
-        name = str(payload.get("name") or "").strip().upper()
-        text = str(payload.get("text") or "")
-        if name and name != wanted.upper():
-            return None
-        if not name:
+        if name and name.upper() != wanted.upper():
             return None
         return text
 
@@ -420,33 +431,28 @@ class V2RBrowser:
         expected: str,
         *,
         gid: str = "",
-        typed_ok: bool = False,
         checks: int = 10,
     ) -> None:
-        if gid:
-            ui_text = self._ui_sheet_cell_text(gid, column, row_number)
-            if ui_text is not None and sheet_write_confirmed(
-                ui_text, expected, typed_ok=True
-            ):
-                return
+        ui_text = self._ui_sheet_cell_text(gid, column, row_number) if gid else None
+        if ui_text is not None and sheet_cell_values_match(ui_text, expected):
+            return
         column_index = column_index_from_letter(column)
         actual = ""
         for _ in range(checks):
             rows = self._read_sheet_rows(sheet_url)
             actual = csv_sheet_cell(rows, row_number, column_index)
-            if sheet_write_confirmed(actual, expected, typed_ok=typed_ok):
-                if not sheet_cell_values_match(actual, expected):
-                    self.logger.info(
-                        "시트 %s%s 내려받기가 예전 값이라 방금 입력을 따릅니다 "
-                        "(기대 %s / 내려받기 %s)",
-                        column,
-                        row_number,
-                        expected or "(비어 있음)",
-                        actual or "(비어 있음)",
-                    )
+            if sheet_write_confirmed(actual, expected, ui_value=ui_text):
                 return
             time.sleep(0.5)
-        shown = actual if str(actual or "").strip() else "(비어 있음)"
+            if gid:
+                ui_text = self._ui_sheet_cell_text(gid, column, row_number)
+                if ui_text is not None and sheet_cell_values_match(ui_text, expected):
+                    return
+        shown = (
+            ui_text
+            if ui_text is not None and str(ui_text).strip()
+            else (actual if str(actual or "").strip() else "(비어 있음)")
+        )
         wanted = expected if str(expected or "").strip() else "(비어 있음)"
         raise AutomationError(
             f"시트 {column}{row_number} 저장값을 다시 확인하지 못했습니다 "

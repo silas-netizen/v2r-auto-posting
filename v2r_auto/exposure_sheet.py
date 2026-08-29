@@ -289,15 +289,6 @@ class GoogleSheetExposureStore:
                 )
                 self._remember_write(row_number, write.column, write.value)
             except Exception as exc:
-                if write.column == (row.edited_property or ""):
-                    self.logger.warning(
-                        "시트 %s%s 시각 확인을 건너뛰고 검사를 이어갑니다: %s",
-                        write.column,
-                        row_number,
-                        exc,
-                    )
-                    self._remember_write(row_number, write.column, write.value)
-                    continue
                 self.logger.error(
                     "시트 %s%s 저장 실패: %s",
                     write.column,
