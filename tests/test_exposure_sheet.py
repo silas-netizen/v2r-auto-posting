@@ -377,6 +377,40 @@ def test_store_skips_cells_that_already_match_locale() -> None:
     assert writer.writes == []
 
 
+def test_store_does_not_fail_row_when_only_j_time_cannot_be_verified() -> None:
+    csv_text = (
+        "카페명,url,발행시간,작성자 아이디,작성자 비밀번호,발행 URL,"
+        "노출 상태,키워드,통합검색,최종 편집 일시,키워드 검색량,노출된 검색량\n"
+        "씨씨앙/dtsx,,,,,,밀려남,임산부 항문 가려움,,2026-08-29 7:52:45,210,\n"
+    )
+
+    class StaleJWriter(RecordingWriter):
+        def write_cell(self, sheet_url: str, column: str, row_number: int, value: str) -> None:
+            if column == "J":
+                raise RuntimeError(
+                    "시트 J3 저장값을 다시 확인하지 못했습니다 "
+                    "(기대 2026-08-29 11:39:20 / 실제 2026-08-29 7:52:45)"
+                )
+            super().write_cell(sheet_url, column, row_number, value)
+
+    writer = StaleJWriter()
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        __import__("logging").getLogger("test"),
+        opener=lambda request, timeout=30: FakeResponse(csv_text.encode("utf-8")),
+        writer=writer,
+        now=lambda: datetime(2026, 8, 29, 11, 39, 20),
+    )
+    store.update_check_result(
+        _sheet_row(keyword="임산부 항문 가려움", status="밀려남", page_id="2"),
+        status="밀려남",
+        cafe_name=None,
+        search_volume=210,
+        volume_found=True,
+    )
+    assert writer.writes == []
+
+
 def test_store_keeps_writing_other_cells_when_one_column_fails() -> None:
     class BoomWriter(RecordingWriter):
         def write_cell(self, sheet_url: str, column: str, row_number: int, value: str) -> None:

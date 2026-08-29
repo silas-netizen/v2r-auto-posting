@@ -35,6 +35,7 @@ from .sheet_values import (
     parse_sheet_table,
     sheet_cell_values_match,
     sheet_csv_export_url,
+    sheet_write_confirmed,
 )
 
 
@@ -249,12 +250,12 @@ class V2RBrowser:
                         if element.is_displayed() and element.is_enabled()
                     ]
                     if editors:
-                        self._type_sheet_value(value, editors[0])
+                        typed_ok = self._type_sheet_value(value, editors[0])
                     else:
                         # Sheets keeps a hidden rich-text editor while a grid
                         # cell is selected. Send typing to its global active-cell
                         # keyboard handler instead of that hidden element.
-                        self._type_sheet_value(value)
+                        typed_ok = self._type_sheet_value(value)
                     time.sleep(0.3)
                     self._verify_sheet_cell(
                         sheet_url,
@@ -262,6 +263,7 @@ class V2RBrowser:
                         row_number,
                         value,
                         gid=gid,
+                        typed_ok=typed_ok,
                         checks=verify_checks,
                     )
                     self.logger.info("시트 %s에 값을 입력했습니다", cell_label)
@@ -283,7 +285,7 @@ class V2RBrowser:
         finally:
             self._switch_to_handle(self.v2r_handle)
 
-    def _type_sheet_value(self, value: str, editor=None) -> None:
+    def _type_sheet_value(self, value: str, editor=None) -> bool:
         # Empty send_keys() after Ctrl+A does not clear a Sheets cell.
         # Always delete first, then insertText so Korean IME and empty L both work.
         if editor is not None:
@@ -327,11 +329,24 @@ class V2RBrowser:
                 if value:
                     actions.send_keys(value)
                 actions.send_keys(Keys.ENTER).perform()
-                return
+                return inserted
+        shown = self._waffle_editor_text()
+        typed_ok = inserted or sheet_cell_values_match(shown or "", value)
         if editor is not None:
             editor.send_keys(Keys.ENTER)
         else:
             ActionChains(self.driver).send_keys(Keys.ENTER).perform()
+        return typed_ok
+
+    def _waffle_editor_text(self) -> str:
+        try:
+            text = self.driver.execute_script(
+                "const el = document.getElementById('waffle-rich-text-editor');"
+                "return el ? String(el.innerText || el.textContent || '') : '';"
+            )
+        except Exception:
+            return ""
+        return str(text or "").replace("\n", "").strip()
 
     def _read_sheet_rows(self, sheet_url: str) -> list[list[str]]:
         export_url = self._sheet_export_url(sheet_url)
@@ -405,18 +420,30 @@ class V2RBrowser:
         expected: str,
         *,
         gid: str = "",
+        typed_ok: bool = False,
         checks: int = 10,
     ) -> None:
         if gid:
             ui_text = self._ui_sheet_cell_text(gid, column, row_number)
-            if ui_text is not None and sheet_cell_values_match(ui_text, expected):
+            if ui_text is not None and sheet_write_confirmed(
+                ui_text, expected, typed_ok=True
+            ):
                 return
         column_index = column_index_from_letter(column)
         actual = ""
         for _ in range(checks):
             rows = self._read_sheet_rows(sheet_url)
             actual = csv_sheet_cell(rows, row_number, column_index)
-            if sheet_cell_values_match(actual, expected):
+            if sheet_write_confirmed(actual, expected, typed_ok=typed_ok):
+                if not sheet_cell_values_match(actual, expected):
+                    self.logger.info(
+                        "시트 %s%s 내려받기가 예전 값이라 방금 입력을 따릅니다 "
+                        "(기대 %s / 내려받기 %s)",
+                        column,
+                        row_number,
+                        expected or "(비어 있음)",
+                        actual or "(비어 있음)",
+                    )
                 return
             time.sleep(0.5)
         shown = actual if str(actual or "").strip() else "(비어 있음)"

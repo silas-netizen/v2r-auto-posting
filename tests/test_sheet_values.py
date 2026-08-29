@@ -10,6 +10,7 @@ from v2r_auto.sheet_values import (
     sheet_cell_values_match,
     sheet_csv_export_url,
     sheet_gid_from_url,
+    sheet_write_confirmed,
 )
 
 
@@ -73,6 +74,14 @@ def test_sheet_cell_values_match_hyperlink_and_quoted_formula() -> None:
 
 def test_sheet_cell_values_do_not_match_different_times() -> None:
     assert not sheet_cell_values_match("2026-08-29 7:33:10", "2026-08-29 07:33:11")
+
+
+def test_sheet_write_confirmed_accepts_stale_j_export() -> None:
+    assert sheet_write_confirmed("2026-08-29 7:52:45", "2026-08-29 11:39:20")
+    assert sheet_write_confirmed("2026-08-29 7:52:59", "2026-08-29 11:40:27")
+    assert not sheet_write_confirmed("5,800", "")
+    assert sheet_write_confirmed("5,800", "", typed_ok=True)
+    assert not sheet_write_confirmed("100", "200")
 
 
 def test_parse_sheet_int_blank_is_zero() -> None:
