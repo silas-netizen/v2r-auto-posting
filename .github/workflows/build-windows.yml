@@ -85,6 +85,25 @@ jobs:
               });
               core.info(`Deleted old artifact: ${artifact.name} (${artifact.id})`);
             }
+            const caches = await github.paginate(
+              "GET /repos/{owner}/{repo}/actions/caches",
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100,
+              },
+            );
+            for (const cache of caches) {
+              await github.request(
+                "DELETE /repos/{owner}/{repo}/actions/caches/{cache_id}",
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  cache_id: cache.id,
+                },
+              );
+              core.info(`Deleted old cache: ${cache.key} (${cache.id})`);
+            }
 
       - name: Upload Windows programs
         if: github.ref_name == 'cursor/fix-seone-image-upload-3901'
