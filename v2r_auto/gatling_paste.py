@@ -1070,7 +1070,7 @@ def build_master_rows(
         _comment_and_reply_rows(
             job,
             article_url,
-            author=author if is_affiliate_cafe(job.cafe) else None,
+            author=author,
             comment_map=comment_map,
         )
     )
@@ -1162,6 +1162,13 @@ def build_gatling_master(
         if comment_count < 6:
             raise GatlingPasteError(
                 f"양평맘·씨씨앙 댓글 아이디가 6개 필요합니다. 지금 {comment_count}개입니다"
+            )
+    self_jobs = [job for job in jobs if not is_affiliate_cafe(job.cafe)]
+    if proxy_book and self_jobs and any(job.article.comments for job in self_jobs):
+        self_comment_count = len(proxy_book.self_comment_accounts())
+        if self_comment_count < 6:
+            raise GatlingPasteError(
+                f"자사 카페 댓글 아이디가 6개 필요합니다. 지금 {self_comment_count}개입니다"
             )
 
     rows: list[MasterRow] = []
