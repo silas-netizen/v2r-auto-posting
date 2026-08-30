@@ -16,6 +16,7 @@ from .immediate_inputs import (
     load_brand_immediate_jobs,
     load_daily_excel_jobs,
 )
+from .models import JobStatus
 from .photo_washer import (
     PhotoWashPlan,
     needs_photo_wash,
@@ -261,10 +262,18 @@ class ImmediateAutomationApp(AutomationApp):
                 logger=self.logger,
             )
             errors = sum(bool(job.validate()) for job in jobs)
+            pending = sum(job.status == JobStatus.PENDING for job in jobs)
+            completed = sum(
+                job.status == JobStatus.SKIPPED and bool(job.completion_url)
+                for job in jobs
+            )
             self.logger.info(
-                "즉시 발행 데이터 확인: %s건 / 형식 오류 %s건 / "
+                "예약 발행 데이터 확인: 전체 %s건 / 실제 처리 %s건 / "
+                "완료 %s건 / 형식 오류 %s건 / "
                 "사진 선택 %s개 / 수동 세탁 대기",
                 len(jobs),
+                pending,
+                completed,
                 errors,
                 self.photo_wash_plan.selected_count,
             )
@@ -273,7 +282,9 @@ class ImmediateAutomationApp(AutomationApp):
                     "info",
                     (
                         "데이터 확인",
-                        f"처리 대상 {len(jobs)}건\n"
+                        f"전체 원고 {len(jobs)}건\n"
+                        f"실제 처리 대상 {pending}건\n"
+                        f"완료 링크 제외 {completed}건\n"
                         f"형식 오류 {errors}건\n"
                         f"사진 선택 {self.photo_wash_plan.selected_count}개\n"
                         f"사진 준비 실패 원고 "

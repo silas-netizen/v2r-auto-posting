@@ -131,6 +131,7 @@ colpith
 ### 카페·게시판 API 매칭
 
 - 실행 때 `/naver_cafes/naver_join_cafes`, `/naver_cafes/naver_join_cafe`, `/naver_cafes/menus`를 사용한다.
+- 등록된 자사 카페는 화면 표시명이 바뀌어도 검증된 카페 ID를 우선 사용한다.
 - 공백·이모지·장식 문자를 제거한 정확한 이름을 우선한다.
 - 정확 일치가 없으면 한글 이름이 유일한 경우에만 매칭한다.
 - 비슷한 후보를 임의로 선택하지 않는다.

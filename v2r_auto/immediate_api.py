@@ -42,6 +42,14 @@ BOARD_ALIASES = {
     (10174516, normalized_name("가족업체 자유게시판")): "ㄴ가족업체 자유게시판",
     (26680163, "웨딩홀탐방기"): "웨딩홀탑방기",
 }
+KNOWN_CAFE_IDS = {
+    normalized_name("쌍둥이맘 모여라"): 10174516,
+    normalized_name("고요한 아침"): 14567700,
+    normalized_name("러브인썸"): 26616683,
+    normalized_name("러브 인썸 (Love in Some)"): 26616683,
+    normalized_name("마이웨딩드림"): 26680163,
+    normalized_name("마이 웨딩 드림"): 26680163,
+}
 
 
 class ImmediateApiPublisher(AffiliateApiPublisher):
@@ -387,7 +395,18 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                 by_wanted.setdefault(job.cafe, []).append(job)
 
         for wanted, cafe_jobs in by_wanted.items():
-            cafe = match_catalog_name(wanted, cafes, label="카페")
+            known_cafe_id = KNOWN_CAFE_IDS.get(normalized_name(wanted))
+            cafe = next(
+                (
+                    candidate
+                    for candidate in cafes
+                    if known_cafe_id is not None
+                    and candidate.cafe_id == known_cafe_id
+                ),
+                None,
+            )
+            if cafe is None:
+                cafe = match_catalog_name(wanted, cafes, label="카페")
             if cafe.cafe_id not in SELF_OWNED_CAFE_IDS | TEST_CAFE_IDS:
                 for job in cafe_jobs:
                     job.status = JobStatus.SKIPPED

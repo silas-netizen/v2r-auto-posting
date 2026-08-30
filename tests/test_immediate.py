@@ -574,7 +574,9 @@ def test_twin_mom_sheet_account_board_and_grade_refresh(
                     "naver_join_cafes": [
                         {
                             "cafe_id": 10174516,
-                            "pc_cafe_name": "쌍둥이맘 모여라",
+                            "pc_cafe_name": (
+                                "쌍둥이맘 모여라 - 쌍둥이 대표 카페"
+                            ),
                         }
                     ]
                 }
@@ -636,6 +638,9 @@ def test_twin_mom_sheet_account_board_and_grade_refresh(
     assert job.cafe_id == 10174516
     assert job.menu_id == 664
     assert job.account == "azqpale"
+    assert job.canonical_cafe_name == (
+        "쌍둥이맘 모여라 - 쌍둥이 대표 카페"
+    )
     assert job.status == JobStatus.PENDING
 
 
