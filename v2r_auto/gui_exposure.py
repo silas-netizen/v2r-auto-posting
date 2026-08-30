@@ -358,7 +358,7 @@ class ExposureApp(AutomationApp):
             cafe_field = "카페명" if self._is_sheet_source() else "카페/ID"
             edited = (
                 " 최종 편집 일시는 지금 시각을 넣습니다. "
-                "끝나면 키워드 검색량 합은 P1, 노출된 검색량 합은 Q1에 넣습니다."
+                "끝나거나 중지하면 그때 검색량 합을 P1, 노출된 검색량 합을 Q1에 덮어씁니다."
                 if self._is_sheet_source()
                 else ""
             )

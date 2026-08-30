@@ -381,13 +381,13 @@ class GoogleSheetExposureStore:
         keyword_total = _sum_column(table, bind.volume_idx)
         exposed_total = _sum_column(table, bind.exposed_volume_idx)
         if bind.volume_idx >= 0:
-            self._write_if_changed("P", 1, _sheet_text(keyword_total), table)
+            self._write_total_cell("P", 1, _sheet_text(keyword_total), table)
             self.logger.info("키워드 검색량 합 P1=%s", keyword_total)
         if bind.exposed_volume_idx >= 0:
-            self._write_if_changed("Q", 1, _sheet_text(exposed_total), table)
+            self._write_total_cell("Q", 1, _sheet_text(exposed_total), table)
             self.logger.info("노출된 검색량 합 Q1=%s", exposed_total)
 
-    def _write_if_changed(
+    def _write_total_cell(
         self,
         column: str,
         row_number: int,
@@ -398,9 +398,23 @@ class GoogleSheetExposureStore:
             table, row_number, column_index_from_letter(column)
         )
         if sheet_cell_values_match(current, value):
+            self.logger.info(
+                "시트 %s%s는 이미 같아서 건너뜁니다",
+                column,
+                row_number,
+            )
+            self._remember_write(row_number, column, value)
             return
-        self.writer.write_cell(self.sheet_url, column, row_number, value)
-        self._remember_write(row_number, column, value)
+        try:
+            self.writer.write_cell(self.sheet_url, column, row_number, value)
+            self._remember_write(row_number, column, value)
+        except Exception as exc:
+            self.logger.error(
+                "시트 %s%s 저장 실패: %s",
+                column,
+                row_number,
+                exc,
+            )
 
     def _remember_write(self, row_number: int, column: str, value: str) -> None:
         self._written[(row_number, column_index_from_letter(column))] = value

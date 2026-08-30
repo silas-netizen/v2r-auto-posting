@@ -513,11 +513,7 @@ class ExposureChecker:
                 )
             if progress:
                 progress(index, total)
-        if (
-            not dry_run
-            and (stop_event is None or not stop_event.is_set())
-            and hasattr(self.notion, "write_volume_totals")
-        ):
+        if not dry_run and hasattr(self.notion, "write_volume_totals"):
             try:
                 self.notion.write_volume_totals()
             except Exception as exc:

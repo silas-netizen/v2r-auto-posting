@@ -1,3 +1,4 @@
+import threading
 from datetime import datetime
 from pathlib import Path
 from urllib.error import URLError
@@ -604,6 +605,62 @@ def test_store_skips_volume_totals_when_p1_q1_already_match() -> None:
     assert writer.writes == []
 
 
+def test_store_overwrites_existing_p1_q1() -> None:
+    header = [
+        "카페",
+        "노출 상태",
+        "키워드",
+        "최종 편집 일시",
+        "키워드 검색량",
+        "노출된 검색량",
+        *([""] * 9),
+        "10",
+        "5",
+    ]
+    csv_text = (
+        ",".join(f'"{item}"' if item else "" for item in header)
+        + "\n"
+        + '씨씨앙,밀려남,코숨핏,,"1,000",0\n'
+        + "양평맘,노출완,항문세정제,,290,290\n"
+        + "씨씨앙,밀려남,치질,,,\n"
+    )
+    writer = RecordingWriter()
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        __import__("logging").getLogger("test"),
+        opener=lambda request, timeout=30: FakeResponse(csv_text.encode("utf-8")),
+        writer=writer,
+    )
+    store.load_rows()
+    store.write_volume_totals()
+    assert (PATSOON_URL, "P", 1, "1290") in writer.writes
+    assert (PATSOON_URL, "Q", 1, "290") in writer.writes
+
+
+def test_store_still_writes_q1_when_p1_overwrite_fails() -> None:
+    class BoomPWriter(RecordingWriter):
+        def write_cell(self, sheet_url: str, column: str, row_number: int, value: str) -> None:
+            if column == "P":
+                raise RuntimeError("P1 locked")
+            super().write_cell(sheet_url, column, row_number, value)
+
+    csv_text = (
+        "카페,노출 상태,키워드,최종 편집 일시,키워드 검색량,노출된 검색량\n"
+        '씨씨앙,밀려남,코숨핏,,"1,000",0\n'
+        "양평맘,노출완,항문세정제,,290,290\n"
+    )
+    writer = BoomPWriter()
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        __import__("logging").getLogger("test"),
+        opener=lambda request, timeout=30: FakeResponse(csv_text.encode("utf-8")),
+        writer=writer,
+    )
+    store.load_rows()
+    store.write_volume_totals()
+    assert (PATSOON_URL, "Q", 1, "290") in writer.writes
+
+
 def test_store_writes_volume_totals_to_p1_and_q1() -> None:
     csv_text = (
         "카페,노출 상태,키워드,최종 편집 일시,키워드 검색량,노출된 검색량\n"
@@ -666,6 +723,48 @@ def test_checker_keeps_running_when_one_sheet_write_fails() -> None:
         dry_run=False,
     )
     assert store.calls == 102
+
+
+def test_checker_writes_volume_totals_after_stop() -> None:
+    stop = threading.Event()
+
+    class FakeSheet:
+        label = "구글 시트"
+
+        def __init__(self):
+            self.totals = 0
+            self.calls = 0
+
+        def update_check_result(self, *_args, **_kwargs):
+            self.calls += 1
+            stop.set()
+
+        def write_volume_totals(self) -> None:
+            self.totals += 1
+
+    class FakeNaver:
+        def search_integrated(self, keyword: str) -> str:
+            return "<div id='main_pack'></div>"
+
+        def open_post_text(self, url: str) -> str:
+            return ""
+
+    store = FakeSheet()
+    ExposureChecker(
+        store,
+        FakeNaver(),
+        __import__("logging").getLogger("v2r_auto.exposure"),
+        delay_seconds=0,
+    ).run(
+        [
+            _sheet_row(keyword="항문농양", page_id="2"),
+            _sheet_row(keyword="코숨핏", page_id="3"),
+        ],
+        dry_run=False,
+        stop_event=stop,
+    )
+    assert store.calls == 1
+    assert store.totals == 1
 
 
 def test_checker_writes_volume_totals_after_run() -> None:
