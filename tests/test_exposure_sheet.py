@@ -50,9 +50,20 @@ class FakeResponse:
 class RecordingWriter:
     def __init__(self):
         self.writes: list[tuple[str, str, int, str]] = []
+        self.locks: list[tuple[str, str, int]] = []
 
-    def write_cell(self, sheet_url: str, column: str, row_number: int, value: str) -> None:
+    def write_cell(
+        self,
+        sheet_url: str,
+        column: str,
+        row_number: int,
+        value: str,
+        expect_keyword: str = "",
+        keyword_column: str = "",
+    ) -> int:
         self.writes.append((sheet_url, column, row_number, value))
+        self.locks.append((expect_keyword, keyword_column, row_number))
+        return row_number
 
 
 def _sheet_row(
@@ -250,6 +261,97 @@ def test_store_writes_the_keyword_row_after_a_deleted_sheet_row() -> None:
     assert ("A", 2, "양평맘") in {(item[1], item[2], item[3]) for item in writer.writes}
 
 
+def test_store_passes_keyword_lock_to_writer() -> None:
+    writer = RecordingWriter()
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        __import__("logging").getLogger("test"),
+        opener=lambda request, timeout=30: FakeResponse(SAMPLE_CSV.encode("utf-8-sig")),
+        writer=writer,
+        now=lambda: datetime(2026, 8, 27, 16, 32, 5),
+    )
+    store.update_check_result(
+        _sheet_row(keyword="고농축행감환", page_id="2"),
+        status="노출완",
+        cafe_name="양평맘",
+        search_volume=21000,
+        volume_found=True,
+    )
+    assert writer.locks
+    assert all(lock[0] == "고농축행감환" for lock in writer.locks)
+    assert all(lock[1] == "H" for lock in writer.locks)
+    assert all(lock[2] == 2 for lock in writer.locks)
+
+
+def test_store_re_resolves_keyword_before_later_cells() -> None:
+    first = (
+        "카페명,url,발행시간,작성자 아이디,작성자 비밀번호,발행 URL,"
+        "노출 상태,키워드,통합검색,최종 편집 일시,키워드 검색량,노출된 검색량\n"
+        ",,,,,,밀려남,일산차병원,,,,\n"
+        ",,,,,,밀려남,원포 얼리,,,,\n"
+    )
+    shifted = (
+        "카페명,url,발행시간,작성자 아이디,작성자 비밀번호,발행 URL,"
+        "노출 상태,키워드,통합검색,최종 편집 일시,키워드 검색량,노출된 검색량\n"
+        ",,,,,,밀려남,원포 얼리,,,,\n"
+        ",,,,,,밀려남,연세사랑모아여성병원,,,,\n"
+    )
+    calls = {"n": 0}
+
+    def opener(request, timeout=30):
+        calls["n"] += 1
+        text = first if calls["n"] <= 2 else shifted
+        return FakeResponse(text.encode("utf-8"))
+
+    writer = RecordingWriter()
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        __import__("logging").getLogger("test"),
+        opener=opener,
+        writer=writer,
+        now=lambda: datetime(2026, 8, 30, 20, 28, 16),
+    )
+    store.load_rows()
+    store.update_check_result(
+        _sheet_row(keyword="원포 얼리", page_id="3"),
+        status="노출완",
+        cafe_name="양평맘",
+        search_volume=830,
+        volume_found=True,
+    )
+    rows_written = {item[2] for item in writer.writes}
+    assert 2 in rows_written
+    assert all(item[2] == 2 for item in writer.writes[1:])
+
+
+def test_quoted_newline_does_not_shift_page_ids() -> None:
+    csv_text = (
+        "카페,노출 상태,키워드,비고\n"
+        '씨씨앙,밀려남,원포 얼리,"첫 줄\n둘째 줄"\n'
+        "양평맘,밀려남,연세사랑모아여성병원,\n"
+    )
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        __import__("logging").getLogger("test"),
+        opener=lambda request, timeout=30: FakeResponse(csv_text.encode("utf-8")),
+    )
+    rows = store.load_rows()
+    assert [row.keyword for row in rows] == ["원포 얼리", "연세사랑모아여성병원"]
+    assert [row.page_id for row in rows] == ["2", "3"]
+
+
+def test_duplicate_keywords_use_the_nearest_row() -> None:
+    table = [
+        ["카페", "노출 상태", "키워드"],
+        ["", "밀려남", "원포 얼리"],
+        ["", "밀려남", "연세사랑모아여성병원"],
+        ["", "밀려남", "원포 얼리"],
+    ]
+    assert (
+        resolve_sheet_row_number(table, _sheet_row("원포 얼리", page_id="4"), 2) == 4
+    )
+
+
 def test_store_does_not_write_when_keyword_row_is_gone() -> None:
     csv_text = (
         "카페명,url,발행시간,작성자 아이디,작성자 비밀번호,발행 URL,"
@@ -433,7 +535,7 @@ def test_store_hidden_does_not_touch_cafe() -> None:
     assert writer.writes[1] == (PATSOON_URL, "L", 2, "")
 
 
-def test_store_skips_cells_that_already_match_locale() -> None:
+def test_store_still_writes_when_csv_already_matches() -> None:
     csv_text = (
         "카페명,url,발행시간,작성자 아이디,작성자 비밀번호,발행 URL,"
         "노출 상태,키워드,통합검색,최종 편집 일시,키워드 검색량,노출된 검색량\n"
@@ -454,7 +556,8 @@ def test_store_skips_cells_that_already_match_locale() -> None:
         search_volume=5760,
         volume_found=True,
     )
-    assert writer.writes == []
+    assert writer.writes
+    assert all(lock[0] == "코숨핏" and lock[1] == "H" for lock in writer.locks)
 
 
 def test_store_reports_j_when_the_new_time_did_not_stick() -> None:
@@ -465,13 +568,20 @@ def test_store_reports_j_when_the_new_time_did_not_stick() -> None:
     )
 
     class StaleJWriter(RecordingWriter):
-        def write_cell(self, sheet_url: str, column: str, row_number: int, value: str) -> None:
+        def write_cell(
+            self,
+            sheet_url: str,
+            column: str,
+            row_number: int,
+            value: str,
+            **kwargs,
+        ) -> int:
             if column == "J":
                 raise RuntimeError(
                     "시트 J4 저장값을 다시 확인하지 못했습니다 "
                     "(기대 2026-08-29 20:35:37 / 실제 2026-08-29 7:52:59)"
                 )
-            super().write_cell(sheet_url, column, row_number, value)
+            return super().write_cell(sheet_url, column, row_number, value, **kwargs)
 
     writer = StaleJWriter()
     store = GoogleSheetExposureStore(
@@ -497,10 +607,17 @@ def test_store_reports_j_when_the_new_time_did_not_stick() -> None:
 
 def test_store_keeps_writing_other_cells_when_one_column_fails() -> None:
     class BoomWriter(RecordingWriter):
-        def write_cell(self, sheet_url: str, column: str, row_number: int, value: str) -> None:
+        def write_cell(
+            self,
+            sheet_url: str,
+            column: str,
+            row_number: int,
+            value: str,
+            **kwargs,
+        ) -> int:
             if column == "L":
                 raise RuntimeError("locked")
-            super().write_cell(sheet_url, column, row_number, value)
+            return super().write_cell(sheet_url, column, row_number, value, **kwargs)
 
     csv_text = (
         "카페명,url,발행시간,작성자 아이디,작성자 비밀번호,발행 URL,"
@@ -528,7 +645,7 @@ def test_store_keeps_writing_other_cells_when_one_column_fails() -> None:
     else:
         raise AssertionError("expected SheetError")
     columns = [item[1] for item in writer.writes]
-    assert columns == ["G", "J"]
+    assert columns == ["G", "K", "J"]
 
 
 def test_volume_totals_use_written_values_when_csv_is_stale() -> None:
@@ -639,10 +756,17 @@ def test_store_overwrites_existing_p1_q1() -> None:
 
 def test_store_still_writes_q1_when_p1_overwrite_fails() -> None:
     class BoomPWriter(RecordingWriter):
-        def write_cell(self, sheet_url: str, column: str, row_number: int, value: str) -> None:
+        def write_cell(
+            self,
+            sheet_url: str,
+            column: str,
+            row_number: int,
+            value: str,
+            **kwargs,
+        ) -> int:
             if column == "P":
                 raise RuntimeError("P1 locked")
-            super().write_cell(sheet_url, column, row_number, value)
+            return super().write_cell(sheet_url, column, row_number, value, **kwargs)
 
     csv_text = (
         "카페,노출 상태,키워드,최종 편집 일시,키워드 검색량,노출된 검색량\n"

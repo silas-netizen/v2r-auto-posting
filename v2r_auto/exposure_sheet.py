@@ -18,6 +18,7 @@ from .sheet_values import (
     parse_sheet_table,
     sheet_cell_values_match,
     sheet_gid_from_url,
+    sheet_keywords_match,
     sheet_plain_text,
     spreadsheet_id_from_url,
 )
@@ -33,7 +34,6 @@ from .exposure import (
     STATUS_HEADERS,
     VOLUME_HEADERS,
     cafe_name_option,
-    compact_text,
     status_option,
 )
 
@@ -128,9 +128,7 @@ class _SheetBind:
 
 
 def keyword_cells_match(actual: str, expected: str) -> bool:
-    left = compact_text(sheet_plain_text(actual))
-    right = compact_text(sheet_plain_text(expected))
-    return bool(left) and left == right
+    return sheet_keywords_match(actual, expected)
 
 
 def find_sheet_row_numbers(
@@ -207,9 +205,23 @@ class SeleniumSheetWriter:
         self.logger = logger
 
     def write_cell(
-        self, sheet_url: str, column: str, row_number: int, value: str
-    ) -> None:
-        self.browser.update_sheet_cell(sheet_url, column, row_number, value)
+        self,
+        sheet_url: str,
+        column: str,
+        row_number: int,
+        value: str,
+        expect_keyword: str = "",
+        keyword_column: str = "",
+    ) -> int:
+        written = self.browser.update_sheet_cell(
+            sheet_url,
+            column,
+            row_number,
+            value,
+            expect_keyword=expect_keyword,
+            keyword_column=keyword_column,
+        )
+        return int(written or row_number)
 
 
 class GoogleSheetExposureStore:
@@ -307,54 +319,52 @@ class GoogleSheetExposureStore:
             status_options=self._status_options,
             cafe_options=self._cafe_options,
         )
-        table = apply_sheet_overlay(
-            parse_sheet_table(self._read_csv()), self._written
-        )
-        bind = self._bind
-        if bind is None and table:
-            bind = self._bind_headers(
-                [sheet_plain_text(header) for header in table[0]]
-            )
-            self._bind = bind
-        remembered = int(row.page_id)
-        row_number = resolve_sheet_row_number(
-            table, row, bind.keyword_idx if bind is not None else -1
-        )
-        if row_number != remembered:
-            remembered_keyword = (
-                sheet_plain_text(
-                    csv_sheet_cell(table, remembered, bind.keyword_idx)
-                )
-                if bind is not None
-                else ""
-            )
-            self.logger.warning(
-                "시트 행이 달라져 %s행 키워드는 %s입니다. %s는 %s행에 씁니다",
-                remembered,
-                remembered_keyword or "(비어 있음)",
-                row.keyword,
-                row_number,
-            )
-            row.page_id = str(row_number)
         errors: list[str] = []
         for write in writes:
-            current = csv_sheet_cell(
-                table, row_number, column_index_from_letter(write.column)
+            table = apply_sheet_overlay(
+                parse_sheet_table(self._read_csv()), self._written
             )
-            if sheet_cell_values_match(current, write.value):
-                self.logger.info(
-                    "시트 %s%s는 이미 같아서 건너뜁니다",
-                    write.column,
-                    row_number,
+            bind = self._bind
+            if bind is None and table:
+                bind = self._bind_headers(
+                    [sheet_plain_text(header) for header in table[0]]
                 )
-                self._remember_write(row_number, write.column, write.value)
-                continue
+                self._bind = bind
+            if bind is None or not bind.keyword_col:
+                raise SheetError("키워드 열을 확인하지 못해 쓰지 않습니다")
             try:
-                self.writer.write_cell(
-                    self.sheet_url, write.column, row_number, write.value
+                row_number = self._lock_sheet_row(table, row, bind)
+            except SheetError as exc:
+                self.logger.error("시트 행 확인 실패 (%s): %s", row.keyword, exc)
+                errors.append(str(exc))
+                break
+            try:
+                written_row = self._write_locked_cell(
+                    write, row, row_number, bind
                 )
+                if written_row != row_number:
+                    row.page_id = str(written_row)
+                    row_number = written_row
                 self._remember_write(row_number, write.column, write.value)
             except Exception as exc:
+                if self._looks_like_row_mismatch(exc):
+                    try:
+                        table = apply_sheet_overlay(
+                            parse_sheet_table(self._read_csv()), self._written
+                        )
+                        row_number = self._lock_sheet_row(table, row, bind)
+                        written_row = self._write_locked_cell(
+                            write, row, row_number, bind
+                        )
+                        if written_row != row_number:
+                            row.page_id = str(written_row)
+                            row_number = written_row
+                        self._remember_write(
+                            row_number, write.column, write.value
+                        )
+                        continue
+                    except Exception as retry_exc:
+                        exc = retry_exc
                 self.logger.error(
                     "시트 %s%s 저장 실패: %s",
                     write.column,
@@ -386,6 +396,77 @@ class GoogleSheetExposureStore:
         if bind.exposed_volume_idx >= 0:
             self._write_total_cell("Q", 1, _sheet_text(exposed_total), table)
             self.logger.info("노출된 검색량 합 Q1=%s", exposed_total)
+
+    def _lock_sheet_row(
+        self, table: list[list[str]], row: ExposureRow, bind: _SheetBind | None
+    ) -> int:
+        remembered = int(row.page_id)
+        keyword_idx = bind.keyword_idx if bind is not None else -1
+        matches = (
+            find_sheet_row_numbers(table, row.keyword, keyword_idx)
+            if keyword_idx >= 0
+            else []
+        )
+        if len(matches) > 1:
+            self.logger.warning(
+                "시트에 같은 키워드가 여러 행에 있습니다: %s → %s",
+                row.keyword,
+                matches,
+            )
+        row_number = resolve_sheet_row_number(table, row, keyword_idx)
+        if row_number != remembered:
+            remembered_keyword = (
+                sheet_plain_text(csv_sheet_cell(table, remembered, keyword_idx))
+                if keyword_idx >= 0
+                else ""
+            )
+            self.logger.warning(
+                "시트 행이 달라져 %s행 키워드는 %s입니다. %s는 %s행에 씁니다",
+                remembered,
+                remembered_keyword or "(비어 있음)",
+                row.keyword,
+                row_number,
+            )
+            row.page_id = str(row_number)
+        else:
+            self.logger.info(
+                "시트 행 확인: %s / 기억 %s / 실제 %s",
+                row.keyword,
+                remembered,
+                row_number,
+            )
+        return row_number
+
+    def _write_locked_cell(
+        self,
+        write: SheetWrite,
+        row: ExposureRow,
+        row_number: int,
+        bind: _SheetBind | None,
+    ) -> int:
+        expect_keyword = row.keyword if row.keyword else ""
+        keyword_column = bind.keyword_col if bind is not None else ""
+        written = self.writer.write_cell(
+            self.sheet_url,
+            write.column,
+            row_number,
+            write.value,
+            expect_keyword=expect_keyword,
+            keyword_column=keyword_column,
+        )
+        if written is None:
+            return row_number
+        return int(written)
+
+    @staticmethod
+    def _looks_like_row_mismatch(exc: Exception) -> bool:
+        text = str(exc)
+        if "키워드" not in text:
+            return False
+        return any(
+            token in text
+            for token in ("찾지", "다릅니다", "확인하지", "쓰지 않습니다")
+        )
 
     def _write_total_cell(
         self,

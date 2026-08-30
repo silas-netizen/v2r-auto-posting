@@ -34,8 +34,11 @@ from .sheet_values import (
     looks_like_html,
     parse_sheet_datetime,
     parse_sheet_table,
+    nearby_sheet_row_numbers,
+    pick_nearby_keyword_row,
     sheet_cell_values_match,
     sheet_csv_export_url,
+    sheet_keywords_match,
     sheet_write_confirmed,
 )
 
@@ -208,7 +211,9 @@ class V2RBrowser:
         *,
         max_attempts: int = 3,
         verify_checks: int = 10,
-    ) -> None:
+        expect_keyword: str = "",
+        keyword_column: str = "",
+    ) -> int:
         """Write one value into an editable Google Sheet cell."""
         self.start()
         assert self.driver
@@ -245,6 +250,14 @@ class V2RBrowser:
                     to_type = value
                     if attempt > 1 and parse_sheet_datetime(value) and not str(value).startswith("'"):
                         to_type = "'" + value
+                    if expect_keyword and keyword_column:
+                        row_number = self._locate_keyword_row(
+                            gid,
+                            keyword_column,
+                            row_number,
+                            expect_keyword,
+                        )
+                        cell_label = f"{column}{row_number}"
                     self._goto_sheet_cell(gid, column, row_number)
                     self._type_sheet_value(to_type)
                     time.sleep(0.4)
@@ -256,12 +269,16 @@ class V2RBrowser:
                         gid=gid,
                         checks=verify_checks,
                     )
+                    if expect_keyword and keyword_column:
+                        self._confirm_sheet_row_keyword(
+                            gid, keyword_column, row_number, expect_keyword
+                        )
                     self.logger.info(
                         "시트 %s에 %s를 입력했습니다",
                         cell_label,
                         value if str(value).strip() else "(비어 있음)",
                     )
-                    return
+                    return row_number
                 except Exception as exc:
                     last_error = exc
                     self.logger.warning(
@@ -300,7 +317,9 @@ class V2RBrowser:
             box.get_attribute("value") or box.text or ""
         ).strip()
 
-    def _goto_sheet_cell(self, gid: str, column: str, row_number: int) -> None:
+    def _goto_sheet_cell(
+        self, gid: str, column: str, row_number: int, timeout: float = 2.0
+    ) -> None:
         wanted = f"{column}{row_number}"
         box = self._find_sheet_name_box()
         if box is not None:
@@ -310,7 +329,7 @@ class V2RBrowser:
                 box.send_keys(wanted)
                 box.send_keys(Keys.ENTER)
                 time.sleep(0.25)
-                if self._name_box_value().upper() == wanted.upper():
+                if self._selected_sheet_cell() == wanted.upper():
                     return
             except Exception:
                 pass
@@ -318,11 +337,78 @@ class V2RBrowser:
             "location.hash = arguments[0];",
             f"gid={gid}&range={wanted}",
         )
-        time.sleep(0.35)
+        deadline = time.monotonic() + max(0.2, timeout)
+        while time.monotonic() < deadline:
+            if self._selected_sheet_cell() == wanted.upper():
+                return
+            time.sleep(0.2)
+        shown = self._name_box_value() or "(비어 있음)"
+        raise AutomationError(
+            f"시트에서 {wanted} 칸을 선택하지 못했습니다 (이름 상자 {shown})"
+        )
+
+    def _selected_sheet_cell(self) -> str:
+        return self._name_box_value().upper()
+
+    def _locate_keyword_row(
+        self,
+        gid: str,
+        keyword_column: str,
+        remembered: int,
+        expected: str,
+    ) -> int:
+        reads: dict[int, str | None] = {}
+        for number in nearby_sheet_row_numbers(remembered):
+            reads[number] = self._ui_sheet_cell_text(
+                gid, keyword_column, number, timeout=0.8
+            )
+            shown = reads[number]
+            if shown is None:
+                continue
+            self.logger.info(
+                "시트 %s%s 키워드 확인: %s",
+                keyword_column,
+                number,
+                shown if str(shown).strip() else "(비어 있음)",
+            )
+            if sheet_keywords_match(shown, expected):
+                if number != remembered:
+                    remembered_text = reads.get(remembered)
+                    self.logger.warning(
+                        "시트 행이 달라져 %s행 키워드는 %s입니다. %s는 %s행에 씁니다",
+                        remembered,
+                        remembered_text or "(확인 안 됨)",
+                        expected,
+                        number,
+                    )
+                return number
+        try:
+            return pick_nearby_keyword_row(reads, expected, remembered)
+        except ValueError as exc:
+            raise AutomationError(str(exc)) from exc
+
+    def _confirm_sheet_row_keyword(
+        self,
+        gid: str,
+        keyword_column: str,
+        row_number: int,
+        expected: str,
+    ) -> None:
+        text = self._ui_sheet_cell_text(gid, keyword_column, row_number)
+        if text is None:
+            raise AutomationError(
+                f"시트 {keyword_column}{row_number} 키워드를 화면에서 확인하지 못했습니다"
+            )
+        if not sheet_keywords_match(text, expected):
+            raise AutomationError(
+                f"시트 {keyword_column}{row_number} 키워드가 "
+                f"{text or '(비어 있음)'}입니다. {expected}에 쓰지 않습니다"
+            )
 
     def _type_sheet_value(self, value: str, editor=None) -> None:
         # F2 binds typing to the selected cell. insertText on a hidden
         # waffle editor can look successful without changing J.
+        # Never send Ctrl+A/Delete/ENTER to the grid: that can delete a row.
         ActionChains(self.driver).send_keys(Keys.F2).perform()
         time.sleep(0.15)
         editors = [
@@ -333,42 +419,40 @@ class V2RBrowser:
         target = editor if editor is not None and getattr(editor, "is_displayed", lambda: False)() else None
         if target is None and editors:
             target = editors[0]
-        if target is not None:
+        if target is None:
             try:
-                target.click()
+                ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
             except Exception:
                 pass
-            target.send_keys(Keys.CONTROL, "a")
-            target.send_keys(Keys.DELETE)
-            target.send_keys(Keys.BACKSPACE)
-            if value:
-                inserted = False
-                try:
-                    inserted = bool(
-                        self.driver.execute_script(
-                            "const el = arguments[0]; const text = arguments[1];"
-                            "el.focus();"
-                            "try { return document.execCommand('insertText', false, text); }"
-                            "catch (e) { return false; }",
-                            target,
-                            value,
-                        )
-                    )
-                except Exception:
-                    inserted = False
-                if not inserted:
-                    target.send_keys(value)
-            target.send_keys(Keys.ENTER)
-            return
-        actions = (
-            ActionChains(self.driver)
-            .send_keys(Keys.CONTROL, "a")
-            .send_keys(Keys.DELETE)
-            .send_keys(Keys.BACKSPACE)
-        )
+            raise AutomationError(
+                "시트 칸 편집기를 열지 못해 입력하지 않습니다. "
+                "행이 지워질 수 있는 전체 선택 입력은 쓰지 않습니다"
+            )
+        try:
+            target.click()
+        except Exception:
+            pass
+        target.send_keys(Keys.CONTROL, "a")
+        target.send_keys(Keys.DELETE)
+        target.send_keys(Keys.BACKSPACE)
         if value:
-            actions.send_keys(value)
-        actions.send_keys(Keys.ENTER).perform()
+            inserted = False
+            try:
+                inserted = bool(
+                    self.driver.execute_script(
+                        "const el = arguments[0]; const text = arguments[1];"
+                        "el.focus();"
+                        "try { return document.execCommand('insertText', false, text); }"
+                        "catch (e) { return false; }",
+                        target,
+                        value,
+                    )
+                )
+            except Exception:
+                inserted = False
+            if not inserted:
+                target.send_keys(value)
+        target.send_keys(Keys.ENTER)
 
     def _waffle_editor_text(self) -> str:
         try:
@@ -408,10 +492,16 @@ class V2RBrowser:
                 )
             return parse_sheet_table(text)
 
-    def _ui_sheet_cell_text(self, gid: str, column: str, row_number: int) -> str | None:
+    def _ui_sheet_cell_text(
+        self,
+        gid: str,
+        column: str,
+        row_number: int,
+        timeout: float = 2.0,
+    ) -> str | None:
         wanted = f"{column}{row_number}"
         try:
-            self._goto_sheet_cell(gid, column, row_number)
+            self._goto_sheet_cell(gid, column, row_number, timeout=timeout)
             ActionChains(self.driver).send_keys(Keys.F2).perform()
             time.sleep(0.2)
             text = self._waffle_editor_text()
