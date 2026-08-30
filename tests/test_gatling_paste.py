@@ -1115,6 +1115,19 @@ def test_self_owned_question_type_uses_self_comment_ids(tmp_path: Path) -> None:
     assert "c1" not in {row.account for row in comments}
 
 
+def test_reply_accounts_follow_sheet_author_not_random_self(tmp_path: Path) -> None:
+    job = make_job(cafe="고요한아침", board="가입인사", with_daily=False)
+    job.account = "sheetwriter"
+    job.article_type = "질문형"
+    book = recognize_proxy_workbook(write_proxy_xlsx(tmp_path))
+    rows = build_master_rows(job, proxy_book=book, rng=random.Random(1))
+    replies = [row for row in rows if row.type == TYPE_REPLY]
+    assert rows[0].account == "sheetwriter"
+    assert replies[0].account == "sheetwriter"
+    assert replies[1].account == "sheetwriter"
+    assert "selfwriter" not in {row.account for row in rows if row.type != TYPE_COMMENT}
+
+
 def test_self_owned_review_type_matches_affiliate_order(tmp_path: Path) -> None:
     job = make_job(cafe="고요한아침", board="가입인사", with_daily=False)
     job.account = "selfwriter"

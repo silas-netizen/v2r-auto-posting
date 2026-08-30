@@ -340,16 +340,27 @@ def account_for_comment_node(
     return author
 
 
+def author_from_sheet(job, book: ProxyBook | None) -> ProxyAccount | None:
+    """본문·대댓글 계정은 시트 작성계정만. 프록시 자사/제휴를 아무거나 쓰지 않는다."""
+    name = (getattr(job, "account", None) or "").strip()
+    if not name:
+        return None
+    cafe = getattr(job, "cafe", "") or ""
+    if book is not None:
+        found = book.find_author(name, cafe)
+        if found and found.account.casefold() == name.casefold():
+            return found
+    return ProxyAccount(account=name)
+
+
 def resolve_job_accounts(
     job,
     book: ProxyBook | None,
     rng: random.Random | None = None,
 ) -> tuple[ProxyAccount | None, dict[str, ProxyAccount]]:
-    if book is None:
-        return None, {}
-    author = book.find_author(job.account, job.cafe)
+    author = author_from_sheet(job, book)
     comment_map: dict[str, ProxyAccount] = {}
-    if not job.article.comments:
+    if book is None or not job.article.comments:
         return author, comment_map
     rng = rng or random.SystemRandom()
     if _is_affiliate_cafe(job.cafe):
