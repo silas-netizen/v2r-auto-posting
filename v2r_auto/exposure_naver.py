@@ -210,7 +210,10 @@ const visible = (el) => {
   }
   return true;
 };
-return Array.from(document.querySelectorAll('a[href*="cafe.naver.com"]'))
+const root = document.querySelector('#main_pack')
+  || document.querySelector('#content')
+  || document.body;
+return Array.from(root.querySelectorAll('a[href*="cafe.naver.com"]'))
   .filter(visible)
   .map((a) => a.href || '')
   .filter(Boolean);
