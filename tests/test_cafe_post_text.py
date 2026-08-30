@@ -21,7 +21,10 @@ from v2r_auto.exposure_naver import (
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
 OUTER = FIXTURE_DIR / "cafe_outer.html"
 INNER = FIXTURE_DIR / "cafe_main_comments.html"
+OUTER_BRAND = FIXTURE_DIR / "cafe_outer_brand.html"
+BODY_ONLY = FIXTURE_DIR / "cafe_body_only.html"
 QUOTE = "저는 자연방패 항문세정제 쓰고 있어요."
+SHELL_BRAND = "장으뜸 장어즙"
 
 
 def _chrome():
@@ -45,6 +48,8 @@ def test_cafe_article_reader_does_not_click_more_comments() -> None:
     source += inspect.getsource(SeleniumNaverSearch.open_post_text)
     assert "더보기" not in source
     assert "send_keys" not in source
+    assert "document_text" not in inspect.getsource(read_opened_cafe_article)
+    assert "document_text" not in inspect.getsource(collect_cafe_post_text)
 
 
 def test_early_cafe_main_body_text_misses_delayed_comments() -> None:
@@ -82,6 +87,29 @@ def test_read_opened_cafe_article_waits_past_empty_comment_box() -> None:
         assert QUOTE in text
         assert brand_found(text, ["자연방패 항문세정제"]) == "자연방패 항문세정제"
         assert STATUS_EXPOSED == "노출완"
+    finally:
+        driver.quit()
+
+
+def test_cafe_shell_brand_is_not_article_text() -> None:
+    driver = _chrome()
+    try:
+        driver.get(OUTER_BRAND.as_uri())
+        text = read_opened_cafe_article(driver, timeout=4)
+        assert SHELL_BRAND not in text
+        assert brand_found(text, [SHELL_BRAND]) == ""
+    finally:
+        driver.quit()
+
+
+def test_body_only_brand_is_not_article_text() -> None:
+    driver = _chrome()
+    try:
+        driver.get(BODY_ONLY.as_uri())
+        text = collect_cafe_post_text(driver)
+        assert SHELL_BRAND not in text
+        assert brand_found(text, [SHELL_BRAND]) == ""
+        assert collect_cafe_post_text(driver) == ""
     finally:
         driver.quit()
 

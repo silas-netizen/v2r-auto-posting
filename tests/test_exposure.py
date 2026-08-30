@@ -29,6 +29,10 @@ from v2r_auto.exposure import (
     strip_parenthetical,
     volume_from_result_cells,
 )
+
+
+def _pack(inner: str) -> str:
+    return f'<div id="main_pack">{inner}</div>'
 from v2r_auto.exposure_notion import NotionExposureStore, parse_database_id, parse_view_id
 
 
@@ -149,6 +153,17 @@ def test_brand_found_reads_yangmom_comment_quote() -> None:
     assert brand_found(text, ["자연방패 항문세정제"]) == "자연방패 항문세정제"
 
 
+def test_longer_cafe_name_wins_over_substring() -> None:
+    names = ["씨씨앙", "씨씨앙베이비"]
+    assert matching_cafe_name("씨씨앙베이비 카페", names) == "씨씨앙베이비"
+    assert brand_found("장으뜸 장어즙", ["장어", "장으뜸 장어즙"]) == "장으뜸 장어즙"
+
+
+def test_one_letter_marker_is_ignored() -> None:
+    assert matching_cafe_name("앙이 보이는 글", ["앙", "씨씨앙"]) == ""
+    assert brand_found("즙만 있는 글", ["즙"]) == ""
+
+
 def test_article_url_detection() -> None:
     assert is_cafe_article_url("https://cafe.naver.com/ccang/12345")
     assert is_cafe_article_url(
@@ -170,6 +185,15 @@ def test_collects_only_our_cafe_articles() -> None:
     assert [hit.cafe_name for hit in hits] == ["러브인썸"]
     assert hits[0].url.endswith("/loveinsome/99")
     assert all("othercafe" not in hit.url for hit in hits)
+
+
+def test_html_without_main_pack_is_never_our_hit() -> None:
+    html = """
+    <div id="header"><a href="https://cafe.naver.com/cantsb">씨씨앙</a></div>
+    <a href="https://cafe.naver.com/cantsb/3453001">우리 글처럼 보임</a>
+    """
+    assert search_result_html(html) == ""
+    assert collect_our_cafe_hits(html, list(DEFAULT_CAFE_NAMES)) == []
 
 
 def test_search_result_html_drops_header_cafe_widget() -> None:
@@ -209,6 +233,7 @@ def test_header_ssissiang_does_not_count_main_pack_foreign_article() -> None:
 
 def test_collects_product_review_module_with_long_cafe_name() -> None:
     html = """
+    <div id="main_pack">
     <h2>상품리뷰 인기글</h2>
     <div data-template-id="ugcItem">
       <a href="https://cafe.naver.com/cantsb">
@@ -217,6 +242,7 @@ def test_collects_product_review_module_with_long_cafe_name() -> None:
       <a href="https://cafe.naver.com/cantsb/3453001?art=token">
         다크 초콜릿 감량에 괜찮나요?
       </a>
+    </div>
     </div>
     """
     hits = collect_our_cafe_hits(html, list(DEFAULT_CAFE_NAMES))
@@ -258,11 +284,11 @@ def test_same_cafe_cluster_keeps_only_main_post() -> None:
 def test_cluster_sub_post_alone_is_hidden() -> None:
     main = "https://cafe.naver.com/cantsb/3448827"
     sub = "https://cafe.naver.com/cantsb/3458225"
-    html = f"""
+    html = _pack(f"""
     <a href="https://cafe.naver.com/cantsb">씨씨앙</a>
     <a href="{main}" data-heatmap-target=".link">남재현 다이어트 성공방법 공유해요</a>
     <a href="{sub}" data-heatmap-target=".series">남재현 다이어트 드셔보신 분 계신가요?</a>
-    """
+    """)
     opened = []
 
     class FakeNotion:
@@ -278,6 +304,7 @@ def test_cluster_sub_post_alone_is_hidden() -> None:
             main: "일반 글",
             sub: "본문에 팥순추출물 후기",
         },
+        visible_urls=[main],
     )
     ExposureChecker(
         FakeNotion(),
@@ -292,22 +319,24 @@ def test_cluster_sub_post_alone_is_hidden() -> None:
 def test_hidden_cafe_card_is_not_kept() -> None:
     hidden = "https://cafe.naver.com/yangmom/727928"
     other = "https://cafe.naver.com/no1sejong/4214533"
-    html = f"""
+    html = _pack(f"""
     <a href="https://cafe.naver.com/yangmom">양평맘</a>
     <a href="{hidden}">치질 초기증상인데 병원 가야 할까요ㅠㅠ</a>
-    """
+    """)
     hits = collect_our_cafe_hits(html, list(DEFAULT_CAFE_NAMES))
     assert [hit.cafe_name for hit in hits] == ["양평맘"]
     assert keep_visible_cafe_hits(hits, [other]) == []
     assert [hit.url for hit in keep_visible_cafe_hits(hits, [hidden])] == [hidden]
+    assert keep_visible_cafe_hits(hits, None) == []
+    assert keep_visible_cafe_hits(hits, []) == []
 
 
 def test_hidden_tonggeom_card_is_not_exposed() -> None:
     hidden = "https://cafe.naver.com/yangmom/727928"
-    html = f"""
+    html = _pack(f"""
     <a href="https://cafe.naver.com/yangmom">양평 맘`s 전원 Story</a>
     <a href="{hidden}" style="visibility:hidden">치질 초기증상인데 병원 가야 할까요ㅠㅠ</a>
-    """
+    """)
     updated = []
     naver = FakeNaver(
         html,
@@ -336,10 +365,10 @@ def test_hidden_tonggeom_card_is_not_exposed() -> None:
 
 def test_visible_tonggeom_card_is_still_exposed() -> None:
     post = "https://cafe.naver.com/yangmom/727928"
-    html = f"""
+    html = _pack(f"""
     <a href="https://cafe.naver.com/yangmom">양평맘</a>
     <a href="{post}">치질 초기증상인데 병원 가야 할까요ㅠㅠ</a>
-    """
+    """)
     updated = []
     naver = FakeNaver(
         html,
@@ -361,6 +390,109 @@ def test_visible_tonggeom_card_is_still_exposed() -> None:
     ).run([_row("치질")], dry_run=False)
     assert naver.opened == [post]
     assert updated[-1][0] == "노출완"
+
+
+def test_missing_visible_list_cannot_mark_exposed() -> None:
+    post = "https://cafe.naver.com/ccang/1"
+    html = _pack(f"""
+    <a href="https://cafe.naver.com/ccang">씨씨앙</a>
+    <a href="{post}">글</a>
+    """)
+    updated = []
+
+    class HtmlOnlyNaver:
+        def search_integrated(self, keyword: str) -> str:
+            return html
+
+        def open_post_text(self, url: str) -> str:
+            return "코숨핏 후기"
+
+    class FakeNotion:
+        def update_check_result(
+            self, row, *, status, cafe_name=None, search_volume=None, volume_found=False
+        ):
+            updated.append(status)
+
+    ExposureChecker(
+        FakeNotion(),
+        HtmlOnlyNaver(),
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    ).run([_row("키워드", "노출완")], dry_run=False)
+    assert updated == ["밀려남"]
+
+
+def test_visible_lookup_error_cannot_mark_exposed() -> None:
+    post = "https://cafe.naver.com/ccang/1"
+    html = _pack(f"""
+    <a href="https://cafe.naver.com/ccang">씨씨앙</a>
+    <a href="{post}">글</a>
+    """)
+    updated = []
+    opened = []
+
+    class BrokenVisible(FakeNaver):
+        def visible_cafe_article_urls(self):
+            raise RuntimeError("화면을 읽지 못함")
+
+        def open_post_text(self, url: str) -> str:
+            opened.append(url)
+            return "코숨핏 후기"
+
+    class FakeNotion:
+        def update_check_result(
+            self, row, *, status, cafe_name=None, search_volume=None, volume_found=False
+        ):
+            updated.append(status)
+
+    ExposureChecker(
+        FakeNotion(),
+        BrokenVisible(html, {post: "코숨핏 후기"}),
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    ).run([_row("키워드", "노출완")], dry_run=False)
+    assert opened == []
+    assert updated == ["밀려남"]
+
+
+def test_search_failure_overwrites_old_exposed() -> None:
+    updated = []
+
+    class BoomNaver:
+        def search_integrated(self, keyword: str) -> str:
+            raise RuntimeError("검색 차단")
+
+        def open_post_text(self, url: str) -> str:
+            return "코숨핏"
+
+    class FakeNotion:
+        def update_check_result(
+            self, row, *, status, cafe_name=None, search_volume=None, volume_found=False
+        ):
+            updated.append(status)
+
+    ExposureChecker(
+        FakeNotion(),
+        BoomNaver(),
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    ).run([_row("키워드", "노출완")], dry_run=False)
+    assert updated == ["밀려남"]
+
+
+def test_header_cafe_name_is_not_a_result_column_warning(caplog) -> None:
+    html = """
+    <div id="header"><a href="https://cafe.naver.com/cantsb">씨씨앙</a></div>
+    <div id="main_pack"><a href="https://cafe.naver.com/other/1">다른 글</a></div>
+    """
+    with caplog.at_level("WARNING"):
+        ExposureChecker(
+            type("N", (), {"update_status": staticmethod(lambda *_a: None)})(),
+            FakeNaver(html, visible_urls=[]),
+            __import__("logging").getLogger("test"),
+            delay_seconds=0,
+        ).run([_row("키워드")], dry_run=True)
+    assert not any("이름은 보이지만" in message for message in caplog.messages)
 
 
 def test_same_search_query_ignores_spaces_only() -> None:
@@ -410,12 +542,12 @@ def test_no_our_cafe_is_hidden_without_opening_posts() -> None:
 
 def test_our_cafe_without_brand_is_hidden() -> None:
     post = "https://cafe.naver.com/ccang/10"
-    html = f"""
+    html = _pack(f"""
     <a href="https://cafe.naver.com/ccang">씨씨앙</a>
     <a href="{post}">제목</a>
-    """
+    """)
     updated = []
-    naver = FakeNaver(html, {post: "그냥 일상 글입니다"})
+    naver = FakeNaver(html, {post: "그냥 일상 글입니다"}, visible_urls=[post])
 
     class FakeNotion:
         def update_status(self, row, status):
@@ -434,12 +566,12 @@ def test_our_cafe_without_brand_is_hidden() -> None:
 def test_our_cafe_with_brand_is_exposed() -> None:
     first = "https://cafe.naver.com/ccang/1"
     second = "https://cafe.naver.com/yangpyeongmom/2"
-    html = f"""
+    html = _pack(f"""
     <a href="https://cafe.naver.com/ccang">씨씨앙</a>
     <a href="{first}">글1</a>
     <a href="https://cafe.naver.com/yangpyeongmom">양평맘</a>
     <a href="{second}">글2</a>
-    """
+    """)
     updated = []
     naver = FakeNaver(
         html,
@@ -447,6 +579,7 @@ def test_our_cafe_with_brand_is_exposed() -> None:
             first: "일반 글",
             second: "댓글에 코숨핏 후기",
         },
+        visible_urls=[first, second],
     )
 
     class FakeNotion:
@@ -465,10 +598,10 @@ def test_our_cafe_with_brand_is_exposed() -> None:
 
 def test_yangmom_comment_marker_marks_exposed() -> None:
     post = "https://cafe.naver.com/yangmom/728286"
-    html = f"""
+    html = _pack(f"""
     <a href="https://cafe.naver.com/yangmom">양평맘</a>
     <a href="{post}">항문 주변 가려움</a>
-    """
+    """)
     written = []
 
     class FakeNotion:
@@ -494,10 +627,10 @@ def test_yangmom_comment_marker_marks_exposed() -> None:
 
 def test_donut_cushion_comment_marker_marks_exposed() -> None:
     post = "https://cafe.naver.com/yangmom/730560"
-    html = f"""
+    html = _pack(f"""
     <a href="https://cafe.naver.com/yangmom">양평맘</a>
     <a href="{post}">다이소 도넛방석</a>
-    """
+    """)
     written = []
 
     class FakeNotion:
@@ -527,10 +660,10 @@ def test_donut_cushion_comment_marker_marks_exposed() -> None:
 
 def test_dry_run_does_not_write_notion() -> None:
     post = "https://cafe.naver.com/ccang/1"
-    html = f"""
+    html = _pack(f"""
     <a href="https://cafe.naver.com/ccang">씨씨앙</a>
     <a href="{post}">글</a>
-    """
+    """)
     updated = []
 
     class FakeNotion:
@@ -540,7 +673,7 @@ def test_dry_run_does_not_write_notion() -> None:
     row = _row("키워드")
     ExposureChecker(
         FakeNotion(),
-        FakeNaver(html, {post: "팥순추출물"}),
+        FakeNaver(html, {post: "팥순추출물"}, visible_urls=[post]),
         __import__("logging").getLogger("test"),
         delay_seconds=0,
     ).run([row], dry_run=True)
@@ -1150,6 +1283,44 @@ def test_naver_tab_is_home_or_search_only() -> None:
     )
 
 
+def test_integrated_search_url_rejects_other_tabs() -> None:
+    from v2r_auto.exposure_naver import is_integrated_search_url
+
+    assert is_integrated_search_url(
+        "https://search.naver.com/search.naver?query=test"
+    )
+    assert is_integrated_search_url(
+        "https://search.naver.com/search.naver?where=nexearch&query=test"
+    )
+    assert not is_integrated_search_url(
+        "https://search.naver.com/search.naver?where=article&query=test"
+    )
+    assert not is_integrated_search_url(
+        "https://search.naver.com/search.naver?where=blog&query=test"
+    )
+    assert not is_integrated_search_url(
+        "https://search.naver.com/search.naver?where=video&query=test"
+    )
+    assert not is_integrated_search_url("https://cafe.naver.com/cantsb/1")
+
+
+def test_visible_links_js_stays_in_main_pack() -> None:
+    from v2r_auto.exposure_naver import VISIBLE_CAFE_LINKS_JS
+
+    assert "querySelector('#main_pack')" in VISIBLE_CAFE_LINKS_JS
+    assert "querySelector('#content')" not in VISIBLE_CAFE_LINKS_JS
+    assert "|| document.body" not in VISIBLE_CAFE_LINKS_JS
+
+
+def test_article_text_js_skips_page_shell() -> None:
+    from v2r_auto.exposure_naver import COLLECT_CAFE_POST_TEXT_JS
+
+    assert "document.body.innerText" not in COLLECT_CAFE_POST_TEXT_JS
+    assert ".article_container" in COLLECT_CAFE_POST_TEXT_JS
+    assert ".text_comment" in COLLECT_CAFE_POST_TEXT_JS
+    assert "h3.title" in COLLECT_CAFE_POST_TEXT_JS
+
+
 def test_pause_then_resume_continues_next_keyword() -> None:
     naver = FakeNaver("<div id='main_pack'></div>")
     pause = threading.Event()
@@ -1287,10 +1458,10 @@ def test_keywordstool_adds_pc_and_mobile() -> None:
 
 def test_checker_writes_cafe_and_volumes() -> None:
     post = "https://cafe.naver.com/ccang/1"
-    html = f"""
+    html = _pack(f"""
     <a href="https://cafe.naver.com/ccang">씨씨앙</a>
     <a href="{post}">글</a>
-    """
+    """)
     results = []
 
     class FakeNotion:
@@ -1305,7 +1476,7 @@ def test_checker_writes_cafe_and_volumes() -> None:
     row.current_cafe = "씨씨앙/dtsx"
     ExposureChecker(
         FakeNotion(),
-        VolumeNaver(html, {post: "코숨핏 후기"}),
+        VolumeNaver(html, {post: "코숨핏 후기"}, visible_urls=[post]),
         __import__("logging").getLogger("test"),
         delay_seconds=0,
     ).run([row], dry_run=False)
@@ -1315,10 +1486,10 @@ def test_checker_writes_cafe_and_volumes() -> None:
 
 def test_exposed_updates_cafe_only_when_different() -> None:
     post = "https://cafe.naver.com/ccang/1"
-    html = f"""
+    html = _pack(f"""
     <a href="https://cafe.naver.com/ccang">씨씨앙</a>
     <a href="{post}">글</a>
-    """
+    """)
     results = []
 
     class FakeNotion:
@@ -1333,7 +1504,7 @@ def test_exposed_updates_cafe_only_when_different() -> None:
     row.current_cafe = "양평맘/aa"
     ExposureChecker(
         FakeNotion(),
-        VolumeNaver(html, {post: "코숨핏 후기"}),
+        VolumeNaver(html, {post: "코숨핏 후기"}, visible_urls=[post]),
         __import__("logging").getLogger("test"),
         delay_seconds=0,
     ).run([row], dry_run=False)
