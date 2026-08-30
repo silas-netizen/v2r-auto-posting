@@ -102,6 +102,53 @@ def sheet_plain_text(value: str) -> str:
     return text
 
 
+NEARBY_SHEET_ROW_SPAN = 3
+
+
+def sheet_keywords_match(actual: str, expected: str) -> bool:
+    left = _compact_text(sheet_plain_text(actual)).casefold()
+    right = _compact_text(sheet_plain_text(expected)).casefold()
+    return bool(left) and left == right
+
+
+def nearby_sheet_row_numbers(remembered: int, span: int = NEARBY_SHEET_ROW_SPAN) -> list[int]:
+    """Check the remembered row first, then one up/down, then farther.
+
+    A deleted sheet row shifts later keywords up. The observed miss was
+    exactly one row; scan a few neighbours and refuse anything farther.
+    """
+    seen: list[int] = []
+    remembered = int(remembered)
+    span = max(0, int(span))
+    for delta in range(0, span + 1):
+        candidates = (remembered,) if delta == 0 else (remembered - delta, remembered + delta)
+        for number in candidates:
+            if number < 2 or number in seen:
+                continue
+            seen.append(number)
+    return seen
+
+
+def pick_nearby_keyword_row(
+    reads: dict[int, str | None],
+    expected: str,
+    remembered: int,
+    span: int = NEARBY_SHEET_ROW_SPAN,
+) -> int:
+    for number in nearby_sheet_row_numbers(remembered, span=span):
+        if number not in reads:
+            continue
+        text = reads[number]
+        if text is None:
+            continue
+        if sheet_keywords_match(text, expected):
+            return number
+    raise ValueError(
+        f"시트에서 키워드를 화면으로 확인하지 못했습니다: {expected} "
+        f"(기억한 행 {remembered})"
+    )
+
+
 def sheet_cell_values_match(actual: str, expected: str) -> bool:
     left = sheet_plain_text(actual)
     right = sheet_plain_text(expected)

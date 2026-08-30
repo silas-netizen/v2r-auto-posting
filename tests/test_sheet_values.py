@@ -4,12 +4,15 @@ from v2r_auto.sheet_values import (
     apply_sheet_overlay,
     csv_sheet_cell,
     looks_like_html,
+    nearby_sheet_row_numbers,
     parse_sheet_datetime,
     parse_sheet_int,
     parse_sheet_number,
+    pick_nearby_keyword_row,
     sheet_cell_values_match,
     sheet_csv_export_url,
     sheet_gid_from_url,
+    sheet_keywords_match,
     sheet_write_confirmed,
 )
 
@@ -124,6 +127,50 @@ def test_sheet_gid_ignores_range_in_fragment() -> None:
     assert sheet_csv_export_url(url) == (
         "https://docs.google.com/spreadsheets/d/abc_123/export?format=csv&gid=987"
     )
+
+
+def test_sheet_keywords_match_ignores_spaces() -> None:
+    assert sheet_keywords_match("원포 얼리", "원포얼리")
+    assert sheet_keywords_match(" 원포 얼리 ", "원포 얼리")
+    assert not sheet_keywords_match("원포", "원포 얼리")
+    assert not sheet_keywords_match("", "원포 얼리")
+
+
+def test_nearby_sheet_row_numbers_check_remembered_first() -> None:
+    assert nearby_sheet_row_numbers(1386, span=2) == [1386, 1385, 1387, 1384, 1388]
+    assert nearby_sheet_row_numbers(2, span=2) == [2, 3, 4]
+
+
+def test_pick_nearby_keyword_row_follows_one_row_shift() -> None:
+    assert (
+        pick_nearby_keyword_row(
+            {1386: "연세사랑모아여성병원", 1385: "원포 얼리", 1387: "일산차병원"},
+            "원포 얼리",
+            1386,
+        )
+        == 1385
+    )
+
+
+def test_pick_nearby_keyword_row_keeps_matching_row() -> None:
+    assert (
+        pick_nearby_keyword_row({2: "고농축행감환", 3: "코숨핏"}, "고농축행감환", 2)
+        == 2
+    )
+
+
+def test_pick_nearby_keyword_row_refuses_when_not_nearby() -> None:
+    try:
+        pick_nearby_keyword_row(
+            {1386: "연세사랑모아여성병원", 1385: "일산차병원"},
+            "원포 얼리",
+            1386,
+            span=2,
+        )
+    except ValueError as exc:
+        assert "원포 얼리" in str(exc)
+    else:
+        raise AssertionError("expected ValueError")
 
 
 def test_apply_sheet_overlay_clears_stale_trailing_column() -> None:
