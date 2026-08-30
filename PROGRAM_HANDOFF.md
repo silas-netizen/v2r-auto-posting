@@ -393,20 +393,19 @@ Windows CI:
 .github/workflows/build-windows.yml
 ```
 
-개별 EXE 브랜치:
+실행 파일 배포 브랜치:
 
 ```text
-cursor/executable-downloads-f548
+cursor/image-upload-downloads-3901
 ```
 
-최신 실행 파일:
+다운로드 전달 규칙:
 
-```text
-https://github.com/silas-netizen/v2r-auto-posting/blob/9b9407f/downloads/V2R-Affiliate-Revision.exe?raw=1
-https://github.com/silas-netizen/v2r-auto-posting/blob/9b9407f/downloads/V2R-Immediate-Posting.exe?raw=1
-```
-
-주의: 위 고정 커밋 링크보다 `cursor/executable-downloads-f548` 브랜치가 더 최신일 수 있다.
+1. 위 배포 브랜치의 최신 전체 커밋 SHA를 확인한다.
+2. `blob/<전체 커밋 SHA>/downloads/<파일명>.zip` 파일 페이지 링크를 제공한다.
+3. 사용자는 GitHub 로그인 탭에서 파일 페이지를 열고 `Download raw file`을 누른다.
+4. 채팅 직접 파일, 임시 업로드, `?raw=1`, GitHub Actions Artifact는 사용하지 않는다.
+5. 워크플로는 Artifact를 업로드하지 않고 검증된 ZIP을 배포 브랜치에 커밋한다.
 
 ---
 

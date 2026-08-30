@@ -104,15 +104,3 @@ jobs:
               );
               core.info(`Deleted old cache: ${cache.key} (${cache.id})`);
             }
-
-      - name: Upload Windows programs
-        if: github.ref_name == 'cursor/fix-seone-image-upload-3901'
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: V2R-Auto-Posting-Windows
-          retention-days: 1
-          path: |
-            publish-executables/downloads/V2R-Affiliate-Revision.zip
-            publish-executables/downloads/V2R-Immediate-Posting.zip
-          if-no-files-found: error
