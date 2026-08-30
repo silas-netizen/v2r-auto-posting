@@ -139,6 +139,9 @@ def test_sheet_keywords_match_ignores_spaces() -> None:
 def test_nearby_sheet_row_numbers_check_remembered_first() -> None:
     assert nearby_sheet_row_numbers(1386, span=2) == [1386, 1385, 1387, 1384, 1388]
     assert nearby_sheet_row_numbers(2, span=2) == [2, 3, 4]
+    assert nearby_sheet_row_numbers(1386)[0] == 1386
+    assert nearby_sheet_row_numbers(1386)[-1] == 1391
+    assert 1381 in nearby_sheet_row_numbers(1386)
 
 
 def test_pick_nearby_keyword_row_follows_one_row_shift() -> None:

@@ -535,7 +535,7 @@ def test_store_hidden_does_not_touch_cafe() -> None:
     assert writer.writes[1] == (PATSOON_URL, "L", 2, "")
 
 
-def test_store_skips_cells_that_already_match_locale() -> None:
+def test_store_still_writes_when_csv_already_matches() -> None:
     csv_text = (
         "카페명,url,발행시간,작성자 아이디,작성자 비밀번호,발행 URL,"
         "노출 상태,키워드,통합검색,최종 편집 일시,키워드 검색량,노출된 검색량\n"
@@ -556,7 +556,8 @@ def test_store_skips_cells_that_already_match_locale() -> None:
         search_volume=5760,
         volume_found=True,
     )
-    assert writer.writes == []
+    assert writer.writes
+    assert all(lock[0] == "코숨핏" and lock[1] == "H" for lock in writer.locks)
 
 
 def test_store_reports_j_when_the_new_time_did_not_stick() -> None:
@@ -644,7 +645,7 @@ def test_store_keeps_writing_other_cells_when_one_column_fails() -> None:
     else:
         raise AssertionError("expected SheetError")
     columns = [item[1] for item in writer.writes]
-    assert columns == ["G", "J"]
+    assert columns == ["G", "K", "J"]
 
 
 def test_volume_totals_use_written_values_when_csv_is_stale() -> None:

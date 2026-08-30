@@ -330,23 +330,14 @@ class GoogleSheetExposureStore:
                     [sheet_plain_text(header) for header in table[0]]
                 )
                 self._bind = bind
+            if bind is None or not bind.keyword_col:
+                raise SheetError("키워드 열을 확인하지 못해 쓰지 않습니다")
             try:
                 row_number = self._lock_sheet_row(table, row, bind)
             except SheetError as exc:
                 self.logger.error("시트 행 확인 실패 (%s): %s", row.keyword, exc)
                 errors.append(str(exc))
                 break
-            current = csv_sheet_cell(
-                table, row_number, column_index_from_letter(write.column)
-            )
-            if sheet_cell_values_match(current, write.value):
-                self.logger.info(
-                    "시트 %s%s는 이미 같아서 건너뜁니다",
-                    write.column,
-                    row_number,
-                )
-                self._remember_write(row_number, write.column, write.value)
-                continue
             try:
                 written_row = self._write_locked_cell(
                     write, row, row_number, bind

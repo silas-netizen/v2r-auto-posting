@@ -102,7 +102,7 @@ def sheet_plain_text(value: str) -> str:
     return text
 
 
-NEARBY_SHEET_ROW_SPAN = 3
+NEARBY_SHEET_ROW_SPAN = 5
 
 
 def sheet_keywords_match(actual: str, expected: str) -> bool:
