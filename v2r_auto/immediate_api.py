@@ -39,6 +39,7 @@ SELF_COMMENT_ACCOUNTS = (
 ALL_COMMENT_ACCOUNTS = set(COMMENT_ACCOUNTS) | set(SELF_COMMENT_ACCOUNTS)
 MANAGER_ACCOUNTS = {"redsagua01", "clktrade"}
 BOARD_ALIASES = {
+    (10174516, normalized_name("가족업체 자유게시판")): "ㄴ가족업체 자유게시판",
     (26680163, "웨딩홀탐방기"): "웨딩홀탑방기",
 }
 

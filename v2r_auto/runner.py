@@ -756,6 +756,11 @@ class ImmediateRunner:
                     job.row_number,
                 )
         self.browser.prepare_immediate_jobs(jobs)
+        if not dry_run and hasattr(
+            self.browser,
+            "refresh_immediate_account_grades",
+        ):
+            self.browser.refresh_immediate_account_grades(jobs)
         removed_failures = self.history.remove_urls(
             self.browser.consume_failed_immediate_urls()
         )

@@ -533,6 +533,112 @@ def test_verified_wedding_board_alias_resolves_v2r_typo() -> None:
     assert menu.menu_id == 5
 
 
+def test_twin_mom_board_alias_resolves_decorated_v2r_name() -> None:
+    wanted = BOARD_ALIASES[
+        (10174516, normalized_name("가족업체 자유게시판"))
+    ]
+    menu = match_catalog_name(
+        wanted,
+        [CafeMenu(menu_id=664, name="ㄴ가족업체 자유게시판")],
+        label="게시판",
+    )
+
+    assert menu.menu_id == 664
+
+
+def test_twin_mom_sheet_account_board_and_grade_refresh(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "twin-mom.csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,"
+        "말머리,계정유형,이미지 없음,게시판명\n"
+        '"임산부 치핵","제목 : 제목\n본문 : 본문",쌍둥이맘 모여라,'
+        "azqpale,질문형,,,비실명,Y,가족업체 자유게시판\n",
+        encoding="utf-8-sig",
+    )
+    job = load_brand_immediate_jobs(path, brand="테스트")[0]
+
+    class TwinMomPublisher(ImmediateApiPublisher):
+        def __init__(self):
+            super().__init__(None, logging.getLogger("twin-mom-test"))
+            self.authorization = "token"
+            self.refreshed = False
+
+        def _capture_authorization(self):
+            return None
+
+        def _request(self, method, request_path, payload=None, query=None, **kwargs):
+            if request_path == "/naver_cafes/naver_join_cafes":
+                return {
+                    "naver_join_cafes": [
+                        {
+                            "cafe_id": 10174516,
+                            "pc_cafe_name": "쌍둥이맘 모여라",
+                        }
+                    ]
+                }
+            if request_path == "/navers/accounts":
+                return {
+                    "accounts": [
+                        {
+                            "naver_login_id": "azqpale",
+                            "my_info_v2": {"is_real_name": False},
+                        }
+                    ]
+                }
+            if request_path == "/naver_cafes/naver_join_cafe":
+                return {
+                    "naver_join_cafe": {
+                        "cafe_id": 10174516,
+                        "naver_accounts": [
+                            {
+                                "login_id": "azqpale",
+                                "member_key": "member-azqpale",
+                                "level_info": {
+                                    "member_level": 128 if self.refreshed else 1,
+                                    "member_level_icon_url": (
+                                        "가족회원" if self.refreshed else ""
+                                    ),
+                                },
+                            }
+                        ],
+                    }
+                }
+            if request_path == "/naver_cafes/menus":
+                return {
+                    "cafe_menus": [
+                        {
+                            "menuId": 664,
+                            "menuName": "ㄴ가족업체 자유게시판",
+                            "writable": True,
+                        }
+                    ]
+                }
+            if request_path == "/naver_cafe_articles/board_histories":
+                return {"histories": []}
+            if request_path == "/naver_cafes/naver_join_cafe/sync/account":
+                assert method == "PUT"
+                assert payload == {
+                    "cafe_id": 10174516,
+                    "naver_login_id": "azqpale",
+                }
+                self.refreshed = True
+                return {"naver_account": payload}
+            raise AssertionError((method, request_path, query))
+
+    publisher = TwinMomPublisher()
+    publisher.prepare_jobs([job])
+    failed = publisher.refresh_assigned_account_grades([job])
+
+    assert failed == []
+    assert publisher.refreshed is True
+    assert job.cafe_id == 10174516
+    assert job.menu_id == 664
+    assert job.account == "azqpale"
+    assert job.status == JobStatus.PENDING
+
+
 def test_one_unknown_board_does_not_abort_other_rows(tmp_path: Path) -> None:
     path = tmp_path / "daily.xlsx"
     workbook = Workbook()

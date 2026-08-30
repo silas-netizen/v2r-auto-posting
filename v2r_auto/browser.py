@@ -1647,6 +1647,9 @@ class V2RBrowser:
     def prepare_immediate_jobs(self, jobs) -> None:
         self._get_immediate_publisher().prepare_jobs(jobs)
 
+    def refresh_immediate_account_grades(self, jobs) -> None:
+        self._get_immediate_publisher().refresh_assigned_account_grades(jobs)
+
     def publish_immediate(self, job, dry_run: bool) -> str:
         return self._get_immediate_publisher().publish(job, dry_run)
 

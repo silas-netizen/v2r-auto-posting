@@ -693,21 +693,29 @@ class AffiliateApiPublisher:
 
     def refresh_assigned_account_grades(
         self,
-        jobs: list[AffiliateJob],
-    ) -> list[AffiliateJob]:
+        jobs: list[Any],
+    ) -> list[Any]:
         """Refresh missing member grades once per cafe/account before writing."""
         self._capture_authorization()
-        pending_by_cafe: dict[str, list[AffiliateJob]] = {}
+        pending_by_cafe: dict[tuple[str, int], list[Any]] = {}
         for job in jobs:
-            if job.status == JobStatus.PENDING and job.account:
-                pending_by_cafe.setdefault(job.cafe, []).append(job)
-
-        failed_jobs: list[AffiliateJob] = []
-        for cafe_name, cafe_jobs in pending_by_cafe.items():
-            config = CAFE_DESTINATIONS.get(cafe_name)
-            if not config:
+            if (
+                job.status != JobStatus.PENDING
+                or not job.account
+                or getattr(job, "source_kind", "") == "account_test"
+            ):
                 continue
-            cafe_id = int(config["cafe_id"])
+            config = CAFE_DESTINATIONS.get(job.cafe) or {}
+            cafe_id = int(
+                getattr(job, "cafe_id", 0)
+                or config.get("cafe_id")
+                or 0
+            )
+            if cafe_id:
+                pending_by_cafe.setdefault((job.cafe, cafe_id), []).append(job)
+
+        failed_jobs: list[Any] = []
+        for (cafe_name, cafe_id), cafe_jobs in pending_by_cafe.items():
             assigned_accounts = {job.account for job in cafe_jobs}
             status = self._request(
                 "GET",
