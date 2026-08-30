@@ -296,18 +296,36 @@ def same_search_query(expected: str, actual: str) -> bool:
 
 def matching_cafe_name(text: str, cafe_names: list[str]) -> str:
     compact = compact_text(text)
-    for name in cafe_names:
+    if not compact:
+        return ""
+    names = sorted(
+        (name for name in cafe_names if compact_text(name)),
+        key=lambda name: len(compact_text(name)),
+        reverse=True,
+    )
+    for name in names:
         marker = compact_text(name)
-        if marker and marker in compact:
+        if len(marker) < 2:
+            continue
+        if marker in compact:
             return name
     return ""
 
 
 def brand_found(text: str, brands: list[str]) -> str:
     compact = compact_text(text)
-    for brand in brands:
+    if not compact:
+        return ""
+    names = sorted(
+        (brand for brand in brands if compact_text(brand)),
+        key=lambda brand: len(compact_text(brand)),
+        reverse=True,
+    )
+    for brand in names:
         marker = compact_text(brand)
-        if marker and marker in compact:
+        if len(marker) < 2:
+            continue
+        if marker in compact:
             return brand
     return ""
 
@@ -393,12 +411,15 @@ def article_dedupe_key(url: str) -> str:
     return path
 
 
+CAFE_CARD_SPAN = 800
+
+
 def search_result_html(html: str) -> str:
-    """Use the 통검 result column only. Header/내 카페 위젯은 빼다."""
+    """통검 결과칸만. 없으면 빈 값 — 페이지 전체를 우리 글로 보지 않는다."""
     text = html or ""
     match = re.search(r'(?is)<[^>]*\bid=["\']main_pack["\'][^>]*>', text)
     if not match:
-        return text
+        return ""
     start = match.start()
     rest = text[start:]
     stop = re.search(
@@ -412,6 +433,8 @@ def search_result_html(html: str) -> str:
 
 def collect_our_cafe_hits(html: str, cafe_names: list[str]) -> list[CafeHit]:
     source = search_result_html(html)
+    if not source.strip():
+        return []
     anchors: list[tuple[int, str, str, str]] = []
     for match in _ANCHOR_RE.finditer(source):
         href = _absolute_url(match.group(1))
@@ -420,13 +443,13 @@ def collect_our_cafe_hits(html: str, cafe_names: list[str]) -> list[CafeHit]:
         text = _strip_tags(match.group(2))
         anchors.append((match.start(), href, text, match.group(0)))
 
-    our_ids: dict[str, str] = {}
+    homes: list[tuple[int, str, str]] = []
     articles: list[tuple[int, str]] = []
     for start, href, text, tag in anchors:
         identity = cafe_identity(href)
         cafe = matching_cafe_name(text, cafe_names)
         if identity and cafe and not is_cafe_article_url(href):
-            our_ids[identity] = cafe
+            homes.append((start, identity, cafe))
         if is_cafe_article_url(href):
             if is_clustered_sub_result(tag):
                 continue
@@ -436,8 +459,19 @@ def collect_our_cafe_hits(html: str, cafe_names: list[str]) -> list[CafeHit]:
     seen: set[str] = set()
     for start, href in articles:
         identity = cafe_identity(href)
-        cafe = our_ids.get(identity, "")
-        if not cafe:
+        if not identity:
+            continue
+        lo = max(0, start - CAFE_CARD_SPAN)
+        hi = min(len(source), start + 200)
+        card = source[lo:hi]
+        cafe = ""
+        for home_pos, home_id, home_cafe in homes:
+            if home_id != identity or not home_cafe:
+                continue
+            if lo <= home_pos <= hi:
+                cafe = home_cafe
+                break
+        if not cafe or not matching_cafe_name(_strip_tags(card), [cafe]):
             continue
         key = article_dedupe_key(href)
         if key in seen:
@@ -450,10 +484,12 @@ def collect_our_cafe_hits(html: str, cafe_names: list[str]) -> list[CafeHit]:
 def keep_visible_cafe_hits(
     hits: list[CafeHit], visible_urls: list[str] | None
 ) -> list[CafeHit]:
-    """통검 화면에 실제로 보이는 카페 글만 남긴다. None이면 걸러내지 않는다."""
-    if visible_urls is None:
-        return hits
+    """통검 화면에 보이는 우리 카페 글만. 화면 목록을 못 받으면 하나도 남기지 않는다."""
+    if not visible_urls:
+        return []
     keys = {article_dedupe_key(url) for url in visible_urls if url}
+    if not keys:
+        return []
     return [hit for hit in hits if article_dedupe_key(hit.url) in keys]
 
 
@@ -551,18 +587,23 @@ class ExposureChecker:
             html = self.naver.search_integrated(keyword)
         except Exception as exc:
             self.logger.error("네이버 검색 실패 (%s): %s", keyword, exc)
+            self._write_result(row, STATUS_HIDDEN, "", None, False, dry_run)
             return
         html_hits = collect_our_cafe_hits(html, self.cafe_names)
-        visible_urls = None
+        visible_urls: list[str] = []
         lookup_visible = getattr(self.naver, "visible_cafe_article_urls", None)
         if callable(lookup_visible):
             try:
-                visible_urls = lookup_visible()
+                visible_urls = [
+                    str(url).strip()
+                    for url in (lookup_visible() or [])
+                    if str(url).strip() and is_cafe_article_url(str(url))
+                ]
             except Exception as exc:
                 self.logger.warning("통검 화면 글 확인 실패: %s", exc)
-                visible_urls = None
+                visible_urls = []
         hits = keep_visible_cafe_hits(html_hits, visible_urls)
-        if html_hits and visible_urls is not None and len(hits) < len(html_hits):
+        if html_hits and len(hits) < len(html_hits):
             kept = {article_dedupe_key(hit.url) for hit in hits}
             hidden_names = ", ".join(
                 hit.cafe_name
@@ -576,16 +617,18 @@ class ExposureChecker:
         cafe_name = ""
         status = STATUS_HIDDEN
         if not hits:
-            if html_hits and visible_urls is not None:
+            if html_hits:
                 self.logger.info(
                     "밀려남: %s / 통검 화면에 우리 카페 글이 보이지 않습니다",
                     keyword,
                 )
             else:
-                named = matching_cafe_name(_strip_tags(html), self.cafe_names)
+                named = matching_cafe_name(
+                    _strip_tags(search_result_html(html)), self.cafe_names
+                )
                 if named:
                     self.logger.warning(
-                        "밀려남: %s / 화면에 %s 이름은 보이지만 우리 카페 글 주소를 못 찾았습니다",
+                        "밀려남: %s / 통검 결과칸에 %s 이름은 보이지만 우리 카페 글 주소를 못 찾았습니다",
                         keyword,
                         named,
                     )

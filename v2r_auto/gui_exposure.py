@@ -105,7 +105,7 @@ class ExposureApp(AutomationApp):
         )
         ttk.Label(
             outer,
-            text="네이버 검색은 한 번만 로그인하면 됩니다. 검색량은 광고주센터 왼쪽 메뉴 도구 → 키워드 도구에서 읽습니다. 크롬 창은 닫지 마세요.",
+            text="네이버 검색은 한 번만 로그인하면 됩니다. 노출완은 통합검색 결과칸에 우리 카페 글이 보이고 그 글 제목·본문·댓글에 브랜드 식별어가 있을 때만입니다. 검색량은 광고주센터 왼쪽 메뉴 도구 → 키워드 도구에서 읽습니다. 크롬 창은 닫지 마세요.",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
         source_row = ttk.Frame(outer)
@@ -366,6 +366,7 @@ class ExposureApp(AutomationApp):
                 "실제 반영",
                 (
                     f"검증 모드가 꺼져 있습니다. 검색 결과에 따라 {label} 노출상태와 검색량을 바꿉니다. "
+                    "노출완은 통검 결과칸의 우리 카페 글 제목·본문·댓글에 식별어가 있을 때만입니다. "
                     f"{cafe_field}는 노출완이고 카페가 다를 때만 바꿉니다.{edited} 계속할까요?"
                 ),
             ):

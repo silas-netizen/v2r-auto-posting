@@ -12,6 +12,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from .exposure import (
     compact_text,
+    is_cafe_article_url,
     keyword_tool_query,
     keywordstool_volume,
     naver_search_url,
@@ -177,22 +178,44 @@ return !!(
   || document.querySelector('#cmt_list')
 );
 """
-COLLECT_CAFE_POST_TEXT_JS = r"""
+ARTICLE_TEXT_SELECTORS = (
+    "h3.title",
+    "h3.title_text",
+    ".title_text",
+    ".title_area",
+    "#title_area",
+    ".article_header",
+    ".article_container",
+    ".se-main-container",
+    ".ContentRenderer",
+    ".article_viewer",
+    "#tbody",
+    ".se-component-content",
+    ".text_comment",
+    ".CommentItem",
+    ".comment_text",
+    ".box-reply .comment",
+)
+COLLECT_CAFE_POST_TEXT_JS = (
+    """
 const parts = [];
 const push = (value) => {
   const text = (value || '').trim();
   if (text) parts.push(text);
 };
-if (document.body) {
-  push(document.body.innerText || document.body.textContent || '');
-}
-document.querySelectorAll(
-  '.text_comment, .CommentItem, .comment_text, .box-reply .comment'
-).forEach((el) => {
-  push(el.innerText || el.textContent || '');
-});
-return parts.join('\n');
+const sels = [
 """
+    + ",\n".join(f"  {selector!r}" for selector in ARTICLE_TEXT_SELECTORS)
+    + """
+];
+for (const sel of sels) {
+  document.querySelectorAll(sel).forEach((el) => {
+    push(el.innerText || el.textContent || '');
+  });
+}
+return parts.join('\\n');
+"""
+)
 NAVER_LOGIN_COOKIES = {"NID_AUT", "NID_SES"}
 ADS_HOME_URL = "https://ads.naver.com/"
 VISIBLE_CAFE_LINKS_JS = r"""
@@ -203,21 +226,22 @@ const visible = (el) => {
   if (r.width < 2 || r.height < 2) return false;
   if (st.visibility === 'hidden' || st.display === 'none' || Number(st.opacity) === 0) return false;
   let p = el;
-  while (p && p !== document.body) {
+  while (p && p !== document.documentElement) {
     const ps = window.getComputedStyle(p);
     if (ps.display === 'none' || ps.visibility === 'hidden' || Number(ps.opacity) === 0) return false;
     p = p.parentElement;
   }
   return true;
 };
-const root = document.querySelector('#main_pack')
-  || document.querySelector('#content')
-  || document.body;
+const root = document.querySelector('#main_pack');
+if (!root) return [];
 return Array.from(root.querySelectorAll('a[href*="cafe.naver.com"]'))
   .filter(visible)
   .map((a) => a.href || '')
   .filter(Boolean);
 """
+INTEGRATED_WHERE = {"", "nexearch"}
+RESULT_SCROLL_ROUNDS = 2
 
 
 def is_naver_logged_in_cookies(cookies) -> bool:
@@ -296,13 +320,14 @@ def document_text(driver) -> str:
 
 
 def collect_cafe_post_text(driver) -> str:
+    """제목·본문·댓글 칸만. 카페 껍데기/인기글은 식별어로 보지 않는다."""
     try:
         text = driver.execute_script(COLLECT_CAFE_POST_TEXT_JS)
         if text:
             return str(text)
     except Exception:
         pass
-    return document_text(driver)
+    return ""
 
 
 def wait_for_cafe_frame(driver, timeout: float):
@@ -355,14 +380,21 @@ def collect_frame_tree_text(driver, depth: int = 0) -> str:
     return "\n".join(part for part in parts if part)
 
 
+def is_integrated_search_url(url: str) -> bool:
+    parsed = urlparse(url or "")
+    host = (parsed.netloc or "").lower()
+    if "search.naver.com" not in host:
+        return False
+    where = (parse_qs(parsed.query).get("where") or [""])[0].casefold()
+    return where in INTEGRATED_WHERE
+
+
 def read_opened_cafe_article(driver, timeout: float = 15) -> str:
     """Read title/body/comments of an already opened cafe post. No extra clicks."""
-    chunks = [document_text(driver)]
     frame = wait_for_cafe_frame(driver, timeout)
     if frame is None:
         wait_for_comments(driver, timeout)
-        chunks.append(collect_cafe_post_text(driver))
-        return "\n".join(part for part in chunks if part)
+        return collect_cafe_post_text(driver)
     try:
         driver.switch_to.frame(frame)
         wait_for_comments(driver, timeout)
@@ -371,10 +403,9 @@ def read_opened_cafe_article(driver, timeout: float = 15) -> str:
         except Exception:
             pass
         time.sleep(0.25)
-        chunks.append(collect_frame_tree_text(driver))
+        return collect_frame_tree_text(driver)
     finally:
         driver.switch_to.default_content()
-    return "\n".join(part for part in chunks if part)
 
 
 class SeleniumNaverSearch:
@@ -386,7 +417,7 @@ class SeleniumNaverSearch:
         self._ads_handle: str | None = None
         self._sheet_handle: str | None = None
         self._volume_unavailable = False
-        self._last_visible_cafe_urls: list[str] | None = None
+        self._last_visible_cafe_urls: list[str] = []
 
     def _driver(self):
         self._ensure_browser()
@@ -413,6 +444,7 @@ class SeleniumNaverSearch:
                 self._ads_handle = None
                 self._sheet_handle = None
                 self._volume_unavailable = False
+                self._last_visible_cafe_urls = []
         self.browser.start()
 
     def prepare_login(self, wait_seconds: float = 300, sheet_url: str = "") -> None:
@@ -493,6 +525,7 @@ class SeleniumNaverSearch:
     def search_integrated(self, keyword: str) -> str:
         driver = self._driver()
         query = strip_parenthetical(keyword)
+        self._last_visible_cafe_urls = []
         self._focus_naver_tab(driver)
         box = self._find_search_box(driver)
         box.click()
@@ -502,24 +535,28 @@ class SeleniumNaverSearch:
         time.sleep(0.55)
         if not self._click_spacing_autocomplete(driver, query):
             box.send_keys(Keys.ENTER)
-        self._wait_for_integrated_results(driver, query)
+        if not self._wait_for_integrated_results(driver, query):
+            self.logger.warning(
+                "통검 결과칸을 확인하지 못해 이번 키워드는 우리 글로 보지 않습니다"
+            )
+            return ""
         self._last_visible_cafe_urls = self._collect_visible_cafe_urls(driver)
         return driver.page_source
 
-    def visible_cafe_article_urls(self) -> list[str] | None:
-        return self._last_visible_cafe_urls
+    def visible_cafe_article_urls(self) -> list[str]:
+        return list(self._last_visible_cafe_urls or [])
 
-    def _collect_visible_cafe_urls(self, driver) -> list[str] | None:
+    def _collect_visible_cafe_urls(self, driver) -> list[str]:
         try:
             hrefs = driver.execute_script(VISIBLE_CAFE_LINKS_JS) or []
         except Exception as exc:
             self.logger.warning("통검에서 보이는 카페 글을 가리지 못했습니다: %s", exc)
-            return None
+            return []
         urls: list[str] = []
         seen: set[str] = set()
         for href in hrefs:
             text = str(href or "").strip()
-            if not text:
+            if not text or not is_cafe_article_url(text):
                 continue
             key = text.casefold()
             if key in seen:
@@ -1059,30 +1096,35 @@ class SeleniumNaverSearch:
         self.logger.info("자동완성이 없어 입력한 키워드 그대로 검색합니다")
         return False
 
-    def _wait_for_integrated_results(self, driver, query: str) -> None:
-        WebDriverWait(driver, self.timeout).until(
-            lambda item: item.find_elements(
-                By.CSS_SELECTOR, "#main_pack, #content, #lnb"
+    def _wait_for_integrated_results(self, driver, query: str) -> bool:
+        try:
+            WebDriverWait(driver, self.timeout).until(
+                lambda item: item.find_elements(By.CSS_SELECTOR, "#lnb, #main_pack")
             )
-        )
+        except Exception:
+            return False
         time.sleep(0.35)
-        self._stay_on_integrated_tab(driver)
+        self._stay_on_integrated_tab(driver, query)
         actual = self._actual_query(driver)
         if actual and not same_search_query(query, actual):
             self.logger.info(
                 "검색어가 달라져 다시 검색합니다: %s → %s", actual, query
             )
             driver.get(naver_search_url(query))
-            WebDriverWait(driver, self.timeout).until(
-                lambda item: item.find_elements(
-                    By.CSS_SELECTOR, "#main_pack, #content, #lnb"
-                )
-            )
             time.sleep(0.35)
-            self._stay_on_integrated_tab(driver)
-        self._scroll_to_end(driver)
-        time.sleep(0.45)
-        self._scroll_to_end(driver, rounds=4)
+            self._stay_on_integrated_tab(driver, query)
+        if not is_integrated_search_url(driver.current_url or ""):
+            return False
+        try:
+            WebDriverWait(driver, self.timeout).until(
+                lambda item: item.find_elements(By.CSS_SELECTOR, "#main_pack")
+            )
+        except Exception:
+            return False
+        if not driver.find_elements(By.CSS_SELECTOR, "#main_pack"):
+            return False
+        self._scroll_result_column(driver)
+        return True
 
     def _actual_query(self, driver) -> str:
         parsed = urlparse(driver.current_url or "")
@@ -1095,28 +1137,43 @@ class SeleniumNaverSearch:
         except Exception:
             return ""
 
-    def _stay_on_integrated_tab(self, driver) -> None:
-        current = (driver.current_url or "").lower()
-        if "where=article" in current or "where=cafe" in current:
-            self.logger.info("카페 탭이 열려 통합검색으로 돌아갑니다")
-            for tab in driver.find_elements(
-                By.CSS_SELECTOR, "#lnb a, .api_lnb_menu a, .lnb_tab a, a.tab"
-            ):
-                label = (tab.text or "").replace(" ", "")
-                if label in INTEGRATED_TAB_TEXTS:
-                    try:
-                        tab.click()
-                        time.sleep(0.4)
-                    except Exception:
-                        continue
-                    break
+    def _stay_on_integrated_tab(self, driver, query: str) -> None:
+        if is_integrated_search_url(driver.current_url or ""):
+            return
+        self.logger.info("통합검색이 아니라 다른 탭이라 통합검색으로 돌아갑니다")
+        for tab in driver.find_elements(
+            By.CSS_SELECTOR, "#lnb a, .api_lnb_menu a, .lnb_tab a, a.tab"
+        ):
+            label = (tab.text or "").replace(" ", "")
+            href = (tab.get_attribute("href") or "").lower()
+            if label in INTEGRATED_TAB_TEXTS or "where=nexearch" in href:
+                try:
+                    tab.click()
+                    time.sleep(0.4)
+                except Exception:
+                    continue
+                break
+        if is_integrated_search_url(driver.current_url or ""):
+            return
+        driver.get(naver_search_url(query))
+        time.sleep(0.4)
 
-    def _scroll_to_end(self, driver, rounds: int = 8) -> None:
+    def _scroll_result_column(self, driver, rounds: int = RESULT_SCROLL_ROUNDS) -> None:
         last_height = 0
-        for _ in range(rounds):
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        for _ in range(max(1, rounds)):
+            try:
+                height = driver.execute_script(
+                    """
+                    const root = document.querySelector('#main_pack');
+                    if (!root) return 0;
+                    const bottom = root.getBoundingClientRect().bottom + window.scrollY;
+                    window.scrollTo(0, bottom);
+                    return document.body.scrollHeight;
+                    """
+                )
+            except Exception:
+                return
             time.sleep(0.28)
-            height = driver.execute_script("return document.body.scrollHeight")
             if height == last_height:
                 break
             last_height = height
