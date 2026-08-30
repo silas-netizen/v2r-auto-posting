@@ -33,6 +33,7 @@ from .exposure import (
     STATUS_HEADERS,
     VOLUME_HEADERS,
     cafe_name_option,
+    compact_text,
     status_option,
 )
 
@@ -124,6 +125,46 @@ class _SheetBind:
     exposed_volume_idx: int = -1
     edited_col: str = ""
     edited_idx: int = -1
+
+
+def keyword_cells_match(actual: str, expected: str) -> bool:
+    left = compact_text(sheet_plain_text(actual))
+    right = compact_text(sheet_plain_text(expected))
+    return bool(left) and left == right
+
+
+def find_sheet_row_numbers(
+    table: list[list[str]], keyword: str, keyword_idx: int
+) -> list[int]:
+    found: list[int] = []
+    for number in range(2, len(table) + 1):
+        if keyword_cells_match(csv_sheet_cell(table, number, keyword_idx), keyword):
+            found.append(number)
+    return found
+
+
+def resolve_sheet_row_number(
+    table: list[list[str]], row: ExposureRow, keyword_idx: int
+) -> int:
+    """Use the live keyword cell, not the row number remembered at load.
+
+    If a sheet row is deleted mid-run, later page_id values land on the
+    next keyword. Confirm H (or the keyword column) before writing.
+    """
+    current = int(row.page_id)
+    if keyword_idx < 0:
+        return current
+    if keyword_cells_match(
+        csv_sheet_cell(table, current, keyword_idx), row.keyword
+    ):
+        return current
+    matches = find_sheet_row_numbers(table, row.keyword, keyword_idx)
+    if not matches:
+        raise SheetError(
+            f"시트에서 키워드를 다시 찾지 못했습니다: {row.keyword} "
+            f"(기억한 행 {current})"
+        )
+    return min(matches, key=lambda number: abs(number - current))
 
 
 def plan_sheet_writes(
@@ -266,10 +307,35 @@ class GoogleSheetExposureStore:
             status_options=self._status_options,
             cafe_options=self._cafe_options,
         )
-        row_number = int(row.page_id)
         table = apply_sheet_overlay(
             parse_sheet_table(self._read_csv()), self._written
         )
+        bind = self._bind
+        if bind is None and table:
+            bind = self._bind_headers(
+                [sheet_plain_text(header) for header in table[0]]
+            )
+            self._bind = bind
+        remembered = int(row.page_id)
+        row_number = resolve_sheet_row_number(
+            table, row, bind.keyword_idx if bind is not None else -1
+        )
+        if row_number != remembered:
+            remembered_keyword = (
+                sheet_plain_text(
+                    csv_sheet_cell(table, remembered, bind.keyword_idx)
+                )
+                if bind is not None
+                else ""
+            )
+            self.logger.warning(
+                "시트 행이 달라져 %s행 키워드는 %s입니다. %s는 %s행에 씁니다",
+                remembered,
+                remembered_keyword or "(비어 있음)",
+                row.keyword,
+                row_number,
+            )
+            row.page_id = str(row_number)
         errors: list[str] = []
         for write in writes:
             current = csv_sheet_cell(

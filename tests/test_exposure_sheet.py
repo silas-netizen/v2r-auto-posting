@@ -11,6 +11,7 @@ from v2r_auto.exposure_sheet import (
     now_stamp,
     parse_spreadsheet_ref,
     plan_sheet_writes,
+    resolve_sheet_row_number,
     sheet_export_url,
 )
 
@@ -199,6 +200,84 @@ def test_plan_sheet_writes_cafe_name_only() -> None:
     assert SheetWrite("A", "씨씨앙") in writes
 
 
+def test_resolve_sheet_row_keeps_matching_page_id() -> None:
+    table = [
+        ["카페", "노출 상태", "키워드"],
+        ["양평맘", "밀려남", "원포 얼리"],
+        ["", "밀려남", "연세사랑모아여성병원"],
+    ]
+    assert resolve_sheet_row_number(table, _sheet_row("원포 얼리", page_id="2"), 2) == 2
+
+
+def test_resolve_sheet_row_follows_keyword_when_rows_shifted() -> None:
+    table = [
+        ["카페", "노출 상태", "키워드"],
+        ["", "밀려남", "원포 얼리"],
+        ["양평맘", "노출완", "연세사랑모아여성병원"],
+    ]
+    assert (
+        resolve_sheet_row_number(table, _sheet_row("원포 얼리", page_id="3"), 2) == 2
+    )
+
+
+def test_store_writes_the_keyword_row_after_a_deleted_sheet_row() -> None:
+    csv_text = (
+        "카페명,url,발행시간,작성자 아이디,작성자 비밀번호,발행 URL,"
+        "노출 상태,키워드,통합검색,최종 편집 일시,키워드 검색량,노출된 검색량\n"
+        ",,,,,,밀려남,원포 얼리,,,,\n"
+        ",,,,,,밀려남,연세사랑모아여성병원,,,,\n"
+    )
+    writer = RecordingWriter()
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        __import__("logging").getLogger("test"),
+        opener=lambda request, timeout=30: FakeResponse(csv_text.encode("utf-8")),
+        writer=writer,
+        now=lambda: datetime(2026, 8, 30, 20, 28, 16),
+    )
+    store.load_rows()
+    store.update_check_result(
+        _sheet_row(keyword="원포 얼리", page_id="3"),
+        status="노출완",
+        cafe_name="양평맘",
+        search_volume=830,
+        volume_found=True,
+    )
+    rows_written = {item[2] for item in writer.writes}
+    assert rows_written == {2}
+    assert ("G", 2, "노출완") in {(item[1], item[2], item[3]) for item in writer.writes}
+    assert ("A", 2, "양평맘") in {(item[1], item[2], item[3]) for item in writer.writes}
+
+
+def test_store_does_not_write_when_keyword_row_is_gone() -> None:
+    csv_text = (
+        "카페명,url,발행시간,작성자 아이디,작성자 비밀번호,발행 URL,"
+        "노출 상태,키워드,통합검색,최종 편집 일시,키워드 검색량,노출된 검색량\n"
+        ",,,,,,밀려남,연세사랑모아여성병원,,,,\n"
+    )
+    writer = RecordingWriter()
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        __import__("logging").getLogger("test"),
+        opener=lambda request, timeout=30: FakeResponse(csv_text.encode("utf-8")),
+        writer=writer,
+        now=lambda: datetime(2026, 8, 30, 20, 28, 16),
+    )
+    try:
+        store.update_check_result(
+            _sheet_row(keyword="원포 얼리", page_id="3"),
+            status="노출완",
+            cafe_name="양평맘",
+            search_volume=830,
+            volume_found=True,
+        )
+    except SheetError as exc:
+        assert "원포 얼리" in str(exc)
+    else:
+        raise AssertionError("expected SheetError")
+    assert writer.writes == []
+
+
 def test_store_reads_cafe_header_without_name_suffix() -> None:
     csv_text = (
         "카페,노출 상태,키워드,최종 편집 일시,키워드 검색량,노출된 검색량\n"
@@ -312,7 +391,7 @@ def test_store_writes_current_time_and_same_fields() -> None:
         now=lambda: datetime(2026, 8, 27, 16, 32, 5),
     )
     store.update_check_result(
-        _sheet_row(),
+        _sheet_row(keyword="고농축행감환", page_id="2"),
         status="노출완",
         cafe_name="양평맘",
         search_volume=21000,
