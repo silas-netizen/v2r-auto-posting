@@ -9,6 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
 
 jobs:
@@ -57,13 +58,42 @@ jobs:
           }
           Pop-Location
 
+      - name: Remove previous V2R executable artifacts
+        if: github.ref_name == 'cursor/fix-seone-image-upload-3901'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const artifacts = await github.paginate(
+              github.rest.actions.listArtifactsForRepo,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100,
+              },
+            );
+            const names = new Set([
+              "V2R-Auto-Posting-Windows",
+              "V2R-Affiliate-Revision",
+              "V2R-Immediate-Posting",
+            ]);
+            for (const artifact of artifacts) {
+              if (!names.has(artifact.name)) continue;
+              await github.rest.actions.deleteArtifact({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                artifact_id: artifact.id,
+              });
+              core.info(`Deleted old artifact: ${artifact.name} (${artifact.id})`);
+            }
+
       - name: Upload Windows programs
+        if: github.ref_name == 'cursor/fix-seone-image-upload-3901'
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: V2R-Auto-Posting-Windows
+          retention-days: 1
           path: |
-            dist/V2R-Auto-Posting.exe
-            dist/V2R-Affiliate-Revision.exe
-            dist/V2R-Immediate-Posting.exe
+            publish-executables/downloads/V2R-Affiliate-Revision.zip
+            publish-executables/downloads/V2R-Immediate-Posting.zip
           if-no-files-found: error
