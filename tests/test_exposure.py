@@ -13,6 +13,7 @@ from v2r_auto.exposure import (
     status_option,
     collect_our_cafe_hits,
     keep_visible_cafe_hits,
+    search_result_html,
     is_cafe_article_url,
     is_clustered_sub_result,
     keyword_tool_query,
@@ -169,6 +170,41 @@ def test_collects_only_our_cafe_articles() -> None:
     assert [hit.cafe_name for hit in hits] == ["러브인썸"]
     assert hits[0].url.endswith("/loveinsome/99")
     assert all("othercafe" not in hit.url for hit in hits)
+
+
+def test_search_result_html_drops_header_cafe_widget() -> None:
+    html = """
+    <div id="header"><a href="https://cafe.naver.com/cantsb">씨씨앙</a></div>
+    <div id="main_pack"><a href="https://cafe.naver.com/cjsanvi/99">맘스홀릭 글</a></div>
+    <div id="sub_pack"><a href="https://cafe.naver.com/cantsb/1">내 카페</a></div>
+    """
+    result = search_result_html(html)
+    assert "cjsanvi/99" in result
+    assert "cantsb/1" not in result
+
+
+def test_other_cafe_card_is_not_ssissiang_just_because_name_is_nearby() -> None:
+    html = """
+    <div id="main_pack">
+      <a href="https://cafe.naver.com/cantsb">국내1위 다이어트 커뮤니티 씨씨앙</a>
+      <a href="https://cafe.naver.com/cjsanvi">맘스홀릭 베이비</a>
+      <a href="https://cafe.naver.com/cjsanvi/4214533">슈얼리 배란테스트기 후기</a>
+    </div>
+    """
+    hits = collect_our_cafe_hits(html, list(DEFAULT_CAFE_NAMES))
+    assert hits == []
+
+
+def test_header_ssissiang_does_not_count_main_pack_foreign_article() -> None:
+    html = """
+    <div id="gnb"><a href="https://cafe.naver.com/cantsb">씨씨앙</a></div>
+    <div id="main_pack">
+      <a href="https://cafe.naver.com/cjsanvi">맘스홀릭 베이비</a>
+      <a href="https://cafe.naver.com/cjsanvi/4214533">슈얼리 배란테스트기 후기</a>
+    </div>
+    """
+    hits = collect_our_cafe_hits(html, list(DEFAULT_CAFE_NAMES))
+    assert hits == []
 
 
 def test_collects_product_review_module_with_long_cafe_name() -> None:

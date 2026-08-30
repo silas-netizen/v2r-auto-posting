@@ -393,8 +393,25 @@ def article_dedupe_key(url: str) -> str:
     return path
 
 
+def search_result_html(html: str) -> str:
+    """Use the 통검 result column only. Header/내 카페 위젯은 빼다."""
+    text = html or ""
+    match = re.search(r'(?is)<[^>]*\bid=["\']main_pack["\'][^>]*>', text)
+    if not match:
+        return text
+    start = match.start()
+    rest = text[start:]
+    stop = re.search(
+        r'(?is)<(?:div|aside|footer)[^>]*\bid=["\'](?:sub_pack|footer|aside)["\']',
+        rest[len(match.group(0)) :],
+    )
+    if stop:
+        return rest[: len(match.group(0)) + stop.start()]
+    return rest
+
+
 def collect_our_cafe_hits(html: str, cafe_names: list[str]) -> list[CafeHit]:
-    source = html or ""
+    source = search_result_html(html)
     anchors: list[tuple[int, str, str, str]] = []
     for match in _ANCHOR_RE.finditer(source):
         href = _absolute_url(match.group(1))
@@ -404,15 +421,12 @@ def collect_our_cafe_hits(html: str, cafe_names: list[str]) -> list[CafeHit]:
         anchors.append((match.start(), href, text, match.group(0)))
 
     our_ids: dict[str, str] = {}
-    all_homes: list[tuple[int, str, str]] = []
     articles: list[tuple[int, str]] = []
     for start, href, text, tag in anchors:
         identity = cafe_identity(href)
         cafe = matching_cafe_name(text, cafe_names)
         if identity and cafe and not is_cafe_article_url(href):
             our_ids[identity] = cafe
-        if identity and not is_cafe_article_url(href):
-            all_homes.append((start, identity, cafe))
         if is_cafe_article_url(href):
             if is_clustered_sub_result(tag):
                 continue
@@ -423,22 +437,6 @@ def collect_our_cafe_hits(html: str, cafe_names: list[str]) -> list[CafeHit]:
     for start, href in articles:
         identity = cafe_identity(href)
         cafe = our_ids.get(identity, "")
-        if not cafe:
-            nearest_cafe = ""
-            nearest = 10_000
-            nearest_ours = False
-            for home_pos, home_id, home_cafe in all_homes:
-                distance = abs(home_pos - start)
-                if distance < nearest and distance <= 1200:
-                    nearest = distance
-                    nearest_cafe = home_cafe
-                    nearest_ours = bool(home_cafe)
-            if nearest_ours:
-                cafe = nearest_cafe
-        if not cafe:
-            # 상품리뷰 인기글처럼 카페 이름이 글 제목 위에 있는 칸
-            window = source[max(0, start - 1800) : start + 80]
-            cafe = matching_cafe_name(_strip_tags(window), cafe_names)
         if not cafe:
             continue
         key = article_dedupe_key(href)
@@ -594,7 +592,9 @@ class ExposureChecker:
                 else:
                     self.logger.info("밀려남: %s / 통합검색에 우리 카페 없음", keyword)
         else:
-            names = ", ".join(hit.cafe_name for hit in hits)
+            names = ", ".join(
+                f"{hit.cafe_name} ({hit.url})" for hit in hits
+            )
             self.logger.info("우리 카페 글 %s건: %s", len(hits), names)
             matched = ""
             for hit in hits:
@@ -608,10 +608,11 @@ class ExposureChecker:
                     cafe_name = hit.cafe_name
                     status = STATUS_EXPOSED
                     self.logger.info(
-                        "노출완: %s / %s 글에서 식별어 %s",
+                        "노출완: %s / %s 글에서 식별어 %s / %s",
                         keyword,
                         hit.cafe_name,
                         matched,
+                        hit.url,
                     )
                     break
             if status != STATUS_EXPOSED:
