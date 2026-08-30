@@ -999,7 +999,11 @@ def test_load_keeps_rows_without_article_type(tmp_path: Path) -> None:
     assert jobs[0].article.title == "제목만"
 
 
-def write_proxy_xlsx(tmp_path: Path, comment_count: int = 6) -> Path:
+def write_proxy_xlsx(
+    tmp_path: Path,
+    comment_count: int = 6,
+    self_comment_count: int = 6,
+) -> Path:
     path = tmp_path / "proxy.xlsx"
     workbook = Workbook()
     sheet = workbook.active
@@ -1010,6 +1014,11 @@ def write_proxy_xlsx(tmp_path: Path, comment_count: int = 6) -> Path:
         name = f"c{offset + 1}"
         sheet.append(
             [f"10.0.0.{offset + 11}:3030", 11 + offset, name, f"pw-{name}", "제휴 댓"]
+        )
+    for offset in range(self_comment_count):
+        name = f"s{offset + 1}"
+        sheet.append(
+            [f"10.0.0.{offset + 31}:3030", 31 + offset, name, f"pw-{name}", "자사 댓"]
         )
     workbook.save(path)
     return path
@@ -1035,7 +1044,8 @@ def test_proxy_excel_is_recognized(tmp_path: Path) -> None:
     assert info.recognized is True
     assert "제휴 작성 1개" in info.message
     assert "제휴 댓글 6개" in info.message
-    assert "자사 1개" in info.message
+    assert "자사 작성 1개" in info.message
+    assert "자사 댓글 6개" in info.message
     assert info.find_author("writer", "씨씨앙").chrome_number == 1
     assert info.find_author("selfwriter", "고요한아침").chrome_number == 10
 
@@ -1082,15 +1092,59 @@ def test_review_type_puts_sixth_on_2_1_and_author_on_2_2(tmp_path: Path) -> None
     assert replies[1].account == "writer"
 
 
-def test_self_owned_fills_author_only_on_the_manuscript_row(tmp_path: Path) -> None:
+def test_self_owned_question_type_uses_self_comment_ids(tmp_path: Path) -> None:
     job = make_job(cafe="고요한아침", board="가입인사", with_daily=False)
     job.account = "selfwriter"
+    job.article_type = "질문형"
     book = recognize_proxy_workbook(write_proxy_xlsx(tmp_path))
+    rng = random.Random(1)
+    chosen = rng.sample(book.self_comment_accounts(), 6)
     rows = build_master_rows(job, proxy_book=book, rng=random.Random(1))
 
+    comments = [row for row in rows if row.type == TYPE_COMMENT]
+    replies = [row for row in rows if row.type == TYPE_REPLY]
     assert rows[0].account == "selfwriter"
     assert rows[0].chrome_number == 10
-    assert all(not row.account for row in rows[1:])
+    assert comments[0].account == chosen[0].account
+    assert comments[1].account == chosen[1].account
+    assert replies[0].account == "selfwriter"
+    assert replies[1].account == "selfwriter"
+    assert replies[2].account == chosen[1].account
+    assert replies[3].account == chosen[2].account
+    assert {row.account for row in comments} <= {item.account for item in chosen}
+    assert "c1" not in {row.account for row in comments}
+
+
+def test_reply_accounts_follow_sheet_author_not_random_self(tmp_path: Path) -> None:
+    job = make_job(cafe="고요한아침", board="가입인사", with_daily=False)
+    job.account = "sheetwriter"
+    job.article_type = "질문형"
+    book = recognize_proxy_workbook(write_proxy_xlsx(tmp_path))
+    rows = build_master_rows(job, proxy_book=book, rng=random.Random(1))
+    replies = [row for row in rows if row.type == TYPE_REPLY]
+    assert rows[0].account == "sheetwriter"
+    assert replies[0].account == "sheetwriter"
+    assert replies[1].account == "sheetwriter"
+    assert "selfwriter" not in {row.account for row in rows if row.type != TYPE_COMMENT}
+
+
+def test_self_owned_review_type_matches_affiliate_order(tmp_path: Path) -> None:
+    job = make_job(cafe="고요한아침", board="가입인사", with_daily=False)
+    job.account = "selfwriter"
+    job.article_type = "후기형"
+    book = recognize_proxy_workbook(write_proxy_xlsx(tmp_path))
+    rng = random.Random(2)
+    chosen = rng.sample(book.self_comment_accounts(), 6)
+    rows = build_master_rows(job, proxy_book=book, rng=random.Random(2))
+
+    comments = [row for row in rows if row.type == TYPE_COMMENT]
+    replies = [row for row in rows if row.type == TYPE_REPLY]
+    assert comments[1].account == chosen[1].account
+    assert replies[2].account == chosen[2].account
+    assert replies[3].account == "selfwriter"
+    assert replies[0].account == "selfwriter"
+    assert replies[1].account == "selfwriter"
+    assert not {row.account for row in comments} & {f"c{i}" for i in range(1, 7)}
 
 
 def test_missing_author_is_explained(tmp_path: Path) -> None:
@@ -1102,6 +1156,36 @@ def test_missing_author_is_explained(tmp_path: Path) -> None:
     book = recognize_proxy_workbook(write_proxy_xlsx(tmp_path))
     result = build_gatling_master(brand, manuscript_only=True, proxy_book=book)
     assert any("프록시 엑셀에서 찾지 못했습니다" in item for item in result.skipped)
+
+
+def test_too_few_self_comment_accounts_raises(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{QUESTION_SOURCE}",고요한아침,selfwriter,질문형,,,,,가입인사\n',
+    )
+    book = recognize_proxy_workbook(
+        write_proxy_xlsx(tmp_path, self_comment_count=2)
+    )
+    with pytest.raises(GatlingPasteError, match="자사 카페 댓글 아이디가 6개"):
+        build_gatling_master(brand, manuscript_only=True, proxy_book=book)
+
+
+def test_self_comment_pool_drops_affiliate_ids(tmp_path: Path) -> None:
+    path = tmp_path / "mixed.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["아이피:포트", "크롬번", "아이디", "비번", "카테고리"])
+    sheet.append(["10.0.0.2:3030", 10, "selfwriter", "pw-self", "자사"])
+    for offset, name in enumerate(["s1", "s2", "s3", "s4", "s5", "quilliant"]):
+        sheet.append(
+            [f"10.0.0.{offset + 31}:3030", 31 + offset, name, f"pw-{name}", "자사 댓"]
+        )
+    workbook.save(path)
+    book = recognize_proxy_workbook(path)
+    names = {item.account for item in book.self_comment_accounts()}
+    assert "quilliant" not in names
+    assert names == {"s1", "s2", "s3", "s4", "s5"}
 
 
 def test_too_few_comment_accounts_raises(tmp_path: Path) -> None:

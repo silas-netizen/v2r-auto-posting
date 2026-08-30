@@ -19,10 +19,13 @@ KNOWN_AFFILIATE_COMMENT_IDS = {
     "colpith",
 }
 AFFILIATE_COMMENT_COUNT = 6
+COMMENT_ID_COUNT = AFFILIATE_COMMENT_COUNT
 KIND_AFFILIATE_AUTHOR = "affiliate_author"
 KIND_AFFILIATE_COMMENT = "affiliate_comment"
 KIND_SELF_AUTHOR = "self_author"
+KIND_SELF_COMMENT = "self_comment"
 KIND_OTHER = "other"
+COMMENT_KINDS = {KIND_AFFILIATE_COMMENT, KIND_SELF_COMMENT}
 
 ID_HEADERS = {"아이디", "id", "계정", "작성계정"}
 PASSWORD_HEADERS = {"비번", "비밀번호", "패스워드", "password", "pwd"}
@@ -32,6 +35,7 @@ IP_HEADERS = {"아이피:포트", "아이피", "ip", "프록시", "proxy"}
 AFFILIATE_AUTHOR_CATEGORIES = {"제휴"}
 AFFILIATE_COMMENT_CATEGORIES = {"제휴 댓", "제휴댓", "제휴 댓글", "제휴댓글"}
 SELF_AUTHOR_CATEGORIES = {"자사"}
+SELF_COMMENT_CATEGORIES = {"자사 댓", "자사댓", "자사 댓글", "자사댓글"}
 AFFILIATE_CAFES = {"씨씨앙", "양평맘"}
 
 
@@ -63,7 +67,31 @@ class ProxyBook:
     recognized: bool = False
 
     def comment_accounts(self) -> list[ProxyAccount]:
-        return [item for item in self.accounts if item.kind == KIND_AFFILIATE_COMMENT]
+        blocked = {
+            item.account.casefold()
+            for item in self.accounts
+            if item.kind == KIND_SELF_COMMENT
+        }
+        return [
+            item
+            for item in self.accounts
+            if item.kind == KIND_AFFILIATE_COMMENT
+            and item.account.casefold() not in blocked
+        ]
+
+    def self_comment_accounts(self) -> list[ProxyAccount]:
+        blocked = {
+            item.account.casefold()
+            for item in self.accounts
+            if item.kind == KIND_AFFILIATE_COMMENT
+        }
+        blocked.update(KNOWN_AFFILIATE_COMMENT_IDS)
+        return [
+            item
+            for item in self.accounts
+            if item.kind == KIND_SELF_COMMENT
+            and item.account.casefold() not in blocked
+        ]
 
     def affiliate_authors(self) -> list[ProxyAccount]:
         return [item for item in self.accounts if item.kind == KIND_AFFILIATE_AUTHOR]
@@ -87,7 +115,7 @@ class ProxyBook:
         else:
             preferred = [item for item in matches if item.kind == KIND_SELF_AUTHOR]
         authors_only = [
-            item for item in matches if item.kind != KIND_AFFILIATE_COMMENT
+            item for item in matches if item.kind not in COMMENT_KINDS
         ]
         return (preferred or authors_only or matches)[0]
 
@@ -119,13 +147,19 @@ def _header_index(headers: list[str], candidates: set[str]) -> int:
     return -1
 
 
+def _category_matches(label: str, compact: str, candidates: set[str]) -> bool:
+    if label in candidates:
+        return True
+    return compact in {item.replace(" ", "") for item in candidates}
+
+
 def _kind_from_category(category: str, account: str) -> str:
     label = _cell(category)
     compact = label.replace(" ", "")
-    if label in AFFILIATE_COMMENT_CATEGORIES or compact in {
-        item.replace(" ", "") for item in AFFILIATE_COMMENT_CATEGORIES
-    }:
+    if _category_matches(label, compact, AFFILIATE_COMMENT_CATEGORIES):
         return KIND_AFFILIATE_COMMENT
+    if _category_matches(label, compact, SELF_COMMENT_CATEGORIES):
+        return KIND_SELF_COMMENT
     if label in AFFILIATE_AUTHOR_CATEGORIES:
         return KIND_AFFILIATE_AUTHOR
     if label in SELF_AUTHOR_CATEGORIES:
@@ -230,16 +264,23 @@ def recognize_proxy_workbook(path: str | Path) -> ProxyBook:
             ),
         )
     comments = sum(1 for item in accounts if item.kind == KIND_AFFILIATE_COMMENT)
+    self_comments = sum(1 for item in accounts if item.kind == KIND_SELF_COMMENT)
     affiliate_authors = sum(1 for item in accounts if item.kind == KIND_AFFILIATE_AUTHOR)
     self_authors = sum(1 for item in accounts if item.kind == KIND_SELF_AUTHOR)
     message = (
         f"프록시 엑셀로 확인했습니다. 제휴 작성 {affiliate_authors}개 / "
-        f"제휴 댓글 {comments}개 / 자사 {self_authors}개"
+        f"제휴 댓글 {comments}개 / 자사 작성 {self_authors}개 / "
+        f"자사 댓글 {self_comments}개"
     )
-    if comments and comments < AFFILIATE_COMMENT_COUNT:
+    if comments and comments < COMMENT_ID_COUNT:
         message += (
             f". 양평맘·씨씨앙 댓글을 넣으려면 제휴 댓글 아이디가 "
-            f"{AFFILIATE_COMMENT_COUNT}개 필요합니다"
+            f"{COMMENT_ID_COUNT}개 필요합니다"
+        )
+    if self_comments and self_comments < COMMENT_ID_COUNT:
+        message += (
+            f". 자사 카페 댓글을 넣으려면 자사 댓글 아이디가 "
+            f"{COMMENT_ID_COUNT}개 필요합니다"
         )
     return ProxyBook(path=file_path, accounts=accounts, message=message, recognized=True)
 
@@ -260,19 +301,21 @@ def article_kind(article_type: str) -> str:
     return ""
 
 
-def _affiliate_comment_map(
+def _comment_id_map(
     job,
     comment_accounts: list[ProxyAccount],
     rng: random.Random,
+    *,
+    pool_label: str,
 ) -> dict[str, ProxyAccount]:
     if not job.article.comments:
         return {}
-    if len(comment_accounts) < AFFILIATE_COMMENT_COUNT:
+    if len(comment_accounts) < COMMENT_ID_COUNT:
         raise _proxy_error(
-            f"양평맘·씨씨앙 댓글 아이디가 {AFFILIATE_COMMENT_COUNT}개 필요합니다. "
+            f"{pool_label} 댓글 아이디가 {COMMENT_ID_COUNT}개 필요합니다. "
             f"지금 {len(comment_accounts)}개입니다"
         )
-    chosen = rng.sample(comment_accounts, AFFILIATE_COMMENT_COUNT)
+    chosen = rng.sample(comment_accounts, COMMENT_ID_COUNT)
     special_label = "대대댓글2" if article_kind(job.article_type) == "후기형" else "대대대댓글2"
     labels = ("댓글1", "댓글2", special_label, "댓글3", "댓글4", "댓글5")
     return dict(zip(labels, chosen))
@@ -297,17 +340,41 @@ def account_for_comment_node(
     return author
 
 
+def author_from_sheet(job, book: ProxyBook | None) -> ProxyAccount | None:
+    """본문·대댓글 계정은 시트 작성계정만. 프록시 자사/제휴를 아무거나 쓰지 않는다."""
+    name = (getattr(job, "account", None) or "").strip()
+    if not name:
+        return None
+    cafe = getattr(job, "cafe", "") or ""
+    if book is not None:
+        found = book.find_author(name, cafe)
+        if found and found.account.casefold() == name.casefold():
+            return found
+    return ProxyAccount(account=name)
+
+
 def resolve_job_accounts(
     job,
     book: ProxyBook | None,
     rng: random.Random | None = None,
 ) -> tuple[ProxyAccount | None, dict[str, ProxyAccount]]:
-    if book is None:
-        return None, {}
-    author = book.find_author(job.account, job.cafe)
+    author = author_from_sheet(job, book)
     comment_map: dict[str, ProxyAccount] = {}
-    if _is_affiliate_cafe(job.cafe) and job.article.comments:
-        comment_map = _affiliate_comment_map(
-            job, book.comment_accounts(), rng or random.SystemRandom()
+    if book is None or not job.article.comments:
+        return author, comment_map
+    rng = rng or random.SystemRandom()
+    if _is_affiliate_cafe(job.cafe):
+        comment_map = _comment_id_map(
+            job,
+            book.comment_accounts(),
+            rng,
+            pool_label="양평맘·씨씨앙",
+        )
+    else:
+        comment_map = _comment_id_map(
+            job,
+            book.self_comment_accounts(),
+            rng,
+            pool_label="자사 카페",
         )
     return author, comment_map
