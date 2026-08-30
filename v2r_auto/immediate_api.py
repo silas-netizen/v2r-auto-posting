@@ -190,11 +190,20 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
             }
             if token:
                 query["next_token"] = token
-            response = self._request(
-                "GET",
-                "/naver_cafe_articles/board_histories",
-                query=query,
-            )
+            try:
+                response = self._request(
+                    "GET",
+                    "/naver_cafe_articles/board_histories",
+                    query=query,
+                )
+            except AffiliateApiError as exc:
+                if "(404)" not in str(exc):
+                    raise
+                self.logger.warning(
+                    "V2R 최근 실패 이력 API를 사용할 수 없어 "
+                    "이력 검사를 생략하고 현재 작업을 계속합니다"
+                )
+                return
             for row in response.get("histories", []):
                 if row.get("status") != "FAIL":
                     continue

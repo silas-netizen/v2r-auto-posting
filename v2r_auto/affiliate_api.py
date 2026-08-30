@@ -457,9 +457,18 @@ class AffiliateApiPublisher:
             }
             if token:
                 query["next_token"] = token
-            response = self._request(
-                "GET", "/naver_cafe_articles/board_histories", query=query
-            )
+            try:
+                response = self._request(
+                    "GET", "/naver_cafe_articles/board_histories", query=query
+                )
+            except AffiliateApiError as exc:
+                if "(404)" not in str(exc):
+                    raise
+                self.logger.warning(
+                    "V2R 최근 발행 이력 API를 사용할 수 없어 "
+                    "계정 사용순서 확인을 생략합니다"
+                )
+                return {}
             rows.extend(response.get("histories", []))
             token = response.get("next_token")
             if not token:

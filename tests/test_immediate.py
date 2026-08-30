@@ -6,6 +6,7 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
+from v2r_auto.affiliate_api import AffiliateApiError
 from v2r_auto.immediate_api import (
     BOARD_ALIASES,
     MANAGER_ACCOUNTS,
@@ -321,6 +322,20 @@ class FakeImmediatePublisher(ImmediateApiPublisher):
                 ]
             }
         raise AssertionError((method, path, query))
+
+
+def test_missing_history_endpoint_does_not_block_current_jobs() -> None:
+    class MissingHistoryPublisher(ImmediateApiPublisher):
+        def _request(self, method, path, payload=None, query=None):
+            raise AffiliateApiError(
+                "V2R 요청 실패 (404): "
+                "/naver_cafe_articles/board_histories - Not Found"
+            )
+
+    publisher = MissingHistoryPublisher(None, logging.getLogger("history-404"))
+
+    publisher._scan_recent_failures(10174516)
+    assert publisher._last_used(10174516) == {}
 
 
 def test_account_tests_resolve_registration_membership_and_alternate_cafes(
