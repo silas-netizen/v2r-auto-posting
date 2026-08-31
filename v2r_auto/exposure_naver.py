@@ -241,7 +241,24 @@ return Array.from(root.querySelectorAll('a[href*="cafe.naver.com"]'))
   .filter(Boolean);
 """
 INTEGRATED_WHERE = {"", "nexearch"}
-RESULT_SCROLL_ROUNDS = 2
+RESULT_SCROLL_ROUNDS = 24
+RESULT_SCROLL_PAUSE = 0.4
+RESULT_SCROLL_STEP_JS = r"""
+const root = document.querySelector('#main_pack');
+if (!root) return {done: true, height: 0, y: 0};
+const view = window.innerHeight || 800;
+const before = window.scrollY;
+window.scrollBy(0, Math.floor(view * 0.85));
+const y = window.scrollY;
+const docH = Math.max(
+  document.body ? document.body.scrollHeight : 0,
+  document.documentElement ? document.documentElement.scrollHeight : 0
+);
+const packBottom = root.getBoundingClientRect().bottom + window.scrollY;
+const limit = Math.max(docH, packBottom);
+const atEnd = (y + view) >= (limit - 12) || y <= before;
+return {done: atEnd, height: docH, y: y};
+"""
 
 
 def is_naver_logged_in_cookies(cookies) -> bool:
@@ -1160,22 +1177,20 @@ class SeleniumNaverSearch:
 
     def _scroll_result_column(self, driver, rounds: int = RESULT_SCROLL_ROUNDS) -> None:
         last_height = 0
+        stable = 0
         for _ in range(max(1, rounds)):
             try:
-                height = driver.execute_script(
-                    """
-                    const root = document.querySelector('#main_pack');
-                    if (!root) return 0;
-                    const bottom = root.getBoundingClientRect().bottom + window.scrollY;
-                    window.scrollTo(0, bottom);
-                    return document.body.scrollHeight;
-                    """
-                )
+                state = driver.execute_script(RESULT_SCROLL_STEP_JS) or {}
             except Exception:
                 return
-            time.sleep(0.28)
-            if height == last_height:
-                break
+            time.sleep(RESULT_SCROLL_PAUSE)
+            height = int(state.get("height") or 0)
+            if state.get("done") and height == last_height:
+                stable += 1
+                if stable >= 2:
+                    break
+            else:
+                stable = 0
             last_height = height
 
     def _visible_text(self, driver) -> str:
