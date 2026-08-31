@@ -8,7 +8,7 @@ from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
-from .cafe_catalog import normalized_name
+from .cafe_catalog import korean_name, normalized_name
 from .content import CommentNode, ContentFormatError, ParsedArticle, parse_article
 from .daily_posts import DailyPostSheetError, load_daily_posts
 from .gatling_accounts import (
@@ -39,6 +39,64 @@ AFFILIATE_EXACT_BOARDS = {
 AFFILIATE_BOARD_LINKS = {
     "씨씨앙": "https://cafe.naver.com/f-e/cafes/25016228/menus/328?viewType=L",
     "양평맘": "https://cafe.naver.com/f-e/cafes/22788814/menus/14?viewType=L",
+}
+SELF_OWNED_CAFE_IDS = {
+    "러브인썸": 26616683,
+    "마이웨딩드림": 26680163,
+}
+SELF_OWNED_DEFAULT_MENUS = {
+    "러브인썸": 18,
+    "마이웨딩드림": 5,
+}
+SELF_OWNED_BOARD_MENUS: dict[str, dict[str, int]] = {
+    "러브인썸": {
+        normalized_name("뷰티&미용"): 18,
+        normalized_name("인썸 수다방"): 5,
+        normalized_name("인썸 고민방"): 6,
+        normalized_name("가입인사"): 14,
+        normalized_name("웨딩 준비"): 15,
+        normalized_name("신혼 생활"): 16,
+        normalized_name("신혼여행 후기"): 17,
+        normalized_name("신혼집 인테리어"): 19,
+        normalized_name("일상 TALK"): 20,
+        normalized_name("웨딩홀 투어 후기"): 22,
+        normalized_name("드레스 골라주세요"): 23,
+        normalized_name("촬영·스냅 후기"): 24,
+        normalized_name("헤어·메이크업 후기"): 25,
+        normalized_name("예물·예단·예복"): 26,
+        normalized_name("준비 질문 있어요"): 27,
+        normalized_name("업체 견적 비교"): 28,
+        normalized_name("신혼 가전 후기"): 29,
+        normalized_name("살림 노하우"): 30,
+        normalized_name("신혼 일기장"): 31,
+        normalized_name("맛집·데이트"): 32,
+        normalized_name("커플 이야기"): 33,
+        normalized_name("혜택·이벤트 소식"): 34,
+    },
+    "마이웨딩드림": {
+        normalized_name("웨딩홀 탐방기"): 5,
+        normalized_name("웨딩홀탑방기"): 5,
+        normalized_name("뷰티&다이어트"): 1,
+        normalized_name("웨딩 이야기"): 13,
+        normalized_name("마웨드 일상"): 14,
+        normalized_name("첫 인사"): 15,
+        normalized_name("드레스 투어 리뷰"): 16,
+        normalized_name("맛집·데이트 코스"): 17,
+        normalized_name("부부 이야기"): 18,
+        normalized_name("톡톡 수다방"): 21,
+        normalized_name("고민 나누기"): 22,
+        normalized_name("스냅·촬영 리뷰"): 23,
+        normalized_name("헤어메이크업 리뷰"): 24,
+        normalized_name("예물·예단·예복 정보"): 25,
+        normalized_name("준비 Q&A"): 26,
+        normalized_name("견적 비교"): 27,
+        normalized_name("신혼 이야기"): 30,
+        normalized_name("허니문 다녀왔어요"): 31,
+        normalized_name("신혼집 꾸미기"): 32,
+        normalized_name("가전 사용기"): 33,
+        normalized_name("살림 꿀팁"): 34,
+        normalized_name("신혼 일기"): 35,
+    },
 }
 KNOWN_EXACT_BOARDS = (
     "자유 수다방",
@@ -213,6 +271,38 @@ def is_affiliate_cafe(cafe: str) -> bool:
 def affiliate_board_link(cafe: str) -> str:
     """양평맘·씨씨앙 새글 링크 열에 넣는 게시판 주소."""
     return AFFILIATE_BOARD_LINKS.get((cafe or "").strip(), "")
+
+
+def _menu_board_url(cafe_id: int, menu_id: int) -> str:
+    return f"https://cafe.naver.com/f-e/cafes/{cafe_id}/menus/{menu_id}?viewType=L"
+
+
+def self_owned_cafe_key(cafe: str) -> str:
+    hangul = korean_name(cafe)
+    compact = normalized_name(cafe)
+    for key in SELF_OWNED_CAFE_IDS:
+        if hangul == key or compact == normalized_name(key) or hangul.startswith(key):
+            return key
+    return ""
+
+
+def self_owned_board_link(cafe: str, board: str = "") -> str:
+    """러브인썸·마이웨딩드림 새글 링크 열에 넣는 게시판 주소."""
+    key = self_owned_cafe_key(cafe)
+    if not key:
+        return ""
+    cafe_id = SELF_OWNED_CAFE_IDS[key]
+    wanted = normalized_name(board)
+    menus = SELF_OWNED_BOARD_MENUS.get(key, {})
+    if wanted:
+        menu_id = menus.get(wanted)
+        if menu_id is None:
+            alias = BOARD_NAME_ALIASES.get(wanted)
+            if alias:
+                menu_id = menus.get(normalized_name(alias))
+        if menu_id is not None:
+            return _menu_board_url(cafe_id, menu_id)
+    return _menu_board_url(cafe_id, SELF_OWNED_DEFAULT_MENUS[key])
 
 
 def exact_board_name(
@@ -1067,7 +1157,7 @@ def build_master_rows(
                 body=job.article.body,
                 job=job,
                 board_name=board_name,
-                link=article_url,
+                link=self_owned_board_link(job.cafe, job.board) or article_url,
                 with_hashtag=True,
                 image_location=image_location,
                 author=author,

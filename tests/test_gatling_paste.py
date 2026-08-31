@@ -13,6 +13,7 @@ from v2r_auto.gatling_accounts import (
 from v2r_auto.images import ResolvedImage
 from v2r_auto.gatling_paste import (
     AFFILIATE_BOARD_LINKS,
+    SELF_OWNED_CAFE_IDS,
     AFFILIATE_EXACT_BOARDS,
     MASTER_HEADER_ROW,
     MASTER_HEADERS,
@@ -38,6 +39,7 @@ from v2r_auto.gatling_paste import (
     replace_image_tokens,
     reply_target_value,
     require_writable_gatling,
+    self_owned_board_link,
 )
 from v2r_auto.models import DailyPost
 
@@ -233,6 +235,39 @@ def test_affiliate_new_post_gets_board_link_only() -> None:
     assert all(row.link != AFFILIATE_BOARD_LINKS["양평맘"] for row in yang[1:])
     assert self_owned[0].type == TYPE_NEW_POST
     assert self_owned[0].link is None
+
+
+def test_self_owned_new_post_gets_board_link() -> None:
+    love = build_master_rows(
+        make_job(cafe="러브인썸", board="뷰티미용", with_daily=False)
+    )
+    wedding = build_master_rows(
+        make_job(cafe="마이 웨딩 드림", board="웨딩홀탐방기", with_daily=False)
+    )
+    love_home = build_master_rows(
+        make_job(cafe="러브 인썸 (Love in Some)", board="뷰티&미용", with_daily=False)
+    )
+
+    assert love[0].type == TYPE_NEW_POST
+    assert love[0].link == (
+        f"https://cafe.naver.com/f-e/cafes/{SELF_OWNED_CAFE_IDS['러브인썸']}"
+        "/menus/18?viewType=L"
+    )
+    assert wedding[0].link == (
+        f"https://cafe.naver.com/f-e/cafes/{SELF_OWNED_CAFE_IDS['마이웨딩드림']}"
+        "/menus/5?viewType=L"
+    )
+    assert love_home[0].link == love[0].link
+    assert all(
+        row.link != love[0].link for row in love[1:] if row.type != TYPE_NEW_POST
+    )
+
+
+def test_self_owned_board_link_follows_sheet_board() -> None:
+    assert self_owned_board_link("러브인썸", "신혼 가전 후기").endswith("/menus/29?viewType=L")
+    assert self_owned_board_link("마이웨딩드림", "웨딩홀탑방기").endswith("/menus/5?viewType=L")
+    assert self_owned_board_link("러브인썸", "").endswith("/menus/18?viewType=L")
+    assert self_owned_board_link("고요한아침", "가입인사") == ""
 
 
 def test_affiliate_without_daily_post_raises() -> None:
