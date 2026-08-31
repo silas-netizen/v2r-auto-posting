@@ -271,11 +271,13 @@ def test_self_owned_board_link_is_one_url_per_cafe() -> None:
     assert self_owned_board_link("송도포털") == SELF_OWNED_BOARD_LINKS["송도포털"]
     assert self_owned_board_link("글로시 마이") == SELF_OWNED_BOARD_LINKS["글로시마이"]
     assert self_owned_board_link("웨딩 노트") == SELF_OWNED_BOARD_LINKS["웨딩노트"]
+    assert self_owned_board_link("쌍둥이맘 모여라") == SELF_OWNED_BOARD_LINKS["쌍둥이맘모여라"]
     assert SELF_OWNED_BOARD_LINKS["고요한아침"].endswith("/menus/29?viewType=L")
     assert SELF_OWNED_BOARD_LINKS["헬씨트리"].endswith("/menus/27?viewType=L")
     assert SELF_OWNED_BOARD_LINKS["송도포털"].endswith("/menus/19?viewType=L")
     assert SELF_OWNED_BOARD_LINKS["글로시마이"].endswith("/menus/50?viewType=L")
     assert SELF_OWNED_BOARD_LINKS["웨딩노트"].endswith("/menus/32?viewType=L")
+    assert SELF_OWNED_BOARD_LINKS["쌍둥이맘모여라"].endswith("/menus/664?viewType=L")
     assert self_owned_board_link("없는카페") == ""
 
 
@@ -289,6 +291,11 @@ def test_new_self_owned_cafes_write_stored_board_link() -> None:
         make_job(cafe="송도포털", board="친해지는 수다", with_daily=False)
     )
     assert songdo[0].link == SELF_OWNED_BOARD_LINKS["송도포털"]
+    twin = build_master_rows(
+        make_job(cafe="쌍둥이맘 모여라", board="ㄴ가족업체 자유게시판", with_daily=False)
+    )
+    assert twin[0].link == SELF_OWNED_BOARD_LINKS["쌍둥이맘모여라"]
+    assert twin[0].board_name == "ㄴ가족업체 자유게시판"
 
 
 def test_affiliate_without_daily_post_raises() -> None:
