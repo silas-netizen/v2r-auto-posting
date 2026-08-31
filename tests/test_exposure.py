@@ -199,6 +199,25 @@ def test_html_without_main_pack_is_never_our_hit() -> None:
     assert collect_our_cafe_hits(html, list(DEFAULT_CAFE_NAMES)) == []
 
 
+def test_inner_template_footer_does_not_cut_cafe_card() -> None:
+    html = """
+    <div id="main_pack">
+      <div data-template-id="footer">더보기</div>
+      <a href="https://cafe.naver.com/cantsb">씨씨앙</a>
+      <a href="https://cafe.naver.com/cantsb/3476582"
+         data-heatmap-target=".link">파라다이스그레인 버닝 3개월</a>
+    </div>
+    <div id="sub_pack"><a href="https://cafe.naver.com/cantsb/1">내 카페</a></div>
+    """
+    result = search_result_html(html)
+    assert "3476582" in result
+    assert "cantsb/1" not in result
+    hits = collect_our_cafe_hits(html, list(DEFAULT_CAFE_NAMES))
+    assert [hit.url.split("?")[0] for hit in hits] == [
+        "https://cafe.naver.com/cantsb/3476582"
+    ]
+
+
 def test_search_result_html_drops_header_cafe_widget() -> None:
     html = """
     <div id="header"><a href="https://cafe.naver.com/cantsb">씨씨앙</a></div>
@@ -277,6 +296,62 @@ def test_keep_visible_matches_mixed_url_formats() -> None:
     assert [hit.cafe_name for hit in keep_visible_cafe_hits([html_hit], visible)] == [
         "씨씨앙"
     ]
+
+
+def test_merge_does_not_recover_series_sub_url() -> None:
+    sub = "https://cafe.naver.com/cantsb/3478442"
+    html = _pack(
+        f'<a href="{sub}" data-heatmap-target=".series">묶음 글</a>'
+    )
+    hits = merge_visible_our_cafe_hits(
+        [],
+        [sub],
+        list(DEFAULT_CAFE_NAMES),
+        html,
+    )
+    assert hits == []
+
+
+def test_paradise_cluster_sub_with_brand_is_hidden() -> None:
+    main = "https://cafe.naver.com/cantsb/3476582"
+    sub = "https://cafe.naver.com/cantsb/3478442"
+    html = _pack(f"""
+    <div data-template-id="footer">더보기</div>
+    <a href="https://cafe.naver.com/cantsb">씨씨앙</a>
+    <a href="{main}" data-heatmap-target=".link">
+      파라다이스그레인 버닝 3개월 먹어보고 효능 먹는법
+    </a>
+    <a href="{sub}" data-heatmap-target=".series">묶음 처리된 내 글</a>
+    """)
+    updated = []
+    opened = []
+
+    class FakeNotion:
+        def update_check_result(
+            self, row, *, status, cafe_name=None, search_volume=None, volume_found=False
+        ):
+            updated.append((status, cafe_name))
+
+    naver = FakeNaver(
+        html,
+        {main: "일반 글", sub: "본문에 팥순추출물 후기"},
+        visible_urls=[main, sub],
+    )
+    original_open = naver.open_post_text
+
+    def tracked_open(url: str) -> str:
+        opened.append(url.split("?")[0])
+        return original_open(url)
+
+    naver.open_post_text = tracked_open
+    ExposureChecker(
+        FakeNotion(),
+        naver,
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    ).run([_row("파라다이스 그레인 효능 먹는법", "밀려남")], dry_run=False)
+    assert opened == [main]
+    assert updated[-1][0] == "밀려남"
 
 
 def test_visible_club_url_recovers_html_miss() -> None:
@@ -1326,12 +1401,17 @@ def test_notion_uses_title_when_keyword_cell_is_empty() -> None:
 
 
 def test_result_scroll_moves_by_viewport() -> None:
-    from v2r_auto.exposure_naver import RESULT_SCROLL_ROUNDS, RESULT_SCROLL_STEP_JS
+    from v2r_auto.exposure_naver import (
+        RESULT_SCROLL_ROUNDS,
+        RESULT_SCROLL_STEP_JS,
+        VISIBLE_CAFE_LINKS_JS,
+    )
 
     assert RESULT_SCROLL_ROUNDS >= 12
     assert "scrollBy" in RESULT_SCROLL_STEP_JS
     assert "innerHeight" in RESULT_SCROLL_STEP_JS
     assert "scrollTo(0, bottom)" not in RESULT_SCROLL_STEP_JS
+    assert "series" in VISIBLE_CAFE_LINKS_JS
 
 
 def test_naver_login_detected_from_cookies() -> None:

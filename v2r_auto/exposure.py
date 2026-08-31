@@ -512,7 +512,7 @@ def search_result_html(html: str) -> str:
     start = match.start()
     rest = text[start:]
     stop = re.search(
-        r'(?is)<(?:div|aside|footer)[^>]*\bid=["\'](?:sub_pack|footer|aside)["\']',
+        r'(?is)<(?:div|aside|footer)\b[^>]*\sid=["\'](?:sub_pack|footer|aside)["\']',
         rest[len(match.group(0)) :],
     )
     if stop:
@@ -582,12 +582,34 @@ def keep_visible_cafe_hits(
     return [hit for hit in hits if article_dedupe_key(hit.url) in keys]
 
 
+def clustered_sub_article_keys(html: str) -> set[str]:
+    """같은 카페 묶음의 서브 글 주소. 대표 글이 아니다."""
+    source = search_result_html(html)
+    keys: set[str] = set()
+    if not source.strip():
+        return keys
+    for match in _ANCHOR_RE.finditer(source):
+        if not is_clustered_sub_result(match.group(0)):
+            continue
+        href = _absolute_url(match.group(1))
+        if is_cafe_article_url(href):
+            keys.add(article_dedupe_key(href))
+    return keys
+
+
 def merge_visible_our_cafe_hits(
     html_hits: list[CafeHit],
     visible_urls: list[str] | None,
     cafe_names: list[str],
+    html: str = "",
 ) -> list[CafeHit]:
-    """HTML에서 묶은 글 + 화면 주소만으로 우리 카페임이 밝혀진 글."""
+    """HTML에서 묶은 글 + 화면 주소만으로 우리 카페임이 밝혀진 글. 묶음 서브는 넣지 않는다."""
+    skip = clustered_sub_article_keys(html)
+    visible_urls = [
+        url
+        for url in (visible_urls or [])
+        if url and article_dedupe_key(url) not in skip
+    ]
     hits = keep_visible_cafe_hits(html_hits, visible_urls)
     if not visible_urls:
         return hits
@@ -595,6 +617,8 @@ def merge_visible_our_cafe_hits(
     for url in visible_urls:
         text = str(url or "").strip()
         if not text or not is_cafe_article_url(text):
+            continue
+        if article_dedupe_key(text) in skip:
             continue
         cafe = cafe_name_from_url(text, cafe_names)
         if not cafe:
@@ -724,8 +748,11 @@ class ExposureChecker:
             except Exception as exc:
                 self.logger.warning("통검 화면 글 확인 실패: %s", exc)
                 visible_urls = []
+        skipped_subs = clustered_sub_article_keys(html)
+        if skipped_subs:
+            self.logger.info("같은 카페 묶음의 서브 글은 제외합니다")
         hits = merge_visible_our_cafe_hits(
-            html_hits, visible_urls, self.cafe_names
+            html_hits, visible_urls, self.cafe_names, html
         )
         if html_hits and len(hits) < len(html_hits):
             kept = {article_dedupe_key(hit.url) for hit in hits}

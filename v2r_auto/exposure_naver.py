@@ -237,6 +237,10 @@ const root = document.querySelector('#main_pack');
 if (!root) return [];
 return Array.from(root.querySelectorAll('a[href*="cafe.naver.com"]'))
   .filter(visible)
+  .filter((a) => {
+    const t = (a.getAttribute('data-heatmap-target') || '').toLowerCase();
+    return t !== '.series' && !t.includes('series');
+  })
   .map((a) => a.href || '')
   .filter(Boolean);
 """
