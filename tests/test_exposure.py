@@ -97,6 +97,11 @@ def test_parse_cafes_uses_defaults() -> None:
     cafes = parse_cafes("")
     assert "씨씨앙" in cafes
     assert "러브인썸" in cafes
+    assert "마이웨딩드림" in cafes
+    assert "고요한아침" in cafes
+    assert "헬씨트리" in cafes
+    assert "쌍둥이맘모여라" in cafes
+    assert "우아한갱년기" not in cafes
 
 
 def test_database_id_from_notion_url() -> None:
@@ -143,6 +148,10 @@ def test_strip_parenthetical_keeps_search_keyword() -> None:
 def test_cafe_name_ignores_spaces() -> None:
     assert matching_cafe_name("러브 인썸 카페", list(DEFAULT_CAFE_NAMES)) == "러브인썸"
     assert matching_cafe_name("마이 웨딩 드림", list(DEFAULT_CAFE_NAMES)) == "마이웨딩드림"
+    assert matching_cafe_name("헬씨 트리", list(DEFAULT_CAFE_NAMES)) == "헬씨트리"
+    assert matching_cafe_name("글로시 마이", list(DEFAULT_CAFE_NAMES)) == "글로시마이"
+    assert matching_cafe_name("웨딩 노트", list(DEFAULT_CAFE_NAMES)) == "웨딩노트"
+    assert matching_cafe_name("쌍둥이맘 모여라", list(DEFAULT_CAFE_NAMES)) == "쌍둥이맘모여라"
     assert matching_cafe_name("다른카페", list(DEFAULT_CAFE_NAMES)) == ""
 
 
@@ -188,6 +197,75 @@ def test_collects_only_our_cafe_articles() -> None:
     assert [hit.cafe_name for hit in hits] == ["러브인썸"]
     assert hits[0].url.endswith("/loveinsome/99")
     assert all("othercafe" not in hit.url for hit in hits)
+
+
+def test_loveinsome_real_slug_is_our_cafe() -> None:
+    url = "https://cafe.naver.com/fik50kjkc/914"
+    assert cafe_name_from_url(url, list(DEFAULT_CAFE_NAMES)) == "러브인썸"
+    html = _pack(
+        '<a href="https://cafe.naver.com/fik50kjkc">러브 인썸 (Love in Some)</a>'
+        '<a href="https://cafe.naver.com/fik50kjkc/914">마이해빗 혈당컷</a>'
+    )
+    hits = collect_our_cafe_hits(html, list(DEFAULT_CAFE_NAMES))
+    assert [hit.cafe_name for hit in hits] == ["러브인썸"]
+    assert hits[0].url.endswith("/fik50kjkc/914")
+
+
+def test_same_cafe_slug_pairs_when_home_anchor_is_just_outside_card() -> None:
+    pad = "<!--" + ("가" * 2600) + "-->"
+    html = _pack(
+        '<a href="https://cafe.naver.com/unknownlove">러브 인썸 (Love in Some)</a>'
+        + pad
+        + '<a href="https://cafe.naver.com/unknownlove/914">마이해빗 혈당컷</a>'
+    )
+    hits = collect_our_cafe_hits(html, list(DEFAULT_CAFE_NAMES))
+    assert [hit.cafe_name for hit in hits] == ["러브인썸"]
+    assert hits[0].url.endswith("/unknownlove/914")
+
+
+def test_visible_loveinsome_slug_is_kept() -> None:
+    url = "https://cafe.naver.com/fik50kjkc/914"
+    hits = merge_visible_our_cafe_hits([], [url], list(DEFAULT_CAFE_NAMES), "")
+    assert [hit.cafe_name for hit in hits] == ["러브인썸"]
+    assert hits[0].url == url
+
+
+def test_target_cafe_live_slugs_are_known() -> None:
+    names = list(DEFAULT_CAFE_NAMES)
+    assert cafe_name_from_url("https://cafe.naver.com/cantsb/1", names) == "씨씨앙"
+    assert cafe_name_from_url("https://cafe.naver.com/yangmom/1", names) == "양평맘"
+    assert cafe_name_from_url("https://cafe.naver.com/fik50kjkc/1", names) == "러브인썸"
+    assert cafe_name_from_url("https://cafe.naver.com/fik505050/1", names) == "마이웨딩드림"
+    assert cafe_name_from_url(
+        "https://cafe.naver.com/f-e/cafes/26680163/articles/1", names
+    ) == "마이웨딩드림"
+    assert cafe_name_from_url("https://cafe.naver.com/singorstar/1", names) == "고요한아침"
+    assert cafe_name_from_url("https://cafe.naver.com/thssa/1", names) == "헬씨트리"
+    assert cafe_name_from_url("https://cafe.naver.com/freemtc/1", names) == "송도포털"
+    assert cafe_name_from_url("https://cafe.naver.com/fsmaples/1", names) == "글로시마이"
+    assert cafe_name_from_url("https://cafe.naver.com/sharfova/1", names) == "웨딩노트"
+    assert cafe_name_from_url("https://cafe.naver.com/getamped2/1", names) == "쌍둥이맘모여라"
+    assert cafe_name_from_url(
+        "https://cafe.naver.com/f-e/cafes/10174516/articles/1", names
+    ) == "쌍둥이맘모여라"
+    assert cafe_name_from_url("https://cafe.naver.com/wgang/1", names) == ""
+
+
+def test_page_cafe_name_binds_unknown_slug_for_any_target() -> None:
+    html = _pack(
+        '<a href="https://cafe.naver.com/newweddingxyz">마이 웨딩 드림</a>'
+        '<a href="https://cafe.naver.com/newweddingxyz/88">우리 글</a>'
+    )
+    names = list(DEFAULT_CAFE_NAMES)
+    hits = collect_our_cafe_hits(html, names)
+    assert [hit.cafe_name for hit in hits] == ["마이웨딩드림"]
+    merged = merge_visible_our_cafe_hits(
+        [],
+        ["https://cafe.naver.com/newweddingxyz/88"],
+        names,
+        html,
+    )
+    assert [hit.cafe_name for hit in merged] == ["마이웨딩드림"]
 
 
 def test_html_without_main_pack_is_never_our_hit() -> None:

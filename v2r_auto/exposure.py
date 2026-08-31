@@ -23,7 +23,12 @@ DEFAULT_CAFE_NAMES = (
     "양평맘",
     "러브인썸",
     "마이웨딩드림",
-    "우아한갱년기",
+    "고요한아침",
+    "헬씨트리",
+    "송도포털",
+    "글로시마이",
+    "웨딩노트",
+    "쌍둥이맘모여라",
 )
 KEYWORD_HEADERS = ("키워드", "검색어", "검색 키워드")
 STATUS_HEADERS = ("노출상태", "노출 상태")
@@ -378,17 +383,42 @@ def is_cafe_article_url(url: str) -> bool:
     return False
 
 
-def known_cafe_name(token: str) -> str:
-    return KNOWN_CAFE_KEYS.get(compact_text(token), "")
+def known_cafe_name(token: str, keys: dict[str, str] | None = None) -> str:
+    return (keys or KNOWN_CAFE_KEYS).get(compact_text(token), "")
 
 
-def cafe_name_from_url(url: str, cafe_names: list[str]) -> str:
+def cafe_keys_from_html(html: str, cafe_names: list[str]) -> dict[str, str]:
+    """저장된 주소 + 이번 통검 카드의 카페 이름 링크로 주소→카페를 묶는다."""
+    keys = dict(KNOWN_CAFE_KEYS)
+    source = search_result_html(html)
+    if not source.strip():
+        return keys
+    for match in _ANCHOR_RE.finditer(source):
+        href = _absolute_url(match.group(1))
+        if "cafe.naver.com" not in href.lower() or is_cafe_article_url(href):
+            continue
+        identity = cafe_identity(href)
+        cafe = matching_cafe_name(_strip_tags(match.group(2)), cafe_names)
+        if not identity or ":" not in identity or not cafe:
+            continue
+        _kind, value = identity.split(":", 1)
+        token = compact_text(value)
+        if token:
+            keys[token] = cafe
+    return keys
+
+
+def cafe_name_from_url(
+    url: str,
+    cafe_names: list[str],
+    keys: dict[str, str] | None = None,
+) -> str:
     """글 주소의 슬러그/카페ID가 우리 카페면 그 이름을 돌려준다."""
     identity = cafe_identity(url)
     if not identity or ":" not in identity:
         return ""
     _kind, value = identity.split(":", 1)
-    known = known_cafe_name(value)
+    known = known_cafe_name(value, keys)
     if not known:
         return ""
     return matching_cafe_name(known, cafe_names)
@@ -497,9 +527,22 @@ KNOWN_CAFE_KEYS = {
     "yangmom": "양평맘",
     "22788814": "양평맘",
     "loveinsome": "러브인썸",
+    "fik50kjkc": "러브인썸",
     "26616683": "러브인썸",
+    "fik505050": "마이웨딩드림",
     "26680163": "마이웨딩드림",
+    "singorstar": "고요한아침",
     "14567700": "고요한아침",
+    "thssa": "헬씨트리",
+    "23708088": "헬씨트리",
+    "freemtc": "송도포털",
+    "16149995": "송도포털",
+    "fsmaples": "글로시마이",
+    "15175096": "글로시마이",
+    "sharfova": "웨딩노트",
+    "15441090": "웨딩노트",
+    "getamped2": "쌍둥이맘모여라",
+    "10174516": "쌍둥이맘모여라",
 }
 
 
@@ -524,6 +567,7 @@ def collect_our_cafe_hits(html: str, cafe_names: list[str]) -> list[CafeHit]:
     source = search_result_html(html)
     if not source.strip():
         return []
+    keys = cafe_keys_from_html(html, cafe_names)
     anchors: list[tuple[int, str, str, str]] = []
     for match in _ANCHOR_RE.finditer(source):
         href = _absolute_url(match.group(1))
@@ -549,7 +593,7 @@ def collect_our_cafe_hits(html: str, cafe_names: list[str]) -> list[CafeHit]:
     for start, href in articles:
         if not cafe_identity(href):
             continue
-        cafe = cafe_name_from_url(href, cafe_names)
+        cafe = cafe_name_from_url(href, cafe_names, keys)
         if not cafe:
             lo = max(0, start - CAFE_CARD_SPAN)
             hi = min(len(source), start + 200)
@@ -557,10 +601,17 @@ def collect_our_cafe_hits(html: str, cafe_names: list[str]) -> list[CafeHit]:
             for home_pos, home_url, home_cafe in homes:
                 if not home_cafe or not same_cafe_identity(home_url, href):
                     continue
-                if lo <= home_pos <= hi:
+                if lo <= home_pos <= hi or matching_cafe_name(
+                    _strip_tags(card), [home_cafe]
+                ):
                     cafe = home_cafe
                     break
-            if not cafe or not matching_cafe_name(_strip_tags(card), [cafe]):
+            if not cafe:
+                for _home_pos, home_url, home_cafe in homes:
+                    if home_cafe and same_cafe_identity(home_url, href):
+                        cafe = home_cafe
+                        break
+            if not cafe:
                 continue
         key = article_dedupe_key(href)
         if key in seen:
@@ -605,6 +656,7 @@ def merge_visible_our_cafe_hits(
 ) -> list[CafeHit]:
     """HTML에서 묶은 글 + 화면 주소만으로 우리 카페임이 밝혀진 글. 묶음 서브는 넣지 않는다."""
     skip = clustered_sub_article_keys(html)
+    keys = cafe_keys_from_html(html, cafe_names)
     visible_urls = [
         url
         for url in (visible_urls or [])
@@ -620,7 +672,7 @@ def merge_visible_our_cafe_hits(
             continue
         if article_dedupe_key(text) in skip:
             continue
-        cafe = cafe_name_from_url(text, cafe_names)
+        cafe = cafe_name_from_url(text, cafe_names, keys)
         if not cafe:
             continue
         key = article_dedupe_key(text)
