@@ -6,6 +6,7 @@ from v2r_auto.nickname_exclude import (
     DEFAULT_KEYWORDS,
     SEARCH_SCOPES,
     NicknameExcludeError,
+    article_ids_from_html,
     article_ids_from_json,
     build_sync_result,
     cafe_id_from_page,
@@ -13,10 +14,13 @@ from v2r_auto.nickname_exclude import (
     cafe_search_url_modern,
     cookies_show_naver_login,
     join_nicknames_lines,
+    last_page_from_html,
     merge_nicknames,
     new_nicknames,
     nicknames_from_html,
     nicknames_from_json,
+    nicknames_from_search_html,
+    nicknames_from_search_payload,
     page_is_missing,
     parse_cafe_address,
     require_keywords,
@@ -228,6 +232,95 @@ def test_search_keeps_going_until_all_pages() -> None:
     assert has_more
     assert article_ids_from_json(payload) == ["11"]
     assert should_stop_search(1, 4, True, 0, 1) is False
-    assert should_stop_search(4, 4, False, 0, 1) is False
+    assert should_stop_search(4, 4, False, 0, 1) is True
     assert should_stop_search(5, 4, False, 2, 0) is True
-    assert should_stop_search(2, None, False, 2, 0) is True
+    assert should_stop_search(2, None, False, 0, 0) is True
+    assert should_stop_search(1, 1, False, 0, 11) is True
+
+
+def test_empty_search_json_ignores_cafe_profile_nicks() -> None:
+    payload = {
+        "result": {
+            "articleList": [],
+            "pageInfo": {
+                "lastNavigationPageNumber": 1,
+                "totalArticleCount": 11,
+                "visibleNextButton": False,
+            },
+        },
+        "cafeInfo": {
+            "manager": {"nickname": "씨씨앙no1"},
+            "staff": {"nickName": "스태프"},
+        },
+    }
+    assert nicknames_from_search_payload(payload) == []
+    last_page, total, has_more = search_page_info(payload)
+    assert last_page == 1
+    assert total == 11
+    assert has_more is False
+    assert should_stop_search(2, last_page, has_more, 0, 0) is True
+
+
+def test_search_html_ignores_sidebar_and_reads_last_page() -> None:
+    html = """
+    <aside>
+      <a class="nickname">씨씨앙no1</a>
+      <span data-nickname="매니저">매니저</span>
+    </aside>
+    <table class="article-board">
+      <tr>
+        <td><a href="/articles/914">항문가려움 때문에 안티치세정제 써봤어요</a></td>
+        <td><a class="nickname">도라지소다</a></td>
+      </tr>
+      <tr>
+        <td><a href="/ArticleRead.nhn?articleid=900">후기</a></td>
+        <td><span data-nickname="시치미역">시치미역</span></td>
+      </tr>
+    </table>
+    <div class="prev-next">
+      <a href="?search.page=1" class="on">1</a>
+    </div>
+    """
+    found = nicknames_from_search_html(html)
+    assert set(found) == {"도라지소다", "시치미역"}
+    assert "씨씨앙no1" not in found
+    assert article_ids_from_html(html) == ["914", "900"]
+    assert last_page_from_html(html) == 1
+
+
+def test_search_stops_after_the_only_result_page() -> None:
+    session = NicknameExcludeSession.__new__(NicknameExcludeSession)
+    session.cafe = parse_cafe_address(DEFAULT_CAFE_URL)
+    session.logger = type("Log", (), {"info": staticmethod(lambda *args, **kwargs: None)})()
+    pages: list[int] = []
+
+    def fake_page(keyword: str, page: int, scope):
+        pages.append(page)
+        if page == 1:
+            return ["도라지소다", "시치미역"], ["101", "102"], 1, 11, False
+        return ["씨씨앙no1", "스태프"], [], 1, 11, False
+
+    session._open_search_page = lambda *args, **kwargs: None  # type: ignore[method-assign]
+    session._search_page = fake_page  # type: ignore[method-assign]
+    found = session._search_one_keyword_scope("안티치", SEARCH_SCOPES[0], None)
+    assert pages == [1]
+    assert found == ["도라지소다", "시치미역"]
+
+
+def test_search_stops_when_later_pages_have_no_new_articles() -> None:
+    session = NicknameExcludeSession.__new__(NicknameExcludeSession)
+    session.cafe = parse_cafe_address(DEFAULT_CAFE_URL)
+    session.logger = type("Log", (), {"info": staticmethod(lambda *args, **kwargs: None)})()
+    pages: list[int] = []
+
+    def fake_page(keyword: str, page: int, scope):
+        pages.append(page)
+        if page == 1:
+            return ["도라지소다"], ["101"], None, None, False
+        return ["씨씨앙no1", "스태프"], [], None, None, False
+
+    session._open_search_page = lambda *args, **kwargs: None  # type: ignore[method-assign]
+    session._search_page = fake_page  # type: ignore[method-assign]
+    found = session._search_one_keyword_scope("안티치", SEARCH_SCOPES[0], None)
+    assert pages == [1, 2]
+    assert found == ["도라지소다"]
