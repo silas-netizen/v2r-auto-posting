@@ -134,6 +134,7 @@ class ImmediateJob:
     head_id: int | None = None
     canonical_head_name: str | None = None
     scheduled_at: datetime | None = None
+    publish_immediately: bool = False
     status: JobStatus = JobStatus.PENDING
     message: str = ""
     post_url: str = ""

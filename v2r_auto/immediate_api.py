@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +45,12 @@ BOARD_ALIASES = {
 KNOWN_CAFE_IDS = {
     normalized_name("쌍둥이맘 모여라"): 10174516,
     normalized_name("고요한 아침"): 14567700,
+    normalized_name("글로시 마이"): 15175096,
+    normalized_name("웨딩노트"): 15441090,
+    normalized_name("웨딩 노트"): 15441090,
+    normalized_name("송도포털"): 16149995,
+    normalized_name("헬씨트리"): 23708088,
+    normalized_name("헬씨 트리"): 23708088,
     normalized_name("러브인썸"): 26616683,
     normalized_name("러브 인썸 (Love in Some)"): 26616683,
     normalized_name("마이웨딩드림"): 26680163,
@@ -72,6 +78,7 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         )
         self.failed_source_urls: set[str] = set()
         self.last_restricted_account = ""
+        self.auto_account_limit = 10
 
     def _restriction_result(self, account: str) -> str:
         record = self.restrictions.account_record(account)
@@ -383,7 +390,15 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                 job.account,
             )
 
-    def prepare_jobs(self, jobs: list[ImmediateJob]) -> None:
+    def prepare_jobs(
+        self,
+        jobs: list[ImmediateJob],
+        *,
+        auto_account_limit: int = 10,
+    ) -> None:
+        if not 2 <= auto_account_limit <= 10:
+            raise ValueError("자동 배정 ID 수는 2개부터 10개까지 선택하세요")
+        self.auto_account_limit = auto_account_limit
         self._capture_authorization()
         cafe_payload = self._request("GET", "/naver_cafes/naver_join_cafes")
         cafes = self._cafe_rows(cafe_payload)
@@ -419,7 +434,7 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
             if cafe.cafe_id not in SELF_OWNED_CAFE_IDS | TEST_CAFE_IDS:
                 for job in cafe_jobs:
                     job.status = JobStatus.SKIPPED
-                    job.message = "즉시 발행 허용 카페가 아닙니다"
+                    job.message = "자사 카페 허용 목록에 등록되지 않은 카페입니다"
                 continue
             if any(job.source_kind == "brand" for job in cafe_jobs) and (
                 cafe.cafe_id not in SELF_OWNED_CAFE_IDS
@@ -574,9 +589,9 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                 )
             ]
             key = (job.cafe_id, required_type)
-            return key, pool, allowed
+            return key, pool[: self.auto_account_limit], allowed
         key = (job.cafe_id, "전체")
-        return key, pool, allowed
+        return key, pool[: self.auto_account_limit], allowed
 
     def pick_account(self, job: ImmediateJob) -> str:
         key, pool, allowed = self._pool_for(job)
@@ -632,8 +647,10 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         self,
         job: ImmediateJob,
     ) -> dict[str, Any]:
-        is_test_cafe = job.cafe_id in TEST_CAFE_IDS
-        if job.scheduled_at is None and not is_test_cafe:
+        is_immediate = (
+            job.cafe_id in TEST_CAFE_IDS or job.publish_immediately
+        )
+        if job.scheduled_at is None and not is_immediate:
             raise AffiliateApiError("예약 발행 시간이 준비되지 않았습니다")
         return {
             "cafe_id": job.cafe_id,
@@ -645,7 +662,7 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
             "naver_login_id": job.account,
             "start_at": (
                 None
-                if is_test_cafe
+                if is_immediate
                 else job.scheduled_at.isoformat().replace("+00:00", "Z")
             ),
             "target_view_count": 0,
@@ -675,9 +692,9 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         ]
         if source["title"] != job.title or source.get("tag_list", []) != job.tags:
             raise AffiliateApiError("등록 후 제목 또는 태그 검증에 실패했습니다")
-        if job.cafe_id in TEST_CAFE_IDS:
+        if job.cafe_id in TEST_CAFE_IDS or job.publish_immediately:
             if destination.get("start_at") is not None:
-                raise AffiliateApiError("한 줄 테스트가 즉시 발행으로 등록되지 않았습니다")
+                raise AffiliateApiError("글이 즉시 발행으로 등록되지 않았습니다")
         else:
             actual_at = datetime.fromisoformat(
                 str(destination["start_at"]).replace("Z", "+00:00")
@@ -720,12 +737,13 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         if not job.cafe_id or not job.menu_id or not job.account:
             raise AffiliateApiError("API 목적지 또는 작성계정이 준비되지 않았습니다")
         is_test_cafe = job.cafe_id in TEST_CAFE_IDS
-        if job.scheduled_at is None and not is_test_cafe:
+        is_immediate = is_test_cafe or job.publish_immediately
+        if job.scheduled_at is None and not is_immediate:
             raise AffiliateApiError("예약 발행 시간이 준비되지 않았습니다")
         destination = self._destination(job)
         if dry_run:
-            if is_test_cafe:
-                self.logger.info("행 %s 한 줄 즉시 발행 검증", job.row_number)
+            if is_immediate:
+                self.logger.info("행 %s 즉시 발행 검증", job.row_number)
             else:
                 self.logger.info(
                     "행 %s 예약 발행 검증: %s",
@@ -744,7 +762,7 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         comments = (
             self._comments(
                 job,
-                job.scheduled_at,
+                job.scheduled_at or datetime.now(timezone.utc),
                 job.cafe_id,
                 comment_accounts=SELF_COMMENT_ACCOUNTS,
             )
@@ -761,10 +779,10 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                 comments,
                 content_json=content_json,
                 recovery_statuses=(
-                    ("DONE",) if is_test_cafe else ("RESERVED", "DONE")
+                    ("DONE",) if is_immediate else ("RESERVED", "DONE")
                 ),
             )
-            if is_test_cafe:
+            if is_immediate:
                 self._wait_for_written_at(source_id, job.cafe_id)
             self._verify_immediate(source_id, job)
         except Exception as exc:
@@ -780,8 +798,8 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
             if source_id:
                 self._delete_source(source_id)
             raise
-        if is_test_cafe:
-            self.logger.info("행 %s 한 줄 즉시 발행 완료", job.row_number)
+        if is_immediate:
+            self.logger.info("행 %s 즉시 발행 완료", job.row_number)
         else:
             self.logger.info(
                 "행 %s 예약 발행 등록 완료: %s",

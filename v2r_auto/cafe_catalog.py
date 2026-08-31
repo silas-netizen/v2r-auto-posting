@@ -10,11 +10,24 @@ from typing import Any, Callable, Iterable
 
 
 AFFILIATE_CAFE_IDS = {25016228, 22788814}
-SELF_OWNED_CAFE_IDS = {10174516, 14567700, 26616683, 26680163}
+SELF_OWNED_CAFE_IDS = {
+    10174516,
+    14567700,
+    15175096,
+    15441090,
+    16149995,
+    23708088,
+    26616683,
+    26680163,
+}
 TEST_CAFE_IDS = {31670254, 31670256}
 SELF_OWNED_CAFE_NAMES = {
     "쌍둥이맘 모여라",
     "고요한 아침",
+    "글로시 마이",
+    "웨딩 노트",
+    "송도포털",
+    "헬씨 트리",
     "러브 인썸 (Love in Some)",
     "마이 웨딩 드림",
 }

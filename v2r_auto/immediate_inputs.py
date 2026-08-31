@@ -26,6 +26,7 @@ BRAND_OPTIONAL_COLUMNS = {
 }
 BOARD_HEADERS = {"게시판명", "게시판", "메뉴", "메뉴명"}
 DAILY_HEADERS = ("카페명", "게시판명", "각색제목", "각색본문")
+DAILY_OPTIONAL_ACCOUNT_HEADER = "작성계정"
 INFORMATIONAL_SHEET_ID = "1vSON0Rej9anDQXcAOXyBrCr50B4MMqZ79FahF4cDPJw"
 INFORMATIONAL_SHEET_GID = "1193993260"
 ACCOUNT_TEST_SHEET_ID = "1UgcAvHFCpC5N9joC9T5WCATK834F3XAtRrepFv6XbEs"
@@ -262,6 +263,10 @@ def load_daily_excel_jobs(path: str | Path) -> list[ImmediateJob]:
                     + ", ".join(DAILY_HEADERS)
                     + " 순서여야 합니다"
                 )
+            has_account_column = (
+                len(first) >= 5
+                and _cell(first[4]) == DAILY_OPTIONAL_ACCOUNT_HEADER
+            )
             for row_number, values in enumerate(rows, start=2):
                 cafe, board, title, body = (_cell(value) for value in values[:4])
                 if not any((cafe, board, title, body)):
@@ -280,6 +285,11 @@ def load_daily_excel_jobs(path: str | Path) -> list[ImmediateJob]:
                         ),
                         cafe=cafe,
                         board=board,
+                        account=(
+                            _cell(values[4])
+                            if has_account_column and len(values) >= 5
+                            else ""
+                        ),
                         image_disabled=True,
                         source_kind="daily",
                         source_name=f"{workbook_path.name}:{worksheet.title}",

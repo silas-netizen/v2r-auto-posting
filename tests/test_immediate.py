@@ -9,6 +9,7 @@ from openpyxl import Workbook
 from v2r_auto.affiliate_api import AffiliateApiError
 from v2r_auto.immediate_api import (
     BOARD_ALIASES,
+    KNOWN_CAFE_IDS,
     MANAGER_ACCOUNTS,
     ImmediateApiPublisher,
     SELF_COMMENT_ACCOUNTS,
@@ -118,6 +119,23 @@ def test_load_daily_excel_a_to_d(tmp_path: Path) -> None:
     assert jobs[0].body == "반갑습니다"
     assert jobs[0].comments == []
     assert jobs[0].use_comment_ai is True
+
+
+def test_daily_excel_accepts_optional_account_column(tmp_path: Path) -> None:
+    path = tmp_path / "daily-with-account.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(
+        ["카페명", "게시판명", "각색제목", "각색본문", "작성계정"]
+    )
+    sheet.append(["헬씨 트리", "자유게시판", "지정 글", "본문", "writer-a"])
+    sheet.append(["헬씨 트리", "자유게시판", "자동 글", "본문", ""])
+    workbook.save(path)
+
+    jobs = load_daily_excel_jobs(path)
+
+    assert jobs[0].account == "writer-a"
+    assert jobs[1].account == ""
 
 
 def test_loads_only_checked_one_line_account_tests(tmp_path: Path) -> None:
@@ -561,6 +579,13 @@ def test_twin_mom_board_alias_resolves_decorated_v2r_name() -> None:
     assert menu.menu_id == 664
 
 
+def test_new_self_owned_cafe_names_use_verified_ids() -> None:
+    assert KNOWN_CAFE_IDS[normalized_name("헬씨 트리")] == 23708088
+    assert KNOWN_CAFE_IDS[normalized_name("송도포털")] == 16149995
+    assert KNOWN_CAFE_IDS[normalized_name("글로시 마이")] == 15175096
+    assert KNOWN_CAFE_IDS[normalized_name("웨딩노트")] == 15441090
+
+
 def test_twin_mom_sheet_account_board_and_grade_refresh(
     tmp_path: Path,
 ) -> None:
@@ -722,6 +747,59 @@ def test_schedules_accumulate_five_to_fifteen_minutes_per_cafe(
     assert jobs[1].scheduled_at == now + timedelta(minutes=20)
     assert jobs[2].scheduled_at == now + timedelta(minutes=7)
     assert jobs[3].scheduled_at is None
+
+
+def test_immediate_option_removes_all_normal_reservation_times(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "daily-immediate.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["카페명", "게시판명", "각색제목", "각색본문"])
+    sheet.append(["헬씨 트리", "자유게시판", "제목1", "본문1"])
+    sheet.append(["송도포털", "자유게시판", "제목2", "본문2"])
+    workbook.save(path)
+    jobs = load_daily_excel_jobs(path)
+    jobs[0].cafe_id = 23708088
+    jobs[1].cafe_id = 16149995
+
+    assign_immediate_schedules(jobs, publish_immediately=True)
+
+    assert all(job.publish_immediately for job in jobs)
+    assert all(job.scheduled_at is None for job in jobs)
+
+
+def test_auto_assignment_uses_only_selected_number_of_accounts(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "daily-account-limit.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["카페명", "게시판명", "각색제목", "각색본문"])
+    sheet.append(["헬씨 트리", "자유게시판", "제목", "본문"])
+    workbook.save(path)
+    job = load_daily_excel_jobs(path)[0]
+    job.cafe_id = 23708088
+    job.menu_id = 1
+
+    publisher = ImmediateApiPublisher(None, logging.getLogger("limit-test"))
+    publisher.auto_account_limit = 2
+    publisher.cafe_pools[23708088] = ["writer-a", "writer-b", "writer-c"]
+    publisher.menu_pools[(23708088, 1)] = [
+        "writer-a",
+        "writer-b",
+        "writer-c",
+    ]
+    publisher.global_accounts = {
+        account: {"my_info_v2": {"is_real_name": True}}
+        for account in ("writer-a", "writer-b", "writer-c")
+    }
+
+    assert [publisher.pick_account(job) for _ in range(3)] == [
+        "writer-a",
+        "writer-b",
+        "writer-a",
+    ]
 
 
 def test_duplicate_skip_reason_is_written_to_live_log(

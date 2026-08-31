@@ -39,6 +39,7 @@ def assign_immediate_schedules(
     *,
     now: datetime | None = None,
     rng: random.Random | None = None,
+    publish_immediately: bool = False,
 ) -> None:
     """Keep each cafe's reserved posts 5–15 minutes apart."""
     now = now or datetime.now(timezone.utc)
@@ -47,7 +48,10 @@ def assign_immediate_schedules(
     for job in jobs:
         if job.status != JobStatus.PENDING:
             continue
-        if job.cafe_id in TEST_CAFE_IDS:
+        job.publish_immediately = (
+            publish_immediately or job.cafe_id in TEST_CAFE_IDS
+        )
+        if job.publish_immediately:
             job.scheduled_at = None
             continue
         anchor = max(now, last_by_cafe.get(job.cafe_id, now))
@@ -703,6 +707,8 @@ class ImmediateRunner:
         source_sheet_url: str = "",
         status: Callable[[dict[str, int]], None] | None = None,
         pause_event: threading.Event | None = None,
+        publish_immediately: bool = False,
+        auto_account_limit: int = 10,
     ) -> tuple[RunResult, Path]:
         started_at = datetime.now()
         pause_event = pause_event or threading.Event()
@@ -755,7 +761,13 @@ class ImmediateRunner:
                     "행 %s V2R에서 삭제된 과거 링크를 제거하고 새로 발행합니다",
                     job.row_number,
                 )
-        self.browser.prepare_immediate_jobs(jobs)
+        if auto_account_limit == 10:
+            self.browser.prepare_immediate_jobs(jobs)
+        else:
+            self.browser.prepare_immediate_jobs(
+                jobs,
+                auto_account_limit=auto_account_limit,
+            )
         if not dry_run and hasattr(
             self.browser,
             "refresh_immediate_account_grades",
@@ -769,7 +781,10 @@ class ImmediateRunner:
                 "실제 발행 실패 이력 %s건을 중복 완료 목록에서 제거해 재시도합니다",
                 removed_failures,
             )
-        assign_immediate_schedules(jobs)
+        assign_immediate_schedules(
+            jobs,
+            publish_immediately=publish_immediately,
+        )
 
         if source_sheet_url:
             for job in jobs:
@@ -1019,8 +1034,8 @@ class ImmediateRunner:
                         job.source_name,
                         job.row_number,
                         (
-                            "한 줄 즉시 발행"
-                            if job.cafe_id in TEST_CAFE_IDS
+                            "즉시 발행"
+                            if job.publish_immediately
                             else "예약 등록"
                         ),
                         job.canonical_cafe_name,
@@ -1033,19 +1048,19 @@ class ImmediateRunner:
                     job.post_url = self.browser.publish_immediate(job, dry_run)
                     job.status = (
                         JobStatus.SUCCESS
-                        if job.cafe_id in TEST_CAFE_IDS
+                        if job.publish_immediately
                         else JobStatus.RESERVED
                     )
                     job.message = (
                         (
                             "즉시 발행 API 검증 완료"
-                            if job.cafe_id in TEST_CAFE_IDS
+                            if job.publish_immediately
                             else "예약 API 검증 완료"
                         )
                         if dry_run
                         else (
-                            "한 줄 즉시 발행 완료"
-                            if job.cafe_id in TEST_CAFE_IDS
+                            "즉시 발행 완료"
+                            if job.publish_immediately
                             else "예약 발행 등록 완료"
                         )
                     )

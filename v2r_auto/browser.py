@@ -1644,8 +1644,16 @@ class V2RBrowser:
             self._immediate_publisher = ImmediateApiPublisher(self, self.logger)
         return self._immediate_publisher
 
-    def prepare_immediate_jobs(self, jobs) -> None:
-        self._get_immediate_publisher().prepare_jobs(jobs)
+    def prepare_immediate_jobs(
+        self,
+        jobs,
+        *,
+        auto_account_limit: int = 10,
+    ) -> None:
+        self._get_immediate_publisher().prepare_jobs(
+            jobs,
+            auto_account_limit=auto_account_limit,
+        )
 
     def refresh_immediate_account_grades(self, jobs) -> None:
         self._get_immediate_publisher().refresh_assigned_account_grades(jobs)
