@@ -13,6 +13,8 @@ from v2r_auto.nickname_exclude import (
     cafe_search_url,
     cafe_search_url_modern,
     cookies_show_naver_login,
+    join_nicknames,
+    join_nicknames_export,
     join_nicknames_lines,
     last_page_from_html,
     merge_nicknames,
@@ -28,6 +30,7 @@ from v2r_auto.nickname_exclude import (
     search_page_info,
     should_stop_search,
     split_keywords,
+    write_nicknames_comma_file,
     write_nicknames_file,
 )
 
@@ -211,8 +214,17 @@ def test_one_keyword_searches_both_scopes_and_dedupes() -> None:
 def test_nicknames_are_written_one_per_line(tmp_path) -> None:
     text = join_nicknames_lines(["팥순이", "자연방패", "장으뜸"])
     assert text == "팥순이\n자연방패\n장으뜸"
+    assert join_nicknames(["팥순이", "자연방패", "장으뜸"]) == "팥순이, 자연방패, 장으뜸"
+    assert join_nicknames_export(["팥순이", "자연방패"]) == (
+        "팥순이\n자연방패\n\n팥순이, 자연방패\n"
+    )
     path = write_nicknames_file(tmp_path / "제외닉네임.txt", ["팥순이", "자연방패"])
-    assert path.read_text(encoding="utf-8") == "팥순이\n자연방패\n"
+    assert path.read_text(encoding="utf-8") == "팥순이\n자연방패\n\n팥순이, 자연방패\n"
+    comma = write_nicknames_comma_file(
+        tmp_path / "제외닉네임_콤마.txt",
+        ["팥순이", "자연방패"],
+    )
+    assert comma.read_text(encoding="utf-8") == "팥순이, 자연방패\n"
 
 
 def test_search_keeps_going_until_all_pages() -> None:

@@ -167,9 +167,22 @@ def join_nicknames_lines(nicknames: Iterable[str]) -> str:
     return "\n".join(split_nicknames("\n".join(nicknames)))
 
 
+def join_nicknames_export(nicknames: Iterable[str]) -> str:
+    names = split_nicknames("\n".join(nicknames))
+    if not names:
+        return ""
+    return f"{join_nicknames_lines(names)}\n\n{join_nicknames(names)}\n"
+
+
 def write_nicknames_file(path: Path, nicknames: Iterable[str]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = join_nicknames_lines(nicknames)
+    path.write_text(join_nicknames_export(nicknames), encoding="utf-8")
+    return path
+
+
+def write_nicknames_comma_file(path: Path, nicknames: Iterable[str]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = join_nicknames(nicknames)
     if text:
         text += "\n"
     path.write_text(text, encoding="utf-8")

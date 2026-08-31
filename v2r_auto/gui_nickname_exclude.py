@@ -13,6 +13,7 @@ from .nickname_exclude import (
     NicknameExcludeError,
     open_nicknames_notepad,
     parse_cafe_address,
+    write_nicknames_comma_file,
     write_nicknames_file,
 )
 from .state import AnotherInstanceRunningError, InstanceLock
@@ -60,7 +61,7 @@ class NicknameExcludeApp(AutomationApp):
                 "먼저 네이버 로그인 창을 연 뒤, 입력한 카페 주소를 엽니다. "
                 "식별 키워드는 글 + 댓글과 댓글내용으로 각각 검색하고, "
                 "나온 닉네임을 합쳐 중복을 뺀 다음 "
-                "메모장에 한 줄에 하나씩 띄웁니다. "
+                "메모장에 줄바꿈과 콤마 목록을 같이 띄웁니다. "
                 "복사해서 신고기 제외 닉네임 칸에 넣으면 됩니다. "
                 "글쓰기 버튼은 쓰지 않습니다."
             ),
@@ -196,11 +197,17 @@ class NicknameExcludeApp(AutomationApp):
                         self.data_dir / "제외닉네임.txt",
                         plan.found,
                     )
+                    comma_path = write_nicknames_comma_file(
+                        self.data_dir / "제외닉네임_콤마.txt",
+                        plan.found,
+                    )
                     open_nicknames_notepad(path)
+                    open_nicknames_notepad(comma_path)
                     self.logger.info(
-                        "닉네임 %s개를 메모장에 줄바꿈으로 띄웠습니다: %s",
+                        "닉네임 %s개를 줄바꿈과 콤마로 띄웠습니다: %s / %s",
                         len(plan.found),
                         path,
+                        comma_path,
                     )
                     self.logger.info(plan.summary().replace("\n", " / "))
                     self._set_progress(2, 2)
@@ -210,7 +217,7 @@ class NicknameExcludeApp(AutomationApp):
                                 "info",
                                 (
                                     "닉네임 모음",
-                                    f"{plan.summary()}\n\n메모장에 한 줄에 하나씩 띄웠습니다.\n"
+                                    f"{plan.summary()}\n\n메모장에 줄바꿈 목록과 콤마 목록을 띄웠습니다.\n"
                                     "복사해서 신고기 제외 닉네임 칸에 넣으면 됩니다.",
                                 ),
                             )
