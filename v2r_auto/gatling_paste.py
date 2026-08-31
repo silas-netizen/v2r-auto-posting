@@ -8,13 +8,17 @@ from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
-from .cafe_catalog import normalized_name
+from .cafe_catalog import korean_name, normalized_name
 from .content import CommentNode, ContentFormatError, ParsedArticle, parse_article
 from .daily_posts import DailyPostSheetError, load_daily_posts
 from .gatling_accounts import (
+    COMMENT_ID_COUNT,
+    DEFAULT_AUTO_ID_COUNT,
     ProxyAccount,
     ProxyBook,
     account_for_comment_node,
+    assign_auto_authors,
+    normalize_auto_id_count,
     resolve_job_accounts,
 )
 from .images import (
@@ -37,6 +41,46 @@ AFFILIATE_EXACT_BOARDS = {
 AFFILIATE_BOARD_LINKS = {
     "씨씨앙": "https://cafe.naver.com/f-e/cafes/25016228/menus/328?viewType=L",
     "양평맘": "https://cafe.naver.com/f-e/cafes/22788814/menus/14?viewType=L",
+}
+SELF_OWNED_CAFE_IDS = {
+    "러브인썸": 26616683,
+    "마이웨딩드림": 26680163,
+    "고요한아침": 14567700,
+    "헬씨트리": 23708088,
+    "송도포털": 16149995,
+    "글로시마이": 15175096,
+    "웨딩노트": 15441090,
+    "쌍둥이맘모여라": 10174516,
+}
+SELF_OWNED_BOARD_MENUS = {
+    "러브인썸": 18,
+    "마이웨딩드림": 1,
+    "고요한아침": 29,
+    "헬씨트리": 27,
+    "송도포털": 19,
+    "글로시마이": 50,
+    "웨딩노트": 32,
+    "쌍둥이맘모여라": 664,
+}
+SELF_OWNED_EXACT_BOARDS = {
+    "러브인썸": "뷰티&미용",
+    "마이웨딩드림": "뷰티&다이어트",
+    "고요한아침": "약과 영양, 병원의 기억",
+    "헬씨트리": "자유로운 건강 수다방",
+    "송도포털": "친해지는 수다",
+    "글로시마이": "다이어트 · 운동 톡",
+    "웨딩노트": "뷰티 · 다이어트",
+    "쌍둥이맘모여라": "ㄴ가족업체 자유게시판",
+}
+
+
+def _menu_board_url(cafe_id: int, menu_id: int) -> str:
+    return f"https://cafe.naver.com/f-e/cafes/{cafe_id}/menus/{menu_id}?viewType=L"
+
+
+SELF_OWNED_BOARD_LINKS = {
+    key: _menu_board_url(SELF_OWNED_CAFE_IDS[key], menu)
+    for key, menu in SELF_OWNED_BOARD_MENUS.items()
 }
 KNOWN_EXACT_BOARDS = (
     "자유 수다방",
@@ -213,6 +257,23 @@ def affiliate_board_link(cafe: str) -> str:
     return AFFILIATE_BOARD_LINKS.get((cafe or "").strip(), "")
 
 
+def self_owned_cafe_key(cafe: str) -> str:
+    hangul = korean_name(cafe)
+    compact = normalized_name(cafe)
+    for key in SELF_OWNED_BOARD_LINKS:
+        if hangul == key or compact == normalized_name(key) or hangul.startswith(key):
+            return key
+    return ""
+
+
+def self_owned_board_link(cafe: str, board: str = "") -> str:
+    """자사 카페 새글 링크 열에 넣는, 카페마다 하나인 게시판 주소."""
+    key = self_owned_cafe_key(cafe)
+    if not key:
+        return ""
+    return SELF_OWNED_BOARD_LINKS[key]
+
+
 def exact_board_name(
     sheet_board: str,
     cafe: str,
@@ -225,6 +286,9 @@ def exact_board_name(
     default = AFFILIATE_EXACT_BOARDS.get(cafe_name, "")
     if default:
         known.append(default)
+    self_board = SELF_OWNED_EXACT_BOARDS.get(self_owned_cafe_key(cafe_name), "")
+    if self_board:
+        known.append(self_board)
     known.extend(KNOWN_EXACT_BOARDS)
     known.extend(name.strip() for name in extra_exact_names if str(name).strip())
 
@@ -998,6 +1062,8 @@ def build_master_rows(
     image_location: str = "",
     proxy_book: ProxyBook | None = None,
     rng: random.Random | None = None,
+    comment_id_count: int = COMMENT_ID_COUNT,
+    author_id_count: int = DEFAULT_AUTO_ID_COUNT,
 ) -> list[MasterRow]:
     board_name = exact_board_name(
         job.board,
@@ -1005,7 +1071,13 @@ def build_master_rows(
         extra_exact_names=extra_exact_names,
     )
     article_url = (job.cafe_article_url or "").strip()
-    author, comment_map = resolve_job_accounts(job, proxy_book, rng=rng)
+    author, comment_map = resolve_job_accounts(
+        job,
+        proxy_book,
+        rng=rng,
+        comment_id_count=comment_id_count,
+        author_id_count=author_id_count,
+    )
     rows: list[MasterRow] = []
 
     if is_affiliate_cafe(job.cafe) and include_daily_new_post:
@@ -1059,7 +1131,7 @@ def build_master_rows(
                 body=job.article.body,
                 job=job,
                 board_name=board_name,
-                link=article_url,
+                link=self_owned_board_link(job.cafe, job.board) or article_url,
                 with_hashtag=True,
                 image_location=image_location,
                 author=author,
@@ -1141,6 +1213,8 @@ def build_gatling_master(
     image_dir: str | Path | None = None,
     existing_keys: set[tuple[str, str]] | None = None,
     proxy_book: ProxyBook | None = None,
+    comment_id_count: int = COMMENT_ID_COUNT,
+    author_id_count: int = DEFAULT_AUTO_ID_COUNT,
 ) -> GatlingBuildResult:
     jobs, skipped = load_gatling_brand_jobs(
         brand_path,
@@ -1157,19 +1231,44 @@ def build_gatling_master(
                 "제휴 카페 원고가 있어 일상 글 시트가 필요합니다"
             )
         assign_daily_posts(jobs, load_daily_posts(daily_path), rng=rng)
+    needed_comments = normalize_auto_id_count(comment_id_count)
+    needed_authors = normalize_auto_id_count(author_id_count)
     if proxy_book and affiliate_jobs and any(job.article.comments for job in affiliate_jobs):
         comment_count = len(proxy_book.comment_accounts())
-        if comment_count < 6:
+        if comment_count < needed_comments:
             raise GatlingPasteError(
-                f"양평맘·씨씨앙 댓글 아이디가 6개 필요합니다. 지금 {comment_count}개입니다"
+                f"양평맘·씨씨앙 댓글 아이디가 {needed_comments}개 필요합니다. "
+                f"지금 {comment_count}개입니다"
             )
     self_jobs = [job for job in jobs if not is_affiliate_cafe(job.cafe)]
     if proxy_book and self_jobs and any(job.article.comments for job in self_jobs):
         self_comment_count = len(proxy_book.self_comment_accounts())
-        if self_comment_count < 6:
+        if self_comment_count < needed_comments:
             raise GatlingPasteError(
-                f"자사 카페 댓글 아이디가 6개 필요합니다. 지금 {self_comment_count}개입니다"
+                f"자사 카페 댓글 아이디가 {needed_comments}개 필요합니다. "
+                f"지금 {self_comment_count}개입니다"
             )
+    empty_affiliate = [
+        job for job in affiliate_jobs if not (job.account or "").strip()
+    ]
+    empty_self = [job for job in self_jobs if not (job.account or "").strip()]
+    if proxy_book and empty_affiliate:
+        affiliate_author_count = len(proxy_book.affiliate_authors())
+        if affiliate_author_count < needed_authors:
+            raise GatlingPasteError(
+                f"제휴 작성 아이디가 {needed_authors}개 필요합니다. "
+                f"지금 {affiliate_author_count}개입니다"
+            )
+    if proxy_book and empty_self:
+        self_author_count = len(proxy_book.self_authors())
+        if self_author_count < needed_authors:
+            raise GatlingPasteError(
+                f"자사 작성 아이디가 {needed_authors}개 필요합니다. "
+                f"지금 {self_author_count}개입니다"
+            )
+    assign_auto_authors(
+        jobs, proxy_book, rng, author_id_count=needed_authors
+    )
 
     rows: list[MasterRow] = []
     image_count = 0
@@ -1193,6 +1292,8 @@ def build_gatling_master(
                 image_location=image_location,
                 proxy_book=proxy_book,
                 rng=rng,
+                comment_id_count=needed_comments,
+                author_id_count=needed_authors,
             )
         )
     return GatlingBuildResult(
@@ -1252,6 +1353,8 @@ def build_and_write_master(
     image_dir: str | Path | None = None,
     existing_keys: set[tuple[str, str]] | None = None,
     proxy_book: ProxyBook | None = None,
+    comment_id_count: int = COMMENT_ID_COUNT,
+    author_id_count: int = DEFAULT_AUTO_ID_COUNT,
 ) -> GatlingBuildResult:
     result = build_gatling_master(
         brand_path,
@@ -1265,6 +1368,8 @@ def build_and_write_master(
         image_dir=image_dir,
         existing_keys=existing_keys,
         proxy_book=proxy_book,
+        comment_id_count=comment_id_count,
+        author_id_count=author_id_count,
     )
     write_master_xlsx(output_path, result.rows)
     return result
@@ -1283,6 +1388,8 @@ def paste_manuscripts_into_gatling(
     image_resolver: GoogleDriveImageResolver | None = None,
     image_dir: str | Path | None = None,
     proxy_book: ProxyBook | None = None,
+    comment_id_count: int = COMMENT_ID_COUNT,
+    author_id_count: int = DEFAULT_AUTO_ID_COUNT,
 ) -> tuple[GatlingBuildResult, int]:
     """Append Google Sheet title/body/comments into a recognized 기관총 마스터."""
     result = build_gatling_master(
@@ -1297,6 +1404,8 @@ def paste_manuscripts_into_gatling(
         image_dir=image_dir,
         existing_keys=load_existing_manuscript_keys(gatling_path),
         proxy_book=proxy_book,
+        comment_id_count=comment_id_count,
+        author_id_count=author_id_count,
     )
     if not result.rows:
         preview = "\n".join(result.skipped[:8])

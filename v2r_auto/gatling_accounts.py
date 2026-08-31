@@ -19,7 +19,10 @@ KNOWN_AFFILIATE_COMMENT_IDS = {
     "colpith",
 }
 AFFILIATE_COMMENT_COUNT = 6
-COMMENT_ID_COUNT = AFFILIATE_COMMENT_COUNT
+MIN_AUTO_ID_COUNT = 2
+MAX_AUTO_ID_COUNT = 10
+DEFAULT_AUTO_ID_COUNT = AFFILIATE_COMMENT_COUNT
+COMMENT_ID_COUNT = DEFAULT_AUTO_ID_COUNT
 KIND_AFFILIATE_AUTHOR = "affiliate_author"
 KIND_AFFILIATE_COMMENT = "affiliate_comment"
 KIND_SELF_AUTHOR = "self_author"
@@ -275,12 +278,22 @@ def recognize_proxy_workbook(path: str | Path) -> ProxyBook:
     if comments and comments < COMMENT_ID_COUNT:
         message += (
             f". 양평맘·씨씨앙 댓글을 넣으려면 제휴 댓글 아이디가 "
-            f"{COMMENT_ID_COUNT}개 필요합니다"
+            f"{COMMENT_ID_COUNT}개 이상 필요합니다"
         )
     if self_comments and self_comments < COMMENT_ID_COUNT:
         message += (
             f". 자사 카페 댓글을 넣으려면 자사 댓글 아이디가 "
-            f"{COMMENT_ID_COUNT}개 필요합니다"
+            f"{COMMENT_ID_COUNT}개 이상 필요합니다"
+        )
+    if affiliate_authors and affiliate_authors < MIN_AUTO_ID_COUNT:
+        message += (
+            f". 양평맘·씨씨앙 본문을 자동 배정하려면 제휴 작성 아이디가 "
+            f"{MIN_AUTO_ID_COUNT}개 이상 필요합니다"
+        )
+    if self_authors and self_authors < MIN_AUTO_ID_COUNT:
+        message += (
+            f". 자사 카페 본문을 자동 배정하려면 자사 작성 아이디가 "
+            f"{MIN_AUTO_ID_COUNT}개 이상 필요합니다"
         )
     return ProxyBook(path=file_path, accounts=accounts, message=message, recognized=True)
 
@@ -301,23 +314,50 @@ def article_kind(article_type: str) -> str:
     return ""
 
 
+def normalize_auto_id_count(value: object) -> int:
+    try:
+        count = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise _proxy_error("자동 배정 아이디 수량은 2~10 사이 숫자여야 합니다")
+    if count < MIN_AUTO_ID_COUNT or count > MAX_AUTO_ID_COUNT:
+        raise _proxy_error(
+            f"자동 배정 아이디 수량은 {MIN_AUTO_ID_COUNT}~{MAX_AUTO_ID_COUNT}개만 "
+            f"고를 수 있습니다"
+        )
+    return count
+
+
+def comment_auto_labels(article_type: str, count: int) -> list[str]:
+    needed = normalize_auto_id_count(count)
+    special = "대대댓글2" if article_kind(article_type) == "후기형" else "대대대댓글2"
+    labels = ["댓글1", "댓글2"]
+    if needed >= 3:
+        labels.append(special)
+    next_index = 3
+    while len(labels) < needed:
+        labels.append(f"댓글{next_index}")
+        next_index += 1
+    return labels
+
+
 def _comment_id_map(
     job,
     comment_accounts: list[ProxyAccount],
     rng: random.Random,
     *,
     pool_label: str,
+    comment_id_count: int = COMMENT_ID_COUNT,
 ) -> dict[str, ProxyAccount]:
     if not job.article.comments:
         return {}
-    if len(comment_accounts) < COMMENT_ID_COUNT:
+    needed = normalize_auto_id_count(comment_id_count)
+    if len(comment_accounts) < needed:
         raise _proxy_error(
-            f"{pool_label} 댓글 아이디가 {COMMENT_ID_COUNT}개 필요합니다. "
+            f"{pool_label} 댓글 아이디가 {needed}개 필요합니다. "
             f"지금 {len(comment_accounts)}개입니다"
         )
-    chosen = rng.sample(comment_accounts, COMMENT_ID_COUNT)
-    special_label = "대대댓글2" if article_kind(job.article_type) == "후기형" else "대대대댓글2"
-    labels = ("댓글1", "댓글2", special_label, "댓글3", "댓글4", "댓글5")
+    labels = comment_auto_labels(job.article_type, needed)
+    chosen = rng.sample(comment_accounts, needed)
     return dict(zip(labels, chosen))
 
 
@@ -341,7 +381,7 @@ def account_for_comment_node(
 
 
 def author_from_sheet(job, book: ProxyBook | None) -> ProxyAccount | None:
-    """본문·대댓글 계정은 시트 작성계정만. 프록시 자사/제휴를 아무거나 쓰지 않는다."""
+    """시트 작성계정이 있으면 그 아이디만 쓴다. 비어 있으면 자동 배정에 맡긴다."""
     name = (getattr(job, "account", None) or "").strip()
     if not name:
         return None
@@ -353,22 +393,86 @@ def author_from_sheet(job, book: ProxyBook | None) -> ProxyAccount | None:
     return ProxyAccount(account=name)
 
 
+def author_pool_for_cafe(book: ProxyBook, cafe: str) -> list[ProxyAccount]:
+    if _is_affiliate_cafe(cafe):
+        return book.affiliate_authors()
+    return book.self_authors()
+
+
+def author_pool_label(cafe: str) -> str:
+    return "제휴" if _is_affiliate_cafe(cafe) else "자사"
+
+
+def sample_author_accounts(
+    book: ProxyBook,
+    cafe: str,
+    rng: random.Random,
+    author_id_count: int = DEFAULT_AUTO_ID_COUNT,
+) -> list[ProxyAccount]:
+    needed = normalize_auto_id_count(author_id_count)
+    pool = author_pool_for_cafe(book, cafe)
+    label = author_pool_label(cafe)
+    if len(pool) < needed:
+        raise _proxy_error(
+            f"{label} 작성 아이디가 {needed}개 필요합니다. "
+            f"지금 {len(pool)}개입니다"
+        )
+    return rng.sample(pool, needed)
+
+
+def assign_auto_authors(
+    jobs: list,
+    book: ProxyBook | None,
+    rng: random.Random | None = None,
+    *,
+    author_id_count: int = DEFAULT_AUTO_ID_COUNT,
+) -> None:
+    """작성계정이 비어 있으면 제휴/자사 본문 아이디를 수량만큼 뽑아 돌려 가며 넣는다."""
+    if book is None:
+        return
+    needed = normalize_auto_id_count(author_id_count)
+    rng = rng or random.SystemRandom()
+    groups = (
+        [job for job in jobs if _is_affiliate_cafe(job.cafe) and not (job.account or "").strip()],
+        [
+            job
+            for job in jobs
+            if not _is_affiliate_cafe(job.cafe) and not (job.account or "").strip()
+        ],
+    )
+    for empty_jobs in groups:
+        if not empty_jobs:
+            continue
+        chosen = sample_author_accounts(
+            book, empty_jobs[0].cafe, rng, needed
+        )
+        for index, job in enumerate(empty_jobs):
+            job.account = chosen[index % needed].account
+
+
 def resolve_job_accounts(
     job,
     book: ProxyBook | None,
     rng: random.Random | None = None,
+    *,
+    comment_id_count: int = COMMENT_ID_COUNT,
+    author_id_count: int = DEFAULT_AUTO_ID_COUNT,
 ) -> tuple[ProxyAccount | None, dict[str, ProxyAccount]]:
+    rng = rng or random.SystemRandom()
     author = author_from_sheet(job, book)
+    if author is None and book is not None:
+        author = sample_author_accounts(book, job.cafe, rng, author_id_count)[0]
     comment_map: dict[str, ProxyAccount] = {}
     if book is None or not job.article.comments:
         return author, comment_map
-    rng = rng or random.SystemRandom()
+    needed = normalize_auto_id_count(comment_id_count)
     if _is_affiliate_cafe(job.cafe):
         comment_map = _comment_id_map(
             job,
             book.comment_accounts(),
             rng,
             pool_label="양평맘·씨씨앙",
+            comment_id_count=needed,
         )
     else:
         comment_map = _comment_id_map(
@@ -376,5 +480,6 @@ def resolve_job_accounts(
             book.self_comment_accounts(),
             rng,
             pool_label="자사 카페",
+            comment_id_count=needed,
         )
     return author, comment_map

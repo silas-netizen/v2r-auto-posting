@@ -6,7 +6,14 @@ import tkinter as tk
 
 from .browser import user_facing_browser_error
 from .daily_posts import DailyPostSheetError, looks_like_daily_sheet
-from .gatling_accounts import recognize_proxy_workbook, require_proxy_workbook
+from .gatling_accounts import (
+    DEFAULT_AUTO_ID_COUNT,
+    MAX_AUTO_ID_COUNT,
+    MIN_AUTO_ID_COUNT,
+    normalize_auto_id_count,
+    recognize_proxy_workbook,
+    require_proxy_workbook,
+)
 from .gatling_paste import (
     DAILY_POST_SHEET_URL,
     GatlingPasteError,
@@ -38,21 +45,22 @@ class GatlingPasteApp(AutomationApp):
             messagebox.showerror("중복 실행", str(exc))
             self.destroy()
             raise SystemExit(1) from exc
-        self.geometry("860x700")
-        self.minsize(800, 620)
+        self.geometry("860x740")
+        self.minsize(800, 660)
 
     def _create_variables(self) -> None:
         self.sheet_url = tk.StringVar()
         self.local_csv = tk.StringVar()
         self.gatling_path = tk.StringVar()
         self.proxy_path = tk.StringVar()
+        self.auto_id_count = tk.IntVar(value=DEFAULT_AUTO_ID_COUNT)
         self.progress_text = tk.StringVar(value="대기 중")
 
     def _build_ui(self) -> None:
         outer = ttk.Frame(self, padding=16)
         outer.pack(fill=tk.BOTH, expand=True)
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(8, weight=1)
+        outer.rowconfigure(9, weight=1)
 
         ttk.Label(outer, text=self.app_name, font=("", 18, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
@@ -65,6 +73,7 @@ class GatlingPasteApp(AutomationApp):
                 "제휴 카페(씨씨앙·양평맘)는 새글(일상) → 글수정(원고) → 댓글 → 대댓글 "
                 "순서로 넣고, 새글 링크 열에는 그 카페 게시판 주소를 넣습니다. "
                 "자사 카페는 새글에 원고를 바로 넣습니다. "
+                "자사 카페 새글 링크에는 그 카페에 정해 둔 게시판 주소를 넣습니다. "
                 "해시태그는 원고 행에만 넣습니다. "
                 "시트에 {키워드}·{A열 키워드}·{B/A}가 있으면 사진을 고른 뒤 "
                 "{이미지}로 바꾸고, 고른 사진은 기관총 파일 옆 폴더에 모읍니다. "
@@ -73,9 +82,12 @@ class GatlingPasteApp(AutomationApp):
                 "제목과 본문이 이미 같은 원고만 넣지 않습니다. "
                 "프록시 엑셀을 넣으면 양평맘·씨씨앙은 제휴 댓글 아이디를, "
                 "자사 카페는 자사 댓글 아이디를 같은 후기형·질문형 순서로 랜덤으로 넣습니다. "
+                "아이디를 따로 고르지 않으면 아래 수량만큼 본문 작성 아이디를 자동 배정합니다. "
+                "2~10개 중 고를 수 있고, 기본은 6개입니다. "
+                "제휴 카페는 프록시 제휴 아이디를, 자사 카페는 자사 아이디를 돌려 가며 넣습니다. "
+                "시트에 작성계정이 있으면 그 아이디를 그대로 씁니다. "
+                "댓글 아이디는 댓글 넣을 때만 제휴 댓·제휴 댓글 / 자사 댓·자사 댓글에서 6개를 씁니다. "
                 "제휴 댓과 자사 댓은 서로 다른 아이디를 씁니다. "
-                "본문과 대댓글 아이디는 구글 시트 작성계정과 같고, "
-                "프록시 자사 아이디를 아무거나 넣지 않습니다. "
                 "작성자 비번·크롬번호는 그 아이디가 프록시에 있을 때만 채웁니다. "
                 "구글 시트 주소를 쓰면 '구글 시트 열기'로 시트를 엽니다. "
                 "V2R은 쓰지 않습니다. 기관총 파일은 엑셀에서 닫아 둔 .xlsm을 고르세요."
@@ -105,9 +117,26 @@ class GatlingPasteApp(AutomationApp):
             self.proxy_path,
             button=("파일", self._choose_proxy),
         )
+        ttk.Label(outer, text="자동 배정 아이디 수량", width=17).grid(
+            row=6, column=0, sticky="w", pady=3
+        )
+        count_row = ttk.Frame(outer)
+        count_row.grid(row=6, column=1, columnspan=2, sticky="w", pady=3)
+        ttk.Spinbox(
+            count_row,
+            from_=MIN_AUTO_ID_COUNT,
+            to=MAX_AUTO_ID_COUNT,
+            textvariable=self.auto_id_count,
+            width=6,
+            state="readonly",
+        ).pack(side=tk.LEFT)
+        ttk.Label(
+            count_row,
+            text="아이디를 고르지 않으면 이 개수만큼 본문 작성 아이디를 자동으로 넣습니다. 제휴 카페는 제휴, 자사 카페는 자사에서 고릅니다",
+        ).pack(side=tk.LEFT, padx=(8, 0))
 
         actions = ttk.Frame(outer)
-        actions.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 10))
+        actions.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 10))
         ttk.Button(actions, text="구글 시트 열기", command=self._open_sheet).pack(
             side=tk.LEFT
         )
@@ -130,7 +159,7 @@ class GatlingPasteApp(AutomationApp):
         self.stop_button.pack(side=tk.LEFT, padx=(8, 0))
 
         progress_frame = ttk.Frame(outer)
-        progress_frame.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        progress_frame.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(0, 6))
         progress_frame.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_frame, maximum=100)
         self.progress.grid(row=0, column=0, sticky="ew")
@@ -139,7 +168,7 @@ class GatlingPasteApp(AutomationApp):
         )
 
         log_frame = ttk.LabelFrame(outer, text="진행 기록", padding=8)
-        log_frame.grid(row=8, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=9, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state=tk.DISABLED)
@@ -176,6 +205,9 @@ class GatlingPasteApp(AutomationApp):
         if not path:
             return None
         return require_proxy_workbook(path)
+
+    def _auto_id_count(self) -> int:
+        return normalize_auto_id_count(self.auto_id_count.get())
 
     def _open_sheet(self) -> None:
         sheet_url = self.sheet_url.get().strip()
@@ -270,6 +302,7 @@ class GatlingPasteApp(AutomationApp):
                 image_resolver=self._image_resolver(),
                 existing_keys=existing_keys,
                 proxy_book=self._proxy_book(),
+                author_id_count=self._auto_id_count(),
             )
             counts = result.type_counts()
             self.logger.info(
@@ -333,6 +366,7 @@ class GatlingPasteApp(AutomationApp):
                     image_resolver=self._image_resolver(),
                     image_dir=gatling_image_folder(gatling_path),
                     proxy_book=self._proxy_book(),
+                    author_id_count=self._auto_id_count(),
                 )
                 counts = result.type_counts()
                 self.logger.info(

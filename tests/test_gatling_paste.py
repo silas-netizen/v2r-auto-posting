@@ -5,10 +5,16 @@ import pytest
 from openpyxl import Workbook, load_workbook
 
 from v2r_auto.content import CommentNode, ParsedArticle, parse_article
-from v2r_auto.gatling_accounts import recognize_proxy_workbook
+from v2r_auto.gatling_accounts import (
+    comment_auto_labels,
+    normalize_auto_id_count,
+    recognize_proxy_workbook,
+)
 from v2r_auto.images import ResolvedImage
 from v2r_auto.gatling_paste import (
     AFFILIATE_BOARD_LINKS,
+    SELF_OWNED_BOARD_LINKS,
+    SELF_OWNED_CAFE_IDS,
     AFFILIATE_EXACT_BOARDS,
     MASTER_HEADER_ROW,
     MASTER_HEADERS,
@@ -34,6 +40,7 @@ from v2r_auto.gatling_paste import (
     replace_image_tokens,
     reply_target_value,
     require_writable_gatling,
+    self_owned_board_link,
 )
 from v2r_auto.models import DailyPost
 
@@ -228,7 +235,67 @@ def test_affiliate_new_post_gets_board_link_only() -> None:
     assert yang[0].link == AFFILIATE_BOARD_LINKS["양평맘"]
     assert all(row.link != AFFILIATE_BOARD_LINKS["양평맘"] for row in yang[1:])
     assert self_owned[0].type == TYPE_NEW_POST
-    assert self_owned[0].link is None
+    assert self_owned[0].link == SELF_OWNED_BOARD_LINKS["고요한아침"]
+
+
+def test_self_owned_new_post_gets_board_link() -> None:
+    love = build_master_rows(
+        make_job(cafe="러브인썸", board="뷰티미용", with_daily=False)
+    )
+    wedding = build_master_rows(
+        make_job(cafe="마이 웨딩 드림", board="뷰티다이어트", with_daily=False)
+    )
+    love_home = build_master_rows(
+        make_job(cafe="러브 인썸 (Love in Some)", board="뷰티&미용", with_daily=False)
+    )
+
+    assert love[0].type == TYPE_NEW_POST
+    assert love[0].link == (
+        f"https://cafe.naver.com/f-e/cafes/{SELF_OWNED_CAFE_IDS['러브인썸']}"
+        "/menus/18?viewType=L"
+    )
+    assert wedding[0].link == SELF_OWNED_BOARD_LINKS["마이웨딩드림"]
+    assert love_home[0].link == love[0].link
+    assert all(
+        row.link != love[0].link for row in love[1:] if row.type != TYPE_NEW_POST
+    )
+
+
+def test_self_owned_board_link_is_one_url_per_cafe() -> None:
+    assert self_owned_board_link("러브인썸", "뷰티미용") == SELF_OWNED_BOARD_LINKS["러브인썸"]
+    assert self_owned_board_link("마이웨딩드림", "뷰티다이어트") == (
+        SELF_OWNED_BOARD_LINKS["마이웨딩드림"]
+    )
+    assert self_owned_board_link("고요한 아침") == SELF_OWNED_BOARD_LINKS["고요한아침"]
+    assert self_owned_board_link("헬씨 트리") == SELF_OWNED_BOARD_LINKS["헬씨트리"]
+    assert self_owned_board_link("송도포털") == SELF_OWNED_BOARD_LINKS["송도포털"]
+    assert self_owned_board_link("글로시 마이") == SELF_OWNED_BOARD_LINKS["글로시마이"]
+    assert self_owned_board_link("웨딩 노트") == SELF_OWNED_BOARD_LINKS["웨딩노트"]
+    assert self_owned_board_link("쌍둥이맘 모여라") == SELF_OWNED_BOARD_LINKS["쌍둥이맘모여라"]
+    assert SELF_OWNED_BOARD_LINKS["고요한아침"].endswith("/menus/29?viewType=L")
+    assert SELF_OWNED_BOARD_LINKS["헬씨트리"].endswith("/menus/27?viewType=L")
+    assert SELF_OWNED_BOARD_LINKS["송도포털"].endswith("/menus/19?viewType=L")
+    assert SELF_OWNED_BOARD_LINKS["글로시마이"].endswith("/menus/50?viewType=L")
+    assert SELF_OWNED_BOARD_LINKS["웨딩노트"].endswith("/menus/32?viewType=L")
+    assert SELF_OWNED_BOARD_LINKS["쌍둥이맘모여라"].endswith("/menus/664?viewType=L")
+    assert self_owned_board_link("없는카페") == ""
+
+
+def test_new_self_owned_cafes_write_stored_board_link() -> None:
+    rows = build_master_rows(
+        make_job(cafe="헬씨 트리", board="자유로운 건강 수다방", with_daily=False)
+    )
+    assert rows[0].type == TYPE_NEW_POST
+    assert rows[0].link == SELF_OWNED_BOARD_LINKS["헬씨트리"]
+    songdo = build_master_rows(
+        make_job(cafe="송도포털", board="친해지는 수다", with_daily=False)
+    )
+    assert songdo[0].link == SELF_OWNED_BOARD_LINKS["송도포털"]
+    twin = build_master_rows(
+        make_job(cafe="쌍둥이맘 모여라", board="ㄴ가족업체 자유게시판", with_daily=False)
+    )
+    assert twin[0].link == SELF_OWNED_BOARD_LINKS["쌍둥이맘모여라"]
+    assert twin[0].board_name == "ㄴ가족업체 자유게시판"
 
 
 def test_affiliate_without_daily_post_raises() -> None:
@@ -1003,13 +1070,25 @@ def write_proxy_xlsx(
     tmp_path: Path,
     comment_count: int = 6,
     self_comment_count: int = 6,
+    affiliate_author_count: int = 1,
+    self_author_count: int = 1,
 ) -> Path:
     path = tmp_path / "proxy.xlsx"
     workbook = Workbook()
     sheet = workbook.active
     sheet.append(["아이피:포트", "크롬번", "아이디", "비번", "카테고리"])
     sheet.append(["10.0.0.1:3030", 1, "writer", "pw-writer", "제휴"])
+    for offset in range(1, affiliate_author_count):
+        name = f"writer{offset + 1}"
+        sheet.append(
+            [f"10.0.1.{offset}:3030", 100 + offset, name, f"pw-{name}", "제휴"]
+        )
     sheet.append(["10.0.0.2:3030", 10, "selfwriter", "pw-self", "자사"])
+    for offset in range(1, self_author_count):
+        name = f"selfwriter{offset + 1}"
+        sheet.append(
+            [f"10.0.2.{offset}:3030", 200 + offset, name, f"pw-{name}", "자사"]
+        )
     for offset in range(comment_count):
         name = f"c{offset + 1}"
         sheet.append(
@@ -1215,3 +1294,315 @@ def test_paste_writes_chrome_id_and_password(tmp_path: Path) -> None:
     assert sheet.cell(9, 5).value == 10
     assert sheet.cell(9, 6).value == "selfwriter"
     assert sheet.cell(9, 7).value == "pw-self"
+
+
+def test_auto_id_count_accepts_two_to_ten() -> None:
+    assert normalize_auto_id_count(2) == 2
+    assert normalize_auto_id_count(6) == 6
+    assert normalize_auto_id_count(10) == 10
+    with pytest.raises(GatlingPasteError, match="2~10"):
+        normalize_auto_id_count(1)
+    with pytest.raises(GatlingPasteError, match="2~10"):
+        normalize_auto_id_count(11)
+
+
+def test_auto_id_labels_keep_six_id_order() -> None:
+    assert comment_auto_labels("질문형", 6) == [
+        "댓글1",
+        "댓글2",
+        "대대대댓글2",
+        "댓글3",
+        "댓글4",
+        "댓글5",
+    ]
+    assert comment_auto_labels("후기형", 6) == [
+        "댓글1",
+        "댓글2",
+        "대대댓글2",
+        "댓글3",
+        "댓글4",
+        "댓글5",
+    ]
+    assert comment_auto_labels("질문형", 2) == ["댓글1", "댓글2"]
+    assert comment_auto_labels("후기형", 3) == ["댓글1", "댓글2", "대대댓글2"]
+    assert comment_auto_labels("질문형", 10) == [
+        "댓글1",
+        "댓글2",
+        "대대대댓글2",
+        "댓글3",
+        "댓글4",
+        "댓글5",
+        "댓글6",
+        "댓글7",
+        "댓글8",
+        "댓글9",
+    ]
+
+
+def test_two_auto_ids_fill_only_first_comments(tmp_path: Path) -> None:
+    job = make_job(cafe="씨씨앙", board="자유수다방")
+    job.account = "writer"
+    job.article_type = "질문형"
+    book = recognize_proxy_workbook(write_proxy_xlsx(tmp_path, comment_count=2))
+    rng = random.Random(1)
+    chosen = rng.sample(book.comment_accounts(), 2)
+    rows = build_master_rows(
+        job,
+        proxy_book=book,
+        rng=random.Random(1),
+        comment_id_count=2,
+    )
+
+    comments = [row for row in rows if row.type == TYPE_COMMENT]
+    replies = [row for row in rows if row.type == TYPE_REPLY]
+    assert comments[0].account == chosen[0].account
+    assert comments[1].account == chosen[1].account
+    assert replies[2].account == chosen[1].account
+    assert replies[3].account in {"", None}
+    assert {row.account for row in comments} == {item.account for item in chosen}
+
+
+def test_three_auto_ids_include_special_reply(tmp_path: Path) -> None:
+    job = make_job(cafe="씨씨앙", board="자유수다방")
+    job.account = "writer"
+    job.article_type = "질문형"
+    book = recognize_proxy_workbook(write_proxy_xlsx(tmp_path, comment_count=3))
+    rng = random.Random(4)
+    chosen = rng.sample(book.comment_accounts(), 3)
+    rows = build_master_rows(
+        job,
+        proxy_book=book,
+        rng=random.Random(4),
+        comment_id_count=3,
+    )
+    replies = [row for row in rows if row.type == TYPE_REPLY]
+    assert replies[2].account == chosen[1].account
+    assert replies[3].account == chosen[2].account
+
+
+def test_ten_auto_ids_need_ten_proxy_accounts(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{QUESTION_SOURCE}",씨씨앙,writer,질문형,,,,,자유수다방\n',
+    )
+    book = recognize_proxy_workbook(write_proxy_xlsx(tmp_path, comment_count=10))
+    result = build_gatling_master(
+        brand,
+        manuscript_only=True,
+        proxy_book=book,
+        comment_id_count=10,
+        rng=random.Random(5),
+    )
+    comments = [row for row in result.rows if row.type == TYPE_COMMENT]
+    assert len({row.account for row in comments if row.account}) == 2
+    assert all(row.account for row in comments)
+
+    thin = recognize_proxy_workbook(write_proxy_xlsx(tmp_path, comment_count=4))
+    with pytest.raises(GatlingPasteError, match="댓글 아이디가 10개"):
+        build_gatling_master(
+            brand,
+            manuscript_only=True,
+            proxy_book=thin,
+            comment_id_count=10,
+        )
+
+
+def test_selected_count_overrides_default_six(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{QUESTION_SOURCE}",고요한아침,selfwriter,질문형,,,,,가입인사\n',
+    )
+    book = recognize_proxy_workbook(
+        write_proxy_xlsx(tmp_path, self_comment_count=2)
+    )
+    result = build_gatling_master(
+        brand,
+        manuscript_only=True,
+        proxy_book=book,
+        comment_id_count=2,
+    )
+    comments = [row for row in result.rows if row.type == TYPE_COMMENT]
+    assert all(row.account for row in comments)
+    assert {row.account for row in comments} <= {"s1", "s2"}
+
+
+def test_empty_account_uses_affiliate_authors_not_comment_ids(tmp_path: Path) -> None:
+    first = QUESTION_SOURCE.replace("실제 원고 제목", "첫째 제목").replace("실제 원고 본문", "첫째 본문")
+    second = QUESTION_SOURCE.replace("실제 원고 제목", "둘째 제목").replace("실제 원고 본문", "둘째 본문")
+    third = QUESTION_SOURCE.replace("실제 원고 제목", "셋째 제목").replace("실제 원고 본문", "셋째 본문")
+    fourth = QUESTION_SOURCE.replace("실제 원고 제목", "넷째 제목").replace("실제 원고 본문", "넷째 본문")
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{first}",씨씨앙,,질문형,,,,,자유수다방\n'
+        f'"단식원 후기","{second}",씨씨앙,,질문형,,,,,자유수다방\n'
+        f'"단식원 비용","{third}",씨씨앙,,질문형,,,,,자유수다방\n'
+        f'"단식원 비교","{fourth}",씨씨앙,,질문형,,,,,자유수다방\n',
+    )
+    book = recognize_proxy_workbook(
+        write_proxy_xlsx(tmp_path, affiliate_author_count=6)
+    )
+    expected = random.Random(1).sample(book.affiliate_authors(), 2)
+    result = build_gatling_master(
+        brand,
+        manuscript_only=True,
+        proxy_book=book,
+        author_id_count=2,
+        rng=random.Random(1),
+    )
+    edits = [row for row in result.rows if row.type == TYPE_EDIT_POST]
+    comments = [row for row in result.rows if row.type == TYPE_COMMENT]
+    assert [row.account for row in edits] == [
+        expected[0].account,
+        expected[1].account,
+        expected[0].account,
+        expected[1].account,
+    ]
+    author_names = {item.account for item in book.affiliate_authors()}
+    comment_names = {item.account for item in book.comment_accounts()}
+    assert set(row.account for row in edits) <= author_names
+    assert set(row.account for row in comments).isdisjoint(author_names)
+    assert {row.account for row in comments} <= comment_names
+
+
+def test_empty_account_uses_self_authors_not_comment_ids(tmp_path: Path) -> None:
+    first = QUESTION_SOURCE.replace("실제 원고 제목", "첫째 제목").replace("실제 원고 본문", "첫째 본문")
+    second = QUESTION_SOURCE.replace("실제 원고 제목", "둘째 제목").replace("실제 원고 본문", "둘째 본문")
+    third = QUESTION_SOURCE.replace("실제 원고 제목", "셋째 제목").replace("실제 원고 본문", "셋째 본문")
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{first}",고요한아침,,질문형,,,,,가입인사\n'
+        f'"단식원 후기","{second}",고요한아침,,질문형,,,,,가입인사\n'
+        f'"단식원 비용","{third}",고요한아침,,질문형,,,,,가입인사\n',
+    )
+    book = recognize_proxy_workbook(
+        write_proxy_xlsx(tmp_path, self_author_count=6)
+    )
+    expected = random.Random(3).sample(book.self_authors(), 2)
+    result = build_gatling_master(
+        brand,
+        manuscript_only=True,
+        proxy_book=book,
+        author_id_count=2,
+        rng=random.Random(3),
+    )
+    posts = [row for row in result.rows if row.type == TYPE_NEW_POST]
+    comments = [row for row in result.rows if row.type == TYPE_COMMENT]
+    assert [row.account for row in posts] == [
+        expected[0].account,
+        expected[1].account,
+        expected[0].account,
+    ]
+    assert {row.account for row in posts} <= {item.account for item in book.self_authors()}
+    assert {row.account for row in comments} <= {
+        item.account for item in book.self_comment_accounts()
+    }
+    assert {row.account for row in posts}.isdisjoint(
+        {item.account for item in book.self_comment_accounts()}
+    )
+
+
+def test_filled_sheet_author_is_kept_when_others_auto_assign(tmp_path: Path) -> None:
+    first = QUESTION_SOURCE.replace("실제 원고 제목", "첫째 제목").replace("실제 원고 본문", "첫째 본문")
+    second = QUESTION_SOURCE.replace("실제 원고 제목", "둘째 제목").replace("실제 원고 본문", "둘째 본문")
+    third = QUESTION_SOURCE.replace("실제 원고 제목", "셋째 제목").replace("실제 원고 본문", "셋째 본문")
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{first}",씨씨앙,writer,질문형,,,,,자유수다방\n'
+        f'"단식원 후기","{second}",씨씨앙,,질문형,,,,,자유수다방\n'
+        f'"단식원 비용","{third}",씨씨앙,,질문형,,,,,자유수다방\n',
+    )
+    book = recognize_proxy_workbook(
+        write_proxy_xlsx(tmp_path, affiliate_author_count=6)
+    )
+    result = build_gatling_master(
+        brand,
+        manuscript_only=True,
+        proxy_book=book,
+        author_id_count=2,
+        rng=random.Random(7),
+    )
+    edits = [row for row in result.rows if row.type == TYPE_EDIT_POST]
+    assert edits[0].account == "writer"
+    auto_names = {edits[1].account, edits[2].account}
+    assert auto_names <= {item.account for item in book.affiliate_authors()}
+    assert auto_names.isdisjoint({item.account for item in book.comment_accounts()})
+
+
+def test_author_count_still_needs_six_comment_ids(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{QUESTION_SOURCE}",고요한아침,selfwriter,질문형,,,,,가입인사\n',
+    )
+    book = recognize_proxy_workbook(
+        write_proxy_xlsx(tmp_path, self_comment_count=2, self_author_count=6)
+    )
+    with pytest.raises(GatlingPasteError, match="자사 카페 댓글 아이디가 6개"):
+        build_gatling_master(
+            brand,
+            manuscript_only=True,
+            proxy_book=book,
+            author_id_count=2,
+        )
+
+
+def test_too_few_authors_for_auto_assign_raises(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{QUESTION_SOURCE}",고요한아침,,질문형,,,,,가입인사\n',
+    )
+    book = recognize_proxy_workbook(write_proxy_xlsx(tmp_path))
+    with pytest.raises(GatlingPasteError, match="자사 작성 아이디가 6개"):
+        build_gatling_master(brand, manuscript_only=True, proxy_book=book)
+    with pytest.raises(GatlingPasteError, match="자사 작성 아이디가 2개"):
+        build_gatling_master(
+            brand,
+            manuscript_only=True,
+            proxy_book=book,
+            author_id_count=2,
+        )
+
+
+def test_comment_categories_accept_댓_and_댓글(tmp_path: Path) -> None:
+    path = tmp_path / "proxy-labels.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["아이피:포트", "크롬번", "아이디", "비번", "카테고리"])
+    sheet.append(["10.0.0.1:3030", 1, "writer", "pw-writer", "제휴"])
+    sheet.append(["10.0.0.2:3030", 10, "selfwriter", "pw-self", "자사"])
+    affiliate_labels = ["제휴 댓", "제휴댓", "제휴 댓글", "제휴댓글", "제휴 댓", "제휴댓글"]
+    self_labels = ["자사 댓", "자사댓", "자사 댓글", "자사댓글", "자사 댓", "자사댓글"]
+    for offset, label in enumerate(affiliate_labels):
+        name = f"ac{offset + 1}"
+        sheet.append(
+            [f"10.0.3.{offset}:3030", 40 + offset, name, f"pw-{name}", label]
+        )
+    for offset, label in enumerate(self_labels):
+        name = f"sc{offset + 1}"
+        sheet.append(
+            [f"10.0.4.{offset}:3030", 50 + offset, name, f"pw-{name}", label]
+        )
+    workbook.save(path)
+    book = recognize_proxy_workbook(path)
+    assert {item.account for item in book.comment_accounts()} == {
+        "ac1",
+        "ac2",
+        "ac3",
+        "ac4",
+        "ac5",
+        "ac6",
+    }
+    assert {item.account for item in book.self_comment_accounts()} == {
+        "sc1",
+        "sc2",
+        "sc3",
+        "sc4",
+        "sc5",
+        "sc6",
+    }
