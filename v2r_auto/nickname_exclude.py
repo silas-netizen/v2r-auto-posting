@@ -75,6 +75,7 @@ SEARCH_SCOPES = (
     SearchScope("글 + 댓글", "ARTICLE_COMMENT", 0),
     SearchScope("댓글내용", "COMMENT", 4),
 )
+WRITER_SCOPE = SearchScope("글작성자", "WRITER", 3)
 MAX_SEARCH_PAGES = 200
 ARTICLE_ID_KEYS = ("articleId", "articleid", "article_id")
 ARTICLE_LIST_KEYS = ("articleList", "articles", "articleItems")
@@ -186,6 +187,50 @@ def write_nicknames_comma_file(path: Path, nicknames: Iterable[str]) -> Path:
     if text:
         text += "\n"
     path.write_text(text, encoding="utf-8")
+    return path
+
+
+def article_url(cafe: CafeTarget, article_id: str) -> str:
+    aid = str(article_id or "").strip()
+    if not aid:
+        raise NicknameExcludeError("글 번호가 없습니다")
+    if cafe.slug:
+        return f"https://cafe.naver.com/{cafe.slug}/{aid}"
+    cafe_id = require_cafe_id(cafe)
+    return f"https://cafe.naver.com/f-e/cafes/{cafe_id}/articles/{aid}"
+
+
+def unique_urls(urls: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    found: list[str] = []
+    for raw in urls:
+        url = (raw or "").strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        found.append(url)
+    return found
+
+
+def format_author_links(rows: Iterable[tuple[str, Iterable[str]]]) -> str:
+    blocks: list[str] = []
+    for nickname, urls in rows:
+        nick = clean_nickname(str(nickname))
+        links = unique_urls(urls)
+        if not nick:
+            continue
+        if links:
+            blocks.append("\n".join([nick, *links]))
+        else:
+            blocks.append(nick)
+    if not blocks:
+        return ""
+    return "\n\n".join(blocks) + "\n"
+
+
+def write_author_links_file(path: Path, rows: Iterable[tuple[str, Iterable[str]]]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(format_author_links(rows), encoding="utf-8")
     return path
 
 
@@ -578,14 +623,17 @@ class ExcludeSyncResult:
     already: list[str] = field(default_factory=list)
     added: list[str] = field(default_factory=list)
     saved: list[str] = field(default_factory=list)
+    author_links: list[tuple[str, list[str]]] = field(default_factory=list)
 
     def summary(self) -> str:
-        return "\n".join(
-            [
-                f"검색어 {len(self.keywords)}개",
-                f"카페에서 찾은 닉네임 {len(self.found)}개",
-            ]
-        )
+        lines = [
+            f"검색어 {len(self.keywords)}개",
+            f"카페에서 찾은 닉네임 {len(self.found)}개",
+        ]
+        if self.author_links:
+            total = sum(len(urls) for _nick, urls in self.author_links)
+            lines.append(f"글 링크 {total}개")
+        return "\n".join(lines)
 
 
 @dataclass(slots=True)
@@ -595,6 +643,7 @@ class LocalSettings:
     keywords: str = ", ".join(DEFAULT_KEYWORDS)
     watch: bool = False
     watch_minutes: int = 30
+    collect_author_links: bool = False
 
     @classmethod
     def load(cls, path: Path) -> "LocalSettings":
@@ -612,6 +661,7 @@ class LocalSettings:
             keywords=str(data.get("keywords") or ", ".join(DEFAULT_KEYWORDS)),
             watch=bool(data.get("watch")),
             watch_minutes=max(5, int(data.get("watch_minutes") or 30)),
+            collect_author_links=bool(data.get("collect_author_links")),
         )
 
     def save(self, path: Path) -> None:
@@ -624,6 +674,7 @@ class LocalSettings:
                     "keywords": self.keywords,
                     "watch": self.watch,
                     "watch_minutes": self.watch_minutes,
+                    "collect_author_links": self.collect_author_links,
                 },
                 ensure_ascii=False,
                 indent=2,

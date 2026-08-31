@@ -5,14 +5,17 @@ from v2r_auto.nickname_exclude import (
     DEFAULT_CAFE_URL,
     DEFAULT_KEYWORDS,
     SEARCH_SCOPES,
+    WRITER_SCOPE,
     NicknameExcludeError,
     article_ids_from_html,
     article_ids_from_json,
+    article_url,
     build_sync_result,
     cafe_id_from_page,
     cafe_search_url,
     cafe_search_url_modern,
     cookies_show_naver_login,
+    format_author_links,
     join_nicknames,
     join_nicknames_export,
     join_nicknames_lines,
@@ -30,6 +33,7 @@ from v2r_auto.nickname_exclude import (
     search_page_info,
     should_stop_search,
     split_keywords,
+    write_author_links_file,
     write_nicknames_comma_file,
     write_nicknames_file,
 )
@@ -92,6 +96,14 @@ def test_search_uses_post_comment_and_comment_content() -> None:
         ("글 + 댓글", "ARTICLE_COMMENT", 0),
         ("댓글내용", "COMMENT", 4),
     ]
+    assert WRITER_SCOPE.label == "글작성자"
+    assert WRITER_SCOPE.ta == "WRITER"
+    assert WRITER_SCOPE.search_by == 3
+    writer = cafe_search_url("도라지소다", parse_cafe_address(DEFAULT_CAFE_URL), scope=WRITER_SCOPE)
+    assert "ta=WRITER" in writer
+    writer_api = search_api_urls("도라지소다", 1, parse_cafe_address(DEFAULT_CAFE_URL), scope=WRITER_SCOPE)
+    assert "ta=WRITER" in writer_api[0]
+    assert "search.searchBy=3" in writer_api[2]
 
 
 def test_cafe_search_url_is_article_search_not_write() -> None:
@@ -197,14 +209,14 @@ def test_one_keyword_searches_both_scopes_and_dedupes() -> None:
     session.logger = type("Log", (), {"info": staticmethod(lambda *args, **kwargs: None)})()
     calls: list[str] = []
 
-    def fake_scope(keyword: str, scope, should_stop):
+    def fake_hits(keyword: str, scope, should_stop):
         calls.append(scope.label)
         assert keyword == "안티치"
         if scope.ta == "ARTICLE_COMMENT":
-            return ["도라지소다", "시치미역"]
-        return ["시치미역", "댓글닉"]
+            return ["도라지소다", "시치미역"], ["1", "2"]
+        return ["시치미역", "댓글닉"], ["3"]
 
-    session._search_one_keyword_scope = fake_scope  # type: ignore[method-assign]
+    session._search_hits = fake_hits  # type: ignore[method-assign]
     session._require_cafe_login = lambda: None  # type: ignore[method-assign]
     found = session._search_one_keyword("안티치", None)
     assert calls == ["글 + 댓글", "댓글내용"]
@@ -336,3 +348,59 @@ def test_search_stops_when_later_pages_have_no_new_articles() -> None:
     found = session._search_one_keyword_scope("안티치", SEARCH_SCOPES[0], None)
     assert pages == [1, 2]
     assert found == ["도라지소다"]
+
+
+def test_article_url_uses_cafe_slug() -> None:
+    cafe = parse_cafe_address(DEFAULT_CAFE_URL)
+    assert article_url(cafe, "914") == "https://cafe.naver.com/cantsb/914"
+    numbered = parse_cafe_address("https://cafe.naver.com/f-e/cafes/22788814")
+    assert article_url(numbered, "12") == (
+        "https://cafe.naver.com/f-e/cafes/22788814/articles/12"
+    )
+
+
+def test_author_links_are_grouped_and_deduped(tmp_path) -> None:
+    text = format_author_links(
+        [
+            ("도라지소다", ["https://cafe.naver.com/cantsb/1", "https://cafe.naver.com/cantsb/1"]),
+            ("시치미역", ["https://cafe.naver.com/cantsb/2"]),
+        ]
+    )
+    assert text == (
+        "도라지소다\nhttps://cafe.naver.com/cantsb/1\n\n"
+        "시치미역\nhttps://cafe.naver.com/cantsb/2\n"
+    )
+    path = write_author_links_file(
+        tmp_path / "작성글링크.txt",
+        [("도라지소다", ["https://cafe.naver.com/cantsb/1"])],
+    )
+    assert path.read_text(encoding="utf-8") == "도라지소다\nhttps://cafe.naver.com/cantsb/1\n"
+
+
+def test_collect_author_links_searches_each_nickname_as_writer() -> None:
+    session = NicknameExcludeSession.__new__(NicknameExcludeSession)
+    session.cafe = parse_cafe_address(DEFAULT_CAFE_URL)
+    session.logger = type("Log", (), {"info": staticmethod(lambda *args, **kwargs: None)})()
+    calls: list[tuple[str, str]] = []
+
+    def fake_hits(keyword: str, scope, should_stop):
+        calls.append((keyword, scope.ta))
+        assert scope.ta == "WRITER"
+        if keyword == "도라지소다":
+            return [], ["914", "900"]
+        return [], ["880"]
+
+    session._require_cafe_login = lambda: None  # type: ignore[method-assign]
+    session._search_hits = fake_hits  # type: ignore[method-assign]
+    rows = session.collect_author_article_links(["도라지소다", "시치미역"])
+    assert calls == [("도라지소다", "WRITER"), ("시치미역", "WRITER")]
+    assert rows == [
+        (
+            "도라지소다",
+            [
+                "https://cafe.naver.com/cantsb/914",
+                "https://cafe.naver.com/cantsb/900",
+            ],
+        ),
+        ("시치미역", ["https://cafe.naver.com/cantsb/880"]),
+    ]

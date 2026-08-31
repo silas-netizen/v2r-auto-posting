@@ -13,6 +13,7 @@ from .nickname_exclude import (
     NicknameExcludeError,
     open_nicknames_notepad,
     parse_cafe_address,
+    write_author_links_file,
     write_nicknames_comma_file,
     write_nicknames_file,
 )
@@ -32,8 +33,8 @@ class NicknameExcludeApp(AutomationApp):
             messagebox.showerror("중복 실행", str(exc))
             self.destroy()
             raise SystemExit(1) from exc
-        self.geometry("820x680")
-        self.minsize(760, 620)
+        self.geometry("820x720")
+        self.minsize(760, 660)
 
     def _settings_path(self):
         return self.data_dir / "settings.json"
@@ -44,13 +45,14 @@ class NicknameExcludeApp(AutomationApp):
         self.keywords = tk.StringVar(value=settings.keywords or ", ".join(DEFAULT_KEYWORDS))
         self.watch = tk.BooleanVar(value=settings.watch)
         self.watch_minutes = tk.IntVar(value=settings.watch_minutes)
+        self.collect_author_links = tk.BooleanVar(value=settings.collect_author_links)
         self.progress_text = tk.StringVar(value="대기 중")
 
     def _build_ui(self) -> None:
         outer = ttk.Frame(self, padding=16)
         outer.pack(fill=tk.BOTH, expand=True)
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(6, weight=1)
+        outer.rowconfigure(7, weight=1)
 
         ttk.Label(outer, text=self.app_name, font=("", 18, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
@@ -62,6 +64,7 @@ class NicknameExcludeApp(AutomationApp):
                 "식별 키워드는 글 + 댓글과 댓글내용으로 각각 검색하고, "
                 "나온 닉네임을 합쳐 중복을 뺀 다음 "
                 "메모장에 줄바꿈과 콤마 목록을 같이 띄웁니다. "
+                "옵션을 켜면 그 닉네임을 글작성자로 검색해 쓴 글 링크도 모읍니다. "
                 "복사해서 신고기 제외 닉네임 칸에 넣으면 됩니다. "
                 "글쓰기 버튼은 쓰지 않습니다."
             ),
@@ -87,8 +90,16 @@ class NicknameExcludeApp(AutomationApp):
             width=6,
         ).pack(side=tk.LEFT)
 
+        extras = ttk.Frame(outer)
+        extras.grid(row=5, column=0, columnspan=3, sticky="w", pady=(0, 10))
+        ttk.Checkbutton(
+            extras,
+            text="추출한 닉네임이 쓴 글 링크도 모으기",
+            variable=self.collect_author_links,
+        ).pack(side=tk.LEFT)
+
         buttons = ttk.Frame(outer)
-        buttons.grid(row=5, column=0, columnspan=3, sticky="w", pady=(0, 10))
+        buttons.grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 10))
         ttk.Button(buttons, text="로그인 준비", command=self._open_login).pack(side=tk.LEFT)
         self.start_button = ttk.Button(buttons, text="닉네임 모으기", command=self._start)
         self.start_button.pack(side=tk.LEFT, padx=(8, 0))
@@ -98,7 +109,7 @@ class NicknameExcludeApp(AutomationApp):
         self.stop_button.pack(side=tk.LEFT, padx=(8, 0))
 
         log_frame = ttk.LabelFrame(outer, text="진행 기록", padding=8)
-        log_frame.grid(row=6, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=7, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state=tk.DISABLED)
@@ -108,7 +119,7 @@ class NicknameExcludeApp(AutomationApp):
         self.log_text.configure(yscrollcommand=scrollbar.set)
 
         progress_frame = ttk.Frame(outer)
-        progress_frame.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        progress_frame.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         progress_frame.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_frame, maximum=100)
         self.progress.grid(row=0, column=0, sticky="ew")
@@ -122,6 +133,7 @@ class NicknameExcludeApp(AutomationApp):
             keywords=self.keywords.get().strip(),
             watch=self.watch.get(),
             watch_minutes=max(5, int(self.watch_minutes.get() or 30)),
+            collect_author_links=self.collect_author_links.get(),
         ).save(self._settings_path())
 
     def _read_cafe(self):
@@ -170,6 +182,7 @@ class NicknameExcludeApp(AutomationApp):
             messagebox.showerror("입력 오류", "브랜드 식별 키워드를 넣어 주세요")
             return
         watch = self.watch.get()
+        collect_author_links = self.collect_author_links.get()
         try:
             minutes = max(5, int(self.watch_minutes.get() or 30))
         except (tk.TclError, ValueError):
@@ -192,6 +205,7 @@ class NicknameExcludeApp(AutomationApp):
                         keywords,
                         should_stop=self.stop_event.is_set,
                         cafe_url=cafe_url,
+                        collect_author_links=collect_author_links,
                     )
                     path = write_nicknames_file(
                         self.data_dir / "제외닉네임.txt",
@@ -209,6 +223,18 @@ class NicknameExcludeApp(AutomationApp):
                         path,
                         comma_path,
                     )
+                    extra_note = ""
+                    if plan.author_links:
+                        links_path = write_author_links_file(
+                            self.data_dir / "작성글링크.txt",
+                            plan.author_links,
+                        )
+                        open_nicknames_notepad(links_path)
+                        extra_note = "\n글 링크도 메모장에 띄웠습니다."
+                        self.logger.info(
+                            "글 링크를 메모장에 띄웠습니다: %s",
+                            links_path,
+                        )
                     self.logger.info(plan.summary().replace("\n", " / "))
                     self._set_progress(2, 2)
                     if not watch:
@@ -217,7 +243,8 @@ class NicknameExcludeApp(AutomationApp):
                                 "info",
                                 (
                                     "닉네임 모음",
-                                    f"{plan.summary()}\n\n메모장에 줄바꿈 목록과 콤마 목록을 띄웠습니다.\n"
+                                    f"{plan.summary()}\n\n메모장에 줄바꿈 목록과 콤마 목록을 띄웠습니다."
+                                    f"{extra_note}\n"
                                     "복사해서 신고기 제외 닉네임 칸에 넣으면 됩니다.",
                                 ),
                             )
