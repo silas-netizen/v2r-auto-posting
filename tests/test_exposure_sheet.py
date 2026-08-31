@@ -4,11 +4,13 @@ from pathlib import Path
 from urllib.error import URLError
 
 from v2r_auto.exposure import ExposureChecker, ExposureRow, STATUS_EXPOSED, STATUS_HIDDEN
+from v2r_auto.sheet_values import parse_sheet_table
 from v2r_auto.exposure_sheet import (
     GoogleSheetExposureStore,
     SheetError,
     SheetWrite,
     column_letter,
+    find_spacing_duplicate_rows,
     now_stamp,
     parse_spreadsheet_ref,
     plan_sheet_writes,
@@ -51,6 +53,7 @@ class RecordingWriter:
     def __init__(self):
         self.writes: list[tuple[str, str, int, str]] = []
         self.locks: list[tuple[str, str, int]] = []
+        self.deletes: list[int] = []
 
     def write_cell(
         self,
@@ -64,6 +67,15 @@ class RecordingWriter:
         self.writes.append((sheet_url, column, row_number, value))
         self.locks.append((expect_keyword, keyword_column, row_number))
         return row_number
+
+    def delete_row(
+        self,
+        sheet_url: str,
+        row_number: int,
+        expect_keyword: str = "",
+        keyword_column: str = "",
+    ) -> None:
+        self.deletes.append(row_number)
 
 
 def _sheet_row(
@@ -147,6 +159,104 @@ def test_column_letter() -> None:
 
 def test_now_stamp_uses_local_clock() -> None:
     assert now_stamp(datetime(2026, 8, 27, 16, 32, 5)) == "2026-08-27 16:32:05"
+
+
+def test_find_spacing_duplicate_rows_treats_spaces_and_notes_as_same() -> None:
+    table = parse_sheet_table(
+        "카페,노출 상태,키워드\n"
+        ",,치핵 수술 비용\n"
+        ",,다른\n"
+        ",,치핵수술비용\n"
+        ",,무통치질수술 비용 (+무통치질수술)\n"
+        ",,무통 치질수술비용\n"
+    )
+    assert find_spacing_duplicate_rows(table, "치핵수술비용", 2) == [2, 4]
+    assert find_spacing_duplicate_rows(table, "무통 치질수술비용", 2) == [5, 6]
+
+
+def test_store_deletes_spacing_duplicate_and_keeps_autocomplete_row() -> None:
+    csv_text = (
+        "카페명,url,발행시간,작성자 아이디,작성자 비밀번호,발행 URL,"
+        "노출 상태,키워드,통합검색,최종 편집 일시,키워드 검색량,노출된 검색량\n"
+        ",,,,,,밀려남,치핵 수술 비용,,,\n"
+        ",,,,,,밀려남,다른키워드,,,\n"
+        ",,,,,,밀려남,치핵수술비용,,,\n"
+    )
+    writer = RecordingWriter()
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        __import__("logging").getLogger("test"),
+        opener=lambda request, timeout=30: FakeResponse(csv_text.encode("utf-8")),
+        writer=writer,
+    )
+    store.load_rows()
+    current = _sheet_row(keyword="치핵수술비용", page_id="4")
+    other = _sheet_row(keyword="치핵 수술 비용", page_id="2")
+    kept = store.collapse_spacing_duplicates(
+        current,
+        canonical_keyword="치핵 수술 비용",
+        first_cafe="",
+        queue=[other, current],
+    )
+    assert writer.deletes == [4]
+    assert kept.page_id == "2"
+    assert kept.keyword == "치핵 수술 비용"
+    assert current.page_id == "2"
+    assert other.page_id == "2"
+
+
+def test_store_rewrites_kept_keyword_to_autocomplete_spacing() -> None:
+    csv_text = (
+        "카페명,url,발행시간,작성자 아이디,작성자 비밀번호,발행 URL,"
+        "노출 상태,키워드,통합검색,최종 편집 일시,키워드 검색량,노출된 검색량\n"
+        ",,,,,,밀려남,항문안쪽통증,,,\n"
+        ",,,,,,밀려남,항문안쪽 통증,,,\n"
+    )
+    writer = RecordingWriter()
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        __import__("logging").getLogger("test"),
+        opener=lambda request, timeout=30: FakeResponse(csv_text.encode("utf-8")),
+        writer=writer,
+    )
+    store.load_rows()
+    first = _sheet_row(keyword="항문안쪽통증", page_id="2")
+    second = _sheet_row(keyword="항문안쪽 통증", page_id="3")
+    kept = store.collapse_spacing_duplicates(
+        first,
+        canonical_keyword="항문 안쪽 통증",
+        first_cafe="",
+        queue=[first, second],
+    )
+    assert writer.deletes == [3]
+    assert kept.page_id == "2"
+    assert kept.keyword == "항문 안쪽 통증"
+    assert ("H", 2, "항문 안쪽 통증") in [
+        (column, number, value) for _url, column, number, value in writer.writes
+    ]
+
+
+def test_checker_does_not_collapse_in_dry_run() -> None:
+    class FakeSheet:
+        def collapse_spacing_duplicates(self, *_args, **_kwargs):
+            raise AssertionError("dry-run must not delete rows")
+
+        def update_check_result(self, *_args, **_kwargs):
+            raise AssertionError("dry-run must not write")
+
+    class FakeNaver:
+        def search_integrated(self, keyword: str) -> str:
+            return "<div id='main_pack'></div>"
+
+        def open_post_text(self, url: str) -> str:
+            return ""
+
+    ExposureChecker(
+        FakeSheet(),
+        FakeNaver(),
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    ).run([_sheet_row()], dry_run=True)
 
 
 def test_plan_sheet_writes_exposed_with_volume() -> None:

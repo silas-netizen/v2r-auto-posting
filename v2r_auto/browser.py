@@ -42,6 +42,7 @@ from .sheet_values import (
     sheet_value_needs_keystrokes,
     sheet_write_confirmed,
 )
+from .exposure import spacing_keyword_key
 
 
 V2R_LIST_URL = "https://v2r.daboja.im/nc/board?view=list"
@@ -295,6 +296,143 @@ class V2RBrowser:
             )
         finally:
             self._switch_to_handle(self.v2r_handle)
+
+    def delete_sheet_row(
+        self,
+        sheet_url: str,
+        row_number: int,
+        *,
+        expect_keyword: str = "",
+        keyword_column: str = "",
+        max_attempts: int = 3,
+    ) -> None:
+        """Delete one data row after confirming its keyword."""
+        self.start()
+        assert self.driver
+        row_number = int(row_number)
+        if row_number < 2:
+            raise AutomationError("헤더 행은 지우지 않습니다")
+        parsed = urlparse(sheet_url)
+        gid = parse_qs(parsed.query).get("gid", ["0"])[0]
+        if parsed.fragment.startswith("gid="):
+            gid = parsed.fragment.split("=", 1)[1].split("&", 1)[0]
+        sheet_url_with_range = (
+            f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+            f"?{parsed.query}#gid={gid}&range={row_number}:{row_number}"
+        )
+        last_error: Exception | None = None
+        try:
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    self._navigate(sheet_url_with_range, self.google_handle)
+                    self.google_handle = self.driver.current_window_handle
+                    self.wait.until(
+                        lambda driver: driver.execute_script(
+                            "return document.readyState"
+                        )
+                        == "complete"
+                    )
+                    self.wait.until(
+                        EC.presence_of_element_located(
+                            (By.ID, "waffle-rich-text-editor")
+                        )
+                    )
+                    self.driver.execute_script("window.focus();")
+                    self.wait.until(lambda driver: self._find_sheet_name_box() is not None)
+                    if expect_keyword and keyword_column:
+                        shown = self._ui_sheet_cell_text(
+                            gid, keyword_column, row_number
+                        )
+                        if shown is None or spacing_keyword_key(shown) != spacing_keyword_key(
+                            expect_keyword
+                        ):
+                            raise AutomationError(
+                                f"시트 {keyword_column}{row_number} 키워드가 "
+                                f"{shown or '(확인 안 됨)'}입니다. "
+                                f"{expect_keyword} 행을 지우지 않습니다"
+                            )
+                    self._goto_sheet_row(gid, row_number, timeout=5.0)
+                    self._delete_selected_sheet_row()
+                    time.sleep(0.5)
+                    if expect_keyword and keyword_column:
+                        shown = self._ui_sheet_cell_text(
+                            gid, keyword_column, row_number
+                        )
+                        selected = self._name_box_value().replace(" ", "")
+                        still_same_row = selected == f"{row_number}:{row_number}"
+                        if (
+                            shown is not None
+                            and spacing_keyword_key(shown)
+                            == spacing_keyword_key(expect_keyword)
+                            and still_same_row
+                        ):
+                            raise AutomationError(
+                                f"시트 {row_number}행이 그대로입니다"
+                            )
+                    self.logger.info("시트 %s행을 삭제했습니다", row_number)
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    self.logger.warning(
+                        "시트 %s행 삭제 재시도 (%s/%s): %s",
+                        row_number,
+                        attempt,
+                        max_attempts,
+                        exc,
+                    )
+                    time.sleep(attempt)
+            raise AutomationError(
+                f"시트 {row_number}행 삭제에 {max_attempts}회 실패했습니다: "
+                f"{last_error}"
+            )
+        finally:
+            self._switch_to_handle(self.v2r_handle)
+
+    def _goto_sheet_row(self, gid: str, row_number: int, timeout: float = 2.0) -> None:
+        wanted = f"{int(row_number)}:{int(row_number)}"
+        box = self._find_sheet_name_box()
+        if box is not None:
+            try:
+                box.click()
+                box.send_keys(Keys.CONTROL, "a")
+                box.send_keys(wanted)
+                box.send_keys(Keys.ENTER)
+                time.sleep(0.25)
+                if self._name_box_value().replace(" ", "") == wanted:
+                    return
+            except Exception:
+                pass
+        self.driver.execute_script(
+            "location.hash = arguments[0];",
+            f"gid={gid}&range={wanted}",
+        )
+        deadline = time.monotonic() + max(0.2, timeout)
+        while time.monotonic() < deadline:
+            if self._name_box_value().replace(" ", "") == wanted:
+                return
+            time.sleep(0.2)
+        shown = self._name_box_value() or "(비어 있음)"
+        raise AutomationError(
+            f"시트에서 {wanted} 행을 선택하지 못했습니다 (이름 상자 {shown})"
+        )
+
+    def _delete_selected_sheet_row(self) -> None:
+        assert self.driver
+        for by, selector in (
+            (By.CSS_SELECTOR, '[aria-label="Delete row"]'),
+            (By.CSS_SELECTOR, '[aria-label="Delete rows"]'),
+            (By.CSS_SELECTOR, '[aria-label="행 삭제"]'),
+        ):
+            for element in self.driver.find_elements(by, selector):
+                try:
+                    if element.is_displayed():
+                        element.click()
+                        return
+                except Exception:
+                    continue
+        ActionChains(self.driver).key_down(Keys.CONTROL).key_down(Keys.ALT).send_keys(
+            "-"
+        ).key_up(Keys.ALT).key_up(Keys.CONTROL).perform()
 
     def _find_sheet_name_box(self):
         assert self.driver
