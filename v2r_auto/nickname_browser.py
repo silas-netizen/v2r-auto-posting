@@ -9,11 +9,13 @@ from .nickname_exclude import (
     DEFAULT_CAFE_URL,
     NAVER_LOGIN_URL,
     SEARCH_SCOPES,
+    WRITER_SCOPE,
     CafeTarget,
     ExcludeSyncResult,
     NicknameExcludeError,
     SearchScope,
     article_ids_from_html,
+    article_url,
     article_ids_from_json,
     build_sync_result,
     cafe_id_from_page,
@@ -185,7 +187,8 @@ class NicknameExcludeSession:
         self._require_cafe_login()
         found: list[str] = []
         for scope in SEARCH_SCOPES:
-            found.extend(self._search_one_keyword_scope(keyword, scope, should_stop))
+            nicks, _ids = self._search_hits(keyword, scope, should_stop)
+            found.extend(nicks)
         nicknames = split_nicknames("\n".join(found))
         self.logger.info(
             "'%s' 글 + 댓글과 댓글내용을 합쳐 닉네임 %s개를 모았습니다",
@@ -200,6 +203,51 @@ class NicknameExcludeSession:
         scope: SearchScope,
         should_stop: Callable[[], bool] | None,
     ) -> list[str]:
+        nicks, _ids = self._search_hits(keyword, scope, should_stop)
+        return nicks
+
+    def collect_author_article_links(
+        self,
+        nicknames: list[str],
+        should_stop: Callable[[], bool] | None = None,
+    ) -> list[tuple[str, list[str]]]:
+        require_cafe_id(self.cafe)
+        self._require_cafe_login()
+        rows: list[tuple[str, list[str]]] = []
+        for nickname in split_nicknames("\n".join(nicknames)):
+            if should_stop and should_stop():
+                raise NicknameExcludeError("확인을 중지했습니다")
+            self.logger.info(
+                "'%s'를 글작성자로 검색해 글 링크를 모읍니다",
+                nickname,
+            )
+            _nicks, article_ids = self._search_hits(
+                nickname,
+                WRITER_SCOPE,
+                should_stop,
+            )
+            urls: list[str] = []
+            seen: set[str] = set()
+            for article_id in article_ids:
+                url = article_url(self.cafe, article_id)
+                if url in seen:
+                    continue
+                seen.add(url)
+                urls.append(url)
+            rows.append((nickname, urls))
+            self.logger.info(
+                "'%s' 글작성자 검색에서 글 링크 %s개를 모았습니다",
+                nickname,
+                len(urls),
+            )
+        return rows
+
+    def _search_hits(
+        self,
+        keyword: str,
+        scope: SearchScope,
+        should_stop: Callable[[], bool] | None,
+    ) -> tuple[list[str], list[str]]:
         self.logger.info(
             "카페 검색창에서 '%s'를 %s로 찾습니다. 모든 페이지를 확인합니다",
             keyword,
@@ -207,6 +255,7 @@ class NicknameExcludeSession:
         )
         found: list[str] = []
         seen_articles: set[str] = set()
+        ordered_ids: list[str] = []
         page = 1
         last_page: int | None = None
         has_more = False
@@ -227,20 +276,31 @@ class NicknameExcludeSession:
             new_ids = [item for item in article_ids if item not in seen_articles]
             for item in new_ids:
                 seen_articles.add(item)
-            if new_ids and page_nicks:
+                ordered_ids.append(item)
+            if new_ids:
                 found.extend(page_nicks)
                 empty_streak = 0
                 extra = f", 전체 {last_page}페이지" if last_page else ""
                 if page_total:
                     extra += f", 글 {page_total}개"
-                self.logger.info(
-                    "'%s' %s %s페이지에서 닉네임 %s개%s",
-                    keyword,
-                    scope.label,
-                    page,
-                    len(split_nicknames("\n".join(page_nicks))),
-                    extra,
-                )
+                if scope.ta == "WRITER":
+                    self.logger.info(
+                        "'%s' %s %s페이지에서 글 %s개%s",
+                        keyword,
+                        scope.label,
+                        page,
+                        len(new_ids),
+                        extra,
+                    )
+                else:
+                    self.logger.info(
+                        "'%s' %s %s페이지에서 닉네임 %s개%s",
+                        keyword,
+                        scope.label,
+                        page,
+                        len(split_nicknames("\n".join(page_nicks))) if page_nicks else 0,
+                        extra,
+                    )
             elif page_nicks and not article_ids and page == 1:
                 found.extend(page_nicks)
                 empty_streak = 0
@@ -280,13 +340,14 @@ class NicknameExcludeSession:
             time.sleep(0.35)
         nicknames = split_nicknames("\n".join(found))
         self.logger.info(
-            "'%s' %s 검색을 %s페이지까지 확인했고 닉네임 %s개를 모았습니다",
+            "'%s' %s 검색을 %s페이지까지 확인했고 닉네임 %s개, 글 %s개를 모았습니다",
             keyword,
             scope.label,
             page,
             len(nicknames),
+            len(ordered_ids),
         )
-        return nicknames
+        return nicknames, ordered_ids
 
     def _open_search_page(
         self,
@@ -370,6 +431,7 @@ class NicknameExcludeSession:
         keywords_text: str,
         should_stop: Callable[[], bool] | None = None,
         cafe_url: str = "",
+        collect_author_links: bool = False,
     ) -> ExcludeSyncResult:
         if cafe_url:
             self.cafe = parse_cafe_address(cafe_url)
@@ -378,6 +440,13 @@ class NicknameExcludeSession:
         plan = build_sync_result(keywords, found, [])
         plan.saved = found
         self.logger.info("닉네임 %s개를 모두 모았습니다", len(found))
+        if collect_author_links and found:
+            plan.author_links = self.collect_author_article_links(
+                found,
+                should_stop=should_stop,
+            )
+            total = sum(len(urls) for _nick, urls in plan.author_links)
+            self.logger.info("닉네임 %s명의 글 링크 %s개를 모았습니다", len(found), total)
         return plan
 
 
