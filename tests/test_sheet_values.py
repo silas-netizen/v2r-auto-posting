@@ -3,16 +3,20 @@ import unicodedata
 from v2r_auto.sheet_values import (
     apply_sheet_overlay,
     csv_sheet_cell,
+    format_sheet_locale_datetime,
     looks_like_html,
     nearby_sheet_row_numbers,
     parse_sheet_datetime,
     parse_sheet_int,
     parse_sheet_number,
     pick_nearby_keyword_row,
+    pick_sheet_typing_value,
     sheet_cell_values_match,
     sheet_csv_export_url,
     sheet_gid_from_url,
     sheet_keywords_match,
+    sheet_typing_variants,
+    sheet_value_needs_keystrokes,
     sheet_write_confirmed,
 )
 
@@ -111,6 +115,37 @@ def test_parse_sheet_datetime_keeps_seconds() -> None:
         33,
         10,
     )
+
+
+def test_sheet_value_needs_keystrokes_for_dates_and_numbers() -> None:
+    assert sheet_value_needs_keystrokes("2026-09-01 01:43:13")
+    assert sheet_value_needs_keystrokes("6700")
+    assert sheet_value_needs_keystrokes("1,900")
+    assert not sheet_value_needs_keystrokes("밀려남")
+    assert not sheet_value_needs_keystrokes("")
+
+
+def test_format_sheet_locale_datetime_matches_korean_sheets() -> None:
+    assert format_sheet_locale_datetime("2026-09-01 01:43:13") == "2026. 9. 1 오전 1:43:13"
+    assert format_sheet_locale_datetime("2026-08-30 12:16:34") == "2026. 8. 30 오후 12:16:34"
+    assert format_sheet_locale_datetime("2026-08-31 23:59:20") == "2026. 8. 31 오후 11:59:20"
+    assert format_sheet_locale_datetime("2026-09-01 00:05:00") == "2026. 9. 1 오전 12:05:00"
+    assert sheet_cell_values_match("2026. 9. 1 오전 1:43:13", "2026-09-01 01:43:13")
+    assert not sheet_cell_values_match("2026. 8. 30 오후 12:16:34", "2026-09-01 01:43:13")
+    assert not sheet_cell_values_match("6,760", "6700")
+
+
+def test_sheet_typing_variants_try_locale_then_text() -> None:
+    assert sheet_typing_variants("밀려남") == ["밀려남"]
+    assert sheet_typing_variants("6700") == ["6700"]
+    assert sheet_typing_variants("2026-09-01 01:43:13") == [
+        "2026-09-01 01:43:13",
+        "2026. 9. 1 오전 1:43:13",
+        "'2026-09-01 01:43:13",
+    ]
+    assert pick_sheet_typing_value("2026-09-01 01:43:13", 1) == "2026-09-01 01:43:13"
+    assert pick_sheet_typing_value("2026-09-01 01:43:13", 2) == "2026. 9. 1 오전 1:43:13"
+    assert pick_sheet_typing_value("2026-09-01 01:43:13", 3) == "'2026-09-01 01:43:13"
 
 
 def test_looks_like_html_login_page() -> None:

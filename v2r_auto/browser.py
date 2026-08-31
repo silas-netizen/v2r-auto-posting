@@ -32,13 +32,14 @@ from .sheet_values import (
     column_index_from_letter,
     csv_sheet_cell,
     looks_like_html,
-    parse_sheet_datetime,
     parse_sheet_table,
     nearby_sheet_row_numbers,
     pick_nearby_keyword_row,
+    pick_sheet_typing_value,
     sheet_cell_values_match,
     sheet_csv_export_url,
     sheet_keywords_match,
+    sheet_value_needs_keystrokes,
     sheet_write_confirmed,
 )
 
@@ -247,9 +248,8 @@ class V2RBrowser:
                         )
                     )
                     self.driver.execute_script("window.focus();")
-                    to_type = value
-                    if attempt > 1 and parse_sheet_datetime(value) and not str(value).startswith("'"):
-                        to_type = "'" + value
+                    self.wait.until(lambda driver: self._find_sheet_name_box() is not None)
+                    to_type = pick_sheet_typing_value(value, attempt)
                     if expect_keyword and keyword_column:
                         row_number = self._locate_keyword_row(
                             gid,
@@ -258,7 +258,7 @@ class V2RBrowser:
                             expect_keyword,
                         )
                         cell_label = f"{column}{row_number}"
-                    self._goto_sheet_cell(gid, column, row_number)
+                    self._goto_sheet_cell(gid, column, row_number, timeout=5.0)
                     self._type_sheet_value(to_type)
                     time.sleep(0.4)
                     self._verify_sheet_cell(
@@ -405,54 +405,155 @@ class V2RBrowser:
                 f"{text or '(비어 있음)'}입니다. {expected}에 쓰지 않습니다"
             )
 
-    def _type_sheet_value(self, value: str, editor=None) -> None:
-        # F2 binds typing to the selected cell. insertText on a hidden
-        # waffle editor can look successful without changing J.
-        # Never send Ctrl+A/Delete/ENTER to the grid: that can delete a row.
-        ActionChains(self.driver).send_keys(Keys.F2).perform()
-        time.sleep(0.15)
-        editors = [
+    def _formula_bar_element(self):
+        assert self.driver
+        selectors = (
+            (By.ID, "t-formula-bar-input"),
+            (By.ID, "docs-formula-bar-input"),
+            (By.CSS_SELECTOR, "#t-formula-bar-input .cell-input"),
+            (By.CSS_SELECTOR, "#t-formula-bar .cell-input"),
+            (By.CSS_SELECTOR, '[aria-label="Formula bar"]'),
+            (By.CSS_SELECTOR, '[aria-label="수식 입력줄"]'),
+        )
+        for by, selector in selectors:
+            for element in self.driver.find_elements(by, selector):
+                try:
+                    if element.is_displayed():
+                        return element
+                except Exception:
+                    continue
+        return None
+
+    def _visible_waffle_editors(self):
+        assert self.driver
+        return [
             element
             for element in self.driver.find_elements(By.ID, "waffle-rich-text-editor")
             if element.is_displayed() and element.is_enabled()
         ]
-        target = editor if editor is not None and getattr(editor, "is_displayed", lambda: False)() else None
-        if target is None and editors:
-            target = editors[0]
+
+    def _cancel_sheet_edit(self) -> None:
+        try:
+            ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+        except Exception:
+            pass
+
+    def _element_edit_text(self, element) -> str:
+        try:
+            text = self.driver.execute_script(
+                "const el = arguments[0];"
+                "if (!el) return '';"
+                "return String(el.value || el.innerText || el.textContent || '');",
+                element,
+            )
+        except Exception:
+            return ""
+        return str(text or "").replace("\n", "").strip()
+
+    def _clear_editable(self, element) -> None:
+        try:
+            element.click()
+        except Exception:
+            pass
+        element.send_keys(Keys.CONTROL, "a")
+        element.send_keys(Keys.DELETE)
+        element.send_keys(Keys.BACKSPACE)
+
+    def _insert_text(self, element, value: str) -> bool:
+        try:
+            return bool(
+                self.driver.execute_script(
+                    "const el = arguments[0]; const text = arguments[1];"
+                    "el.focus();"
+                    "try { return document.execCommand('insertText', false, text); }"
+                    "catch (e) { return false; }",
+                    element,
+                    value,
+                )
+            )
+        except Exception:
+            return False
+
+    def _fill_editable(self, element, value: str) -> None:
+        self._clear_editable(element)
+        if not value:
+            return
+        # insertText can paint the in-cell editor without saving a date/number.
+        if sheet_value_needs_keystrokes(value):
+            element.send_keys(value)
+            return
+        if not self._insert_text(element, value):
+            element.send_keys(value)
+
+    def _editor_shows_value(self, shown: str, value: str) -> bool:
+        if not str(value or "").strip():
+            return not str(shown or "").strip()
+        return sheet_cell_values_match(shown, value)
+
+    def _type_into_formula_bar(self, value: str) -> bool:
+        bar = self._formula_bar_element()
+        if bar is None:
+            return False
+        selected = self._selected_sheet_cell()
+        try:
+            bar.click()
+        except Exception:
+            return False
+        time.sleep(0.1)
+        current = self._selected_sheet_cell()
+        if selected and current and current != selected:
+            self._cancel_sheet_edit()
+            return False
+        self._fill_editable(bar, value)
+        shown = self._element_edit_text(bar) or self._waffle_editor_text()
+        if value and not self._editor_shows_value(shown, value):
+            self._clear_editable(bar)
+            bar.send_keys(value)
+            shown = self._element_edit_text(bar) or self._waffle_editor_text()
+        if value and not self._editor_shows_value(shown, value):
+            self._cancel_sheet_edit()
+            return False
+        bar.send_keys(Keys.ENTER)
+        return True
+
+    def _type_into_cell_editor(self, value: str, editor=None) -> None:
+        # F2 binds typing to the selected cell. Never send Ctrl+A/Delete
+        # to the grid: that can delete a row.
+        target = (
+            editor
+            if editor is not None and getattr(editor, "is_displayed", lambda: False)()
+            else None
+        )
         if target is None:
-            try:
-                ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
-            except Exception:
-                pass
+            ActionChains(self.driver).send_keys(Keys.F2).perform()
+            time.sleep(0.2)
+            editors = self._visible_waffle_editors()
+            if editors:
+                target = editors[0]
+        if target is None:
+            self._cancel_sheet_edit()
             raise AutomationError(
                 "시트 칸 편집기를 열지 못해 입력하지 않습니다. "
                 "행이 지워질 수 있는 전체 선택 입력은 쓰지 않습니다"
             )
-        try:
-            target.click()
-        except Exception:
-            pass
-        target.send_keys(Keys.CONTROL, "a")
-        target.send_keys(Keys.DELETE)
-        target.send_keys(Keys.BACKSPACE)
-        if value:
-            inserted = False
-            try:
-                inserted = bool(
-                    self.driver.execute_script(
-                        "const el = arguments[0]; const text = arguments[1];"
-                        "el.focus();"
-                        "try { return document.execCommand('insertText', false, text); }"
-                        "catch (e) { return false; }",
-                        target,
-                        value,
-                    )
-                )
-            except Exception:
-                inserted = False
-            if not inserted:
-                target.send_keys(value)
+        self._fill_editable(target, value)
+        shown = self._waffle_editor_text()
+        if value and not self._editor_shows_value(shown, value):
+            self._clear_editable(target)
+            target.send_keys(value)
+            shown = self._waffle_editor_text()
+        if value and not self._editor_shows_value(shown, value):
+            self._cancel_sheet_edit()
+            raise AutomationError(
+                f"시트 칸 편집기에 값이 반영되지 않았습니다 "
+                f"(기대 {value} / 실제 {shown or '(비어 있음)'})"
+            )
         target.send_keys(Keys.ENTER)
+
+    def _type_sheet_value(self, value: str, editor=None) -> None:
+        if self._type_into_formula_bar(value):
+            return
+        self._type_into_cell_editor(value, editor)
 
     def _waffle_editor_text(self) -> str:
         try:
