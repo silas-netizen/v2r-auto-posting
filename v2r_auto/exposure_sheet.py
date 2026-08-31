@@ -34,7 +34,11 @@ from .exposure import (
     STATUS_HEADERS,
     VOLUME_HEADERS,
     cafe_name_option,
+    pick_kept_duplicate,
+    shift_row_page_ids,
+    spacing_keyword_key,
     status_option,
+    strip_parenthetical,
 )
 
 
@@ -141,6 +145,19 @@ def find_sheet_row_numbers(
     return found
 
 
+def find_spacing_duplicate_rows(
+    table: list[list[str]], keyword: str, keyword_idx: int
+) -> list[int]:
+    wanted = spacing_keyword_key(keyword)
+    if not wanted:
+        return []
+    found: list[int] = []
+    for number in range(2, len(table) + 1):
+        if spacing_keyword_key(csv_sheet_cell(table, number, keyword_idx)) == wanted:
+            found.append(number)
+    return found
+
+
 def resolve_sheet_row_number(
     table: list[list[str]], row: ExposureRow, keyword_idx: int
 ) -> int:
@@ -222,6 +239,20 @@ class SeleniumSheetWriter:
             keyword_column=keyword_column,
         )
         return int(written or row_number)
+
+    def delete_row(
+        self,
+        sheet_url: str,
+        row_number: int,
+        expect_keyword: str = "",
+        keyword_column: str = "",
+    ) -> None:
+        self.browser.delete_sheet_row(
+            sheet_url,
+            row_number,
+            expect_keyword=expect_keyword,
+            keyword_column=keyword_column,
+        )
 
 
 class GoogleSheetExposureStore:
@@ -377,6 +408,93 @@ class GoogleSheetExposureStore:
                 "시트 일부 칸을 저장하지 못했습니다: " + "; ".join(errors)
             )
 
+    def collapse_spacing_duplicates(
+        self,
+        row: ExposureRow,
+        *,
+        canonical_keyword: str,
+        first_cafe: str = "",
+        queue: list[ExposureRow] | None = None,
+    ) -> ExposureRow:
+        if self.writer is None:
+            raise SheetError("구글 시트에 쓸 브라우저가 없습니다")
+        table = apply_sheet_overlay(parse_sheet_table(self._read_csv()), self._written)
+        bind = self._bind
+        if bind is None and table:
+            bind = self._bind_headers(
+                [sheet_plain_text(header) for header in table[0]]
+            )
+            self._bind = bind
+        if bind is None or bind.keyword_idx < 0:
+            return row
+        numbers = find_spacing_duplicate_rows(table, row.keyword, bind.keyword_idx)
+        if len(numbers) < 2:
+            return row
+        candidates: list[tuple[int, str, str]] = []
+        for number in numbers:
+            keyword = csv_sheet_cell(table, number, bind.keyword_idx)
+            cafe = (
+                csv_sheet_cell(table, number, bind.cafe_idx)
+                if bind.cafe_idx >= 0
+                else ""
+            )
+            candidates.append((number, keyword, cafe))
+        keep_number, keep_keyword, _keep_cafe = pick_kept_duplicate(
+            candidates,
+            canonical_keyword=canonical_keyword,
+            first_cafe=first_cafe,
+        )
+        self.logger.info(
+            "띄어쓰기만 다른 키워드 중복 %s행 → %s 남기고 나머지 삭제",
+            numbers,
+            keep_number,
+        )
+        live_rows = list(queue or [row])
+        if row not in live_rows:
+            live_rows.append(row)
+        for number, keyword, _cafe in sorted(candidates, key=lambda item: item[0], reverse=True):
+            if number == keep_number:
+                continue
+            self.writer.delete_row(
+                self.sheet_url,
+                number,
+                expect_keyword=keyword,
+                keyword_column=bind.keyword_col,
+            )
+            self.logger.info(
+                "중복 행 %s를 삭제했습니다: %s",
+                number,
+                keyword if str(keyword).strip() else "(비어 있음)",
+            )
+            if number < keep_number:
+                keep_number -= 1
+            shift_row_page_ids(live_rows, number)
+            self._shift_written_after_delete(number)
+        canon = strip_parenthetical(canonical_keyword).strip()
+        if canon and strip_parenthetical(keep_keyword).strip() != canon:
+            written = self.writer.write_cell(
+                self.sheet_url,
+                bind.keyword_col,
+                keep_number,
+                canon,
+                expect_keyword=keep_keyword,
+                keyword_column=bind.keyword_col,
+            )
+            keep_number = int(written or keep_number)
+            keep_keyword = canon
+            self._remember_write(keep_number, bind.keyword_col, canon)
+            self.logger.info(
+                "남긴 행 %s 키워드를 자동완성 기준으로 맞췄습니다: %s",
+                keep_number,
+                canon,
+            )
+        row.page_id = str(keep_number)
+        row.keyword = keep_keyword
+        for item in live_rows:
+            if int(item.page_id) == keep_number:
+                item.keyword = keep_keyword
+        return row
+
     def write_volume_totals(self) -> None:
         if self.writer is None:
             raise SheetError("구글 시트에 쓸 브라우저가 없습니다")
@@ -499,6 +617,17 @@ class GoogleSheetExposureStore:
 
     def _remember_write(self, row_number: int, column: str, value: str) -> None:
         self._written[(row_number, column_index_from_letter(column))] = value
+
+    def _shift_written_after_delete(self, deleted: int) -> None:
+        shifted: dict[tuple[int, int], str] = {}
+        for (row_number, column_index), value in self._written.items():
+            if row_number == deleted:
+                continue
+            if row_number > deleted:
+                shifted[(row_number - 1, column_index)] = value
+            else:
+                shifted[(row_number, column_index)] = value
+        self._written = shifted
 
     def _bind_headers(self, headers: list[str]) -> _SheetBind:
         keyword_col, keyword_idx = _find_header(headers, KEYWORD_HEADERS)

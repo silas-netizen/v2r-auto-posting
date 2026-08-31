@@ -80,6 +80,39 @@ def compact_text(value: str) -> str:
     return re.sub(r"\s+", "", value or "").casefold()
 
 
+def spacing_keyword_key(keyword: str) -> str:
+    return compact_text(strip_parenthetical(keyword))
+
+
+def pick_kept_duplicate(
+    candidates: list[tuple[int, str, str]],
+    *,
+    canonical_keyword: str,
+    first_cafe: str = "",
+) -> tuple[int, str, str]:
+    """Keep the autocomplete form, else the 통검 first-cafe row."""
+    if not candidates:
+        raise ValueError("중복 행 후보가 없습니다")
+    canon = strip_parenthetical(canonical_keyword).strip()
+    cafe_key = compact_text(first_cafe)
+
+    def sort_key(item: tuple[int, str, str]) -> tuple[int, int, int]:
+        number, keyword, cafe = item
+        search = strip_parenthetical(keyword).strip()
+        exact = 0 if search == canon else 1
+        cafe_hit = 0 if cafe_key and cafe_id_name(cafe) == cafe_key else 1
+        return (exact, cafe_hit, number)
+
+    return min(candidates, key=sort_key)
+
+
+def shift_row_page_ids(rows: list[ExposureRow], deleted: int) -> None:
+    for row in rows:
+        number = int(row.page_id)
+        if number > deleted:
+            row.page_id = str(number - 1)
+
+
 def strip_parenthetical(keyword: str) -> str:
     text = keyword or ""
     text = re.sub(r"[\(（][^)\）]*[\)）]", " ", text)
@@ -699,6 +732,8 @@ class ExposureChecker:
         self.brands = brands or list(DEFAULT_BRAND_MARKERS)
         self.cafe_names = cafe_names or list(DEFAULT_CAFE_NAMES)
         self.delay_seconds = delay_seconds
+        self._queue: list[ExposureRow] = []
+        self._collapsed_keys: set[str] = set()
 
     def inspect_rows(self) -> list[ExposureRow]:
         return self.notion.load_rows()
@@ -713,6 +748,8 @@ class ExposureChecker:
         progress=None,
     ) -> list[ExposureRow]:
         total = len(rows)
+        self._queue = rows
+        self._collapsed_keys = set()
         for index, row in enumerate(rows, start=1):
             if stop_event is not None and stop_event.is_set():
                 self.logger.info("중지 요청으로 노출 검사를 멈춥니다")
@@ -721,6 +758,15 @@ class ExposureChecker:
             if stop_event is not None and stop_event.is_set():
                 self.logger.info("중지 요청으로 노출 검사를 멈춥니다")
                 break
+            key = spacing_keyword_key(row.keyword)
+            if key and key in self._collapsed_keys:
+                self.logger.info(
+                    "띄어쓰기만 다른 중복이라 이미 정리했습니다: %s",
+                    row.keyword,
+                )
+                if progress:
+                    progress(index, total)
+                continue
             keyword = strip_parenthetical(row.keyword)
             if not keyword:
                 self.logger.warning("괄호를 빼니 검색어가 없어 건너뜁니다: %s", row.keyword)
@@ -873,6 +919,21 @@ class ExposureChecker:
             len(visible_urls),
             reason,
         )
+        first_cafe = hits[0].cafe_name if hits else ""
+        canonical = str(getattr(self.naver, "last_used_query", "") or keyword).strip()
+        if not dry_run and hasattr(self.notion, "collapse_spacing_duplicates"):
+            try:
+                row = self.notion.collapse_spacing_duplicates(
+                    row,
+                    canonical_keyword=canonical,
+                    first_cafe=first_cafe,
+                    queue=self._queue,
+                )
+                key = spacing_keyword_key(row.keyword) or spacing_keyword_key(keyword)
+                if key:
+                    self._collapsed_keys.add(key)
+            except Exception as exc:
+                self.logger.error("중복 행 정리 실패 (%s): %s", keyword, exc)
         volume = None
         volume_found = False
         lookup = getattr(self.naver, "lookup_search_volume", None)

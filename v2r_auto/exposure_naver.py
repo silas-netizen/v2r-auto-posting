@@ -439,6 +439,7 @@ class SeleniumNaverSearch:
         self._sheet_handle: str | None = None
         self._volume_unavailable = False
         self._last_visible_cafe_urls: list[str] = []
+        self.last_used_query = ""
 
     def _driver(self):
         self._ensure_browser()
@@ -546,6 +547,7 @@ class SeleniumNaverSearch:
     def search_integrated(self, keyword: str) -> str:
         driver = self._driver()
         query = strip_parenthetical(keyword)
+        self.last_used_query = query
         self._last_visible_cafe_urls = []
         self._focus_naver_tab(driver)
         box = self._find_search_box(driver)
@@ -1110,6 +1112,7 @@ class SeleniumNaverSearch:
                                 )
                                 return False
                             driver.execute_script("arguments[0].click();", element)
+                            self.last_used_query = suggestion.split("\n")[0].strip() or query
                             self.logger.info("자동완성에서 띄어쓰기만 다른 항목을 선택했습니다")
                             return True
                         except Exception:

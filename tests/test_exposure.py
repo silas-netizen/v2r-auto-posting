@@ -24,6 +24,9 @@ from v2r_auto.exposure import (
     match_selected_rows,
     matching_cafe_name,
     parse_brands,
+    pick_kept_duplicate,
+    shift_row_page_ids,
+    spacing_keyword_key,
     parse_cafes,
     parse_keyword_lines,
     parse_qc_count,
@@ -72,6 +75,7 @@ class FakeNaver:
 
     def search_integrated(self, keyword: str) -> str:
         self.searched.append(keyword)
+        self.last_used_query = getattr(self, "forced_query", keyword)
         if isinstance(self.search_html, dict):
             return self.search_html[keyword]
         return self.search_html
@@ -1681,6 +1685,86 @@ def test_match_selected_rows_uses_notion_keyword() -> None:
     matched, missing = match_selected_rows(rows, ["다크 초콜릿", "없는 키워드"])
     assert [row.keyword for row in matched] == ["다크 초콜릿 (효능으로 노출)"]
     assert missing == ["없는 키워드"]
+
+
+def test_spacing_keyword_key_ignores_spaces_and_notes() -> None:
+    assert spacing_keyword_key("치핵 수술 비용") == spacing_keyword_key("치핵수술비용")
+    assert spacing_keyword_key("무통치질수술 비용 (+무통치질수술)") == spacing_keyword_key(
+        "무통 치질수술비용"
+    )
+
+
+def test_pick_kept_duplicate_prefers_autocomplete_spacing() -> None:
+    kept = pick_kept_duplicate(
+        [(38, "치핵 수술 비용", ""), (326, "치핵수술비용", "")],
+        canonical_keyword="치핵 수술 비용",
+    )
+    assert kept[0] == 38
+    kept = pick_kept_duplicate(
+        [(56, "항문안쪽통증", ""), (328, "항문 안쪽 통증", "")],
+        canonical_keyword="항문 안쪽 통증",
+    )
+    assert kept[0] == 328
+
+
+def test_pick_kept_duplicate_uses_first_cafe_when_spacing_ties() -> None:
+    kept = pick_kept_duplicate(
+        [(165, "엉덩이 종기 치료", ""), (306, "엉덩이 종기 치료", "양평맘")],
+        canonical_keyword="엉덩이 종기 치료",
+        first_cafe="양평맘",
+    )
+    assert kept[0] == 306
+    kept = pick_kept_duplicate(
+        [(165, "엉덩이 종기 치료", "양평맘"), (306, "엉덩이 종기 치료", "양평맘")],
+        canonical_keyword="엉덩이 종기 치료",
+        first_cafe="양평맘",
+    )
+    assert kept[0] == 165
+
+
+def test_shift_row_page_ids_moves_later_rows() -> None:
+    early = _row("항문안쪽통증")
+    early.page_id = "56"
+    late = _row("항문 안쪽 통증")
+    late.page_id = "328"
+    later = _row("다른")
+    later.page_id = "329"
+    shift_row_page_ids([early, late, later], 56)
+    assert early.page_id == "56"
+    assert late.page_id == "327"
+    assert later.page_id == "328"
+
+
+def test_checker_skips_collapsed_spacing_duplicate() -> None:
+    searched = []
+    collapsed = []
+
+    class FakeSheet:
+        def collapse_spacing_duplicates(self, row, **kwargs):
+            collapsed.append((row.keyword, kwargs["canonical_keyword"], kwargs["first_cafe"]))
+            return row
+
+        def update_check_result(self, *_args, **_kwargs):
+            return None
+
+    class QueryNaver(FakeNaver):
+        def search_integrated(self, keyword: str) -> str:
+            searched.append(keyword)
+            self.last_used_query = "항문 안쪽 통증"
+            return "<div id='main_pack'></div>"
+
+    first = _row("항문안쪽통증")
+    first.page_id = "56"
+    second = _row("항문 안쪽 통증")
+    second.page_id = "328"
+    ExposureChecker(
+        FakeSheet(),
+        QueryNaver("<div id='main_pack'></div>"),
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    ).run([first, second], dry_run=False)
+    assert searched == ["항문안쪽통증"]
+    assert collapsed == [("항문안쪽통증", "항문 안쪽 통증", "")]
 
 
 def test_preserve_cafe_id_keeps_existing_suffix() -> None:
