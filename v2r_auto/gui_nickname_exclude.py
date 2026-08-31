@@ -58,7 +58,8 @@ class NicknameExcludeApp(AutomationApp):
             outer,
             text=(
                 "먼저 네이버 로그인 창을 연 뒤, 입력한 카페 주소를 엽니다. "
-                "카페 글 검색의 모든 페이지에서 닉네임을 모은 다음 "
+                "식별 키워드는 글 + 댓글과 댓글내용으로 각각 검색하고, "
+                "나온 닉네임을 합쳐 중복을 뺀 다음 "
                 "메모장에 한 줄에 하나씩 띄웁니다. "
                 "복사해서 신고기 제외 닉네임 칸에 넣으면 됩니다. "
                 "글쓰기 버튼은 쓰지 않습니다."
@@ -183,7 +184,9 @@ class NicknameExcludeApp(AutomationApp):
             session = NicknameExcludeSession(self.browser, cafe)
             try:
                 while True:
-                    self.logger.info("카페 글 검색의 모든 페이지에서 닉네임을 모읍니다")
+                    self.logger.info(
+                        "글 + 댓글과 댓글내용으로 검색한 뒤 닉네임을 합칩니다"
+                    )
                     plan = session.sync(
                         keywords,
                         should_stop=self.stop_event.is_set,

@@ -4,6 +4,7 @@ from v2r_auto.nickname_browser import NicknameExcludeSession
 from v2r_auto.nickname_exclude import (
     DEFAULT_CAFE_URL,
     DEFAULT_KEYWORDS,
+    SEARCH_SCOPES,
     NicknameExcludeError,
     article_ids_from_json,
     build_sync_result,
@@ -79,6 +80,13 @@ def test_cookies_show_naver_login() -> None:
     assert not cookies_show_naver_login(["NNB"])
 
 
+def test_search_uses_post_comment_and_comment_content() -> None:
+    assert [(scope.label, scope.ta, scope.search_by) for scope in SEARCH_SCOPES] == [
+        ("글 + 댓글", "ARTICLE_COMMENT", 0),
+        ("댓글내용", "COMMENT", 4),
+    ]
+
+
 def test_cafe_search_url_is_article_search_not_write() -> None:
     cafe = parse_cafe_address(DEFAULT_CAFE_URL)
     url = cafe_search_url("팥순", cafe, page=3)
@@ -86,14 +94,26 @@ def test_cafe_search_url_is_article_search_not_write() -> None:
     assert "ca-cafes" not in url
     assert "page=3" in url
     assert "q=" in url
+    assert "ta=ARTICLE_COMMENT" in url
     assert "ArticleWrite" not in url
     assert "글쓰기" not in url
+    comment = cafe_search_url("팥순", cafe, page=2, scope=SEARCH_SCOPES[1])
+    assert "ta=COMMENT" in comment
+    assert "page=2" in comment
     fallback = cafe_search_url_modern("팥순", cafe)
     assert "ArticleSearchList.nhn" in fallback
+    assert "search.searchBy=0" in fallback
     assert "ArticleWrite" not in fallback
+    comment_fallback = cafe_search_url_modern("팥순", cafe, scope=SEARCH_SCOPES[1])
+    assert "search.searchBy=4" in comment_fallback
     other = parse_cafe_address("https://cafe.naver.com/f-e/cafes/22788814")
     api = search_api_urls("팥순", 1, other)[0]
     assert "apis.cafe.naver.com/search/v2/cafes/22788814/search/articles" in api
+    assert "ta=ARTICLE_COMMENT" in api
+    comment_api = search_api_urls("팥순", 1, other, scope=SEARCH_SCOPES[1])
+    assert "ta=COMMENT" in comment_api[0]
+    assert "ta=COMMENT" in comment_api[1]
+    assert "search.searchBy=4" in comment_api[2]
 
 
 def test_missing_cafe_page_is_detected() -> None:
@@ -112,6 +132,17 @@ def test_merge_adds_only_new_nicknames() -> None:
     incoming = ["팥순이", "팥순ㅇㅣ", "장으뜸"]
     assert new_nicknames(existing, incoming) == ["팥순ㅇㅣ", "장으뜸"]
     assert merge_nicknames(existing, incoming) == ["팥순이", "자연방패", "팥순ㅇㅣ", "장으뜸"]
+
+
+def test_post_and_comment_nicknames_are_merged_without_duplicates() -> None:
+    post_hits = ["도라지소다", "시치미역", "미키유랑단"]
+    comment_hits = ["시치미역", "댓글닉", "도라지소다"]
+    assert merge_nicknames(post_hits, comment_hits) == [
+        "도라지소다",
+        "시치미역",
+        "미키유랑단",
+        "댓글닉",
+    ]
 
 
 def test_nicknames_from_search_json() -> None:
@@ -151,6 +182,26 @@ def test_sync_result_keeps_existing_and_adds_new() -> None:
 
 def test_nickname_browser_module_loads() -> None:
     assert NicknameExcludeSession.__name__ == "NicknameExcludeSession"
+
+
+def test_one_keyword_searches_both_scopes_and_dedupes() -> None:
+    session = NicknameExcludeSession.__new__(NicknameExcludeSession)
+    session.cafe = parse_cafe_address(DEFAULT_CAFE_URL)
+    session.logger = type("Log", (), {"info": staticmethod(lambda *args, **kwargs: None)})()
+    calls: list[str] = []
+
+    def fake_scope(keyword: str, scope, should_stop):
+        calls.append(scope.label)
+        assert keyword == "안티치"
+        if scope.ta == "ARTICLE_COMMENT":
+            return ["도라지소다", "시치미역"]
+        return ["시치미역", "댓글닉"]
+
+    session._search_one_keyword_scope = fake_scope  # type: ignore[method-assign]
+    session._require_cafe_login = lambda: None  # type: ignore[method-assign]
+    found = session._search_one_keyword("안티치", None)
+    assert calls == ["글 + 댓글", "댓글내용"]
+    assert found == ["도라지소다", "시치미역", "댓글닉"]
 
 
 def test_nicknames_are_written_one_per_line(tmp_path) -> None:
