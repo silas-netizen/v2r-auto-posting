@@ -1097,25 +1097,32 @@ class AffiliateApiPublisher:
                 raise
             source = detail.get("naver_cafe_article_source") or {}
             destination = detail.get("naver_cafe_article_destination") or {}
+            article_history = detail.get("naver_cafe_article_history") or {}
+            history_status = article_history.get("status")
             status = destination.get("status") or source.get("status")
             written_raw = (
-                source.get("written_at")
+                article_history.get("written_at")
+                or source.get("written_at")
                 or destination.get("written_at")
                 or source.get("created_at")
             )
-            if status in {"DONE", "SUCCESS"}:
+            if history_status in {"DONE", "SUCCESS"}:
                 if written_raw:
                     return datetime.fromisoformat(
                         str(written_raw).replace("Z", "+00:00")
                     )
                 return datetime.now(timezone.utc)
-            if status == "FAIL":
+            if history_status == "FAIL" or status == "FAIL":
                 reason = str(
-                    destination.get("fail_reason")
+                    article_history.get("fail_reason")
+                    or article_history.get("reason")
+                    or destination.get("fail_reason")
                     or source.get("fail_reason")
                     or "원인 불명"
                 )
                 raise AffiliateApiError(f"일상 글 발행 실패: {reason}")
+            if not article_history and status == "DONE":
+                return datetime.now(timezone.utc)
             time.sleep(2)
         raise AffiliateDailyPending(
             "일상 글이 예약시간 이후 30분 동안 예약대기 상태입니다. "

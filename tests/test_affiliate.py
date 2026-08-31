@@ -695,10 +695,12 @@ def test_written_status_uses_article_detail_not_removed_history_api() -> None:
             return {
                 "naver_cafe_article_source": {
                     "source_id": query["source_id"],
+                },
+                "naver_cafe_article_destination": {"status": "SUCCESS"},
+                "naver_cafe_article_history": {
                     "status": "DONE",
                     "written_at": written_at,
                 },
-                "naver_cafe_article_destination": {"status": "DONE"},
             }
 
     publisher = DetailStatusPublisher()
