@@ -19,7 +19,10 @@ KNOWN_AFFILIATE_COMMENT_IDS = {
     "colpith",
 }
 AFFILIATE_COMMENT_COUNT = 6
-COMMENT_ID_COUNT = AFFILIATE_COMMENT_COUNT
+MIN_AUTO_ID_COUNT = 2
+MAX_AUTO_ID_COUNT = 10
+DEFAULT_AUTO_ID_COUNT = AFFILIATE_COMMENT_COUNT
+COMMENT_ID_COUNT = DEFAULT_AUTO_ID_COUNT
 KIND_AFFILIATE_AUTHOR = "affiliate_author"
 KIND_AFFILIATE_COMMENT = "affiliate_comment"
 KIND_SELF_AUTHOR = "self_author"
@@ -272,15 +275,15 @@ def recognize_proxy_workbook(path: str | Path) -> ProxyBook:
         f"제휴 댓글 {comments}개 / 자사 작성 {self_authors}개 / "
         f"자사 댓글 {self_comments}개"
     )
-    if comments and comments < COMMENT_ID_COUNT:
+    if comments and comments < MIN_AUTO_ID_COUNT:
         message += (
             f". 양평맘·씨씨앙 댓글을 넣으려면 제휴 댓글 아이디가 "
-            f"{COMMENT_ID_COUNT}개 필요합니다"
+            f"{MIN_AUTO_ID_COUNT}개 이상 필요합니다"
         )
-    if self_comments and self_comments < COMMENT_ID_COUNT:
+    if self_comments and self_comments < MIN_AUTO_ID_COUNT:
         message += (
             f". 자사 카페 댓글을 넣으려면 자사 댓글 아이디가 "
-            f"{COMMENT_ID_COUNT}개 필요합니다"
+            f"{MIN_AUTO_ID_COUNT}개 이상 필요합니다"
         )
     return ProxyBook(path=file_path, accounts=accounts, message=message, recognized=True)
 
@@ -301,23 +304,50 @@ def article_kind(article_type: str) -> str:
     return ""
 
 
+def normalize_auto_id_count(value: object) -> int:
+    try:
+        count = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise _proxy_error("자동 배정 아이디 수량은 2~10 사이 숫자여야 합니다")
+    if count < MIN_AUTO_ID_COUNT or count > MAX_AUTO_ID_COUNT:
+        raise _proxy_error(
+            f"자동 배정 아이디 수량은 {MIN_AUTO_ID_COUNT}~{MAX_AUTO_ID_COUNT}개만 "
+            f"고를 수 있습니다"
+        )
+    return count
+
+
+def comment_auto_labels(article_type: str, count: int) -> list[str]:
+    needed = normalize_auto_id_count(count)
+    special = "대대댓글2" if article_kind(article_type) == "후기형" else "대대대댓글2"
+    labels = ["댓글1", "댓글2"]
+    if needed >= 3:
+        labels.append(special)
+    next_index = 3
+    while len(labels) < needed:
+        labels.append(f"댓글{next_index}")
+        next_index += 1
+    return labels
+
+
 def _comment_id_map(
     job,
     comment_accounts: list[ProxyAccount],
     rng: random.Random,
     *,
     pool_label: str,
+    comment_id_count: int = COMMENT_ID_COUNT,
 ) -> dict[str, ProxyAccount]:
     if not job.article.comments:
         return {}
-    if len(comment_accounts) < COMMENT_ID_COUNT:
+    needed = normalize_auto_id_count(comment_id_count)
+    if len(comment_accounts) < needed:
         raise _proxy_error(
-            f"{pool_label} 댓글 아이디가 {COMMENT_ID_COUNT}개 필요합니다. "
+            f"{pool_label} 댓글 아이디가 {needed}개 필요합니다. "
             f"지금 {len(comment_accounts)}개입니다"
         )
-    chosen = rng.sample(comment_accounts, COMMENT_ID_COUNT)
-    special_label = "대대댓글2" if article_kind(job.article_type) == "후기형" else "대대대댓글2"
-    labels = ("댓글1", "댓글2", special_label, "댓글3", "댓글4", "댓글5")
+    labels = comment_auto_labels(job.article_type, needed)
+    chosen = rng.sample(comment_accounts, needed)
     return dict(zip(labels, chosen))
 
 
@@ -357,18 +387,22 @@ def resolve_job_accounts(
     job,
     book: ProxyBook | None,
     rng: random.Random | None = None,
+    *,
+    comment_id_count: int = COMMENT_ID_COUNT,
 ) -> tuple[ProxyAccount | None, dict[str, ProxyAccount]]:
     author = author_from_sheet(job, book)
     comment_map: dict[str, ProxyAccount] = {}
     if book is None or not job.article.comments:
         return author, comment_map
     rng = rng or random.SystemRandom()
+    needed = normalize_auto_id_count(comment_id_count)
     if _is_affiliate_cafe(job.cafe):
         comment_map = _comment_id_map(
             job,
             book.comment_accounts(),
             rng,
             pool_label="양평맘·씨씨앙",
+            comment_id_count=needed,
         )
     else:
         comment_map = _comment_id_map(
@@ -376,5 +410,6 @@ def resolve_job_accounts(
             book.self_comment_accounts(),
             rng,
             pool_label="자사 카페",
+            comment_id_count=needed,
         )
     return author, comment_map

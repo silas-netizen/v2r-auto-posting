@@ -5,7 +5,11 @@ import pytest
 from openpyxl import Workbook, load_workbook
 
 from v2r_auto.content import CommentNode, ParsedArticle, parse_article
-from v2r_auto.gatling_accounts import recognize_proxy_workbook
+from v2r_auto.gatling_accounts import (
+    comment_auto_labels,
+    normalize_auto_id_count,
+    recognize_proxy_workbook,
+)
 from v2r_auto.images import ResolvedImage
 from v2r_auto.gatling_paste import (
     AFFILIATE_BOARD_LINKS,
@@ -1215,3 +1219,135 @@ def test_paste_writes_chrome_id_and_password(tmp_path: Path) -> None:
     assert sheet.cell(9, 5).value == 10
     assert sheet.cell(9, 6).value == "selfwriter"
     assert sheet.cell(9, 7).value == "pw-self"
+
+
+def test_auto_id_count_accepts_two_to_ten() -> None:
+    assert normalize_auto_id_count(2) == 2
+    assert normalize_auto_id_count(6) == 6
+    assert normalize_auto_id_count(10) == 10
+    with pytest.raises(GatlingPasteError, match="2~10"):
+        normalize_auto_id_count(1)
+    with pytest.raises(GatlingPasteError, match="2~10"):
+        normalize_auto_id_count(11)
+
+
+def test_auto_id_labels_keep_six_id_order() -> None:
+    assert comment_auto_labels("질문형", 6) == [
+        "댓글1",
+        "댓글2",
+        "대대대댓글2",
+        "댓글3",
+        "댓글4",
+        "댓글5",
+    ]
+    assert comment_auto_labels("후기형", 6) == [
+        "댓글1",
+        "댓글2",
+        "대대댓글2",
+        "댓글3",
+        "댓글4",
+        "댓글5",
+    ]
+    assert comment_auto_labels("질문형", 2) == ["댓글1", "댓글2"]
+    assert comment_auto_labels("후기형", 3) == ["댓글1", "댓글2", "대대댓글2"]
+    assert comment_auto_labels("질문형", 10) == [
+        "댓글1",
+        "댓글2",
+        "대대대댓글2",
+        "댓글3",
+        "댓글4",
+        "댓글5",
+        "댓글6",
+        "댓글7",
+        "댓글8",
+        "댓글9",
+    ]
+
+
+def test_two_auto_ids_fill_only_first_comments(tmp_path: Path) -> None:
+    job = make_job(cafe="씨씨앙", board="자유수다방")
+    job.account = "writer"
+    job.article_type = "질문형"
+    book = recognize_proxy_workbook(write_proxy_xlsx(tmp_path, comment_count=2))
+    rng = random.Random(1)
+    chosen = rng.sample(book.comment_accounts(), 2)
+    rows = build_master_rows(
+        job,
+        proxy_book=book,
+        rng=random.Random(1),
+        comment_id_count=2,
+    )
+
+    comments = [row for row in rows if row.type == TYPE_COMMENT]
+    replies = [row for row in rows if row.type == TYPE_REPLY]
+    assert comments[0].account == chosen[0].account
+    assert comments[1].account == chosen[1].account
+    assert replies[2].account == chosen[1].account
+    assert replies[3].account in {"", None}
+    assert {row.account for row in comments} == {item.account for item in chosen}
+
+
+def test_three_auto_ids_include_special_reply(tmp_path: Path) -> None:
+    job = make_job(cafe="씨씨앙", board="자유수다방")
+    job.account = "writer"
+    job.article_type = "질문형"
+    book = recognize_proxy_workbook(write_proxy_xlsx(tmp_path, comment_count=3))
+    rng = random.Random(4)
+    chosen = rng.sample(book.comment_accounts(), 3)
+    rows = build_master_rows(
+        job,
+        proxy_book=book,
+        rng=random.Random(4),
+        comment_id_count=3,
+    )
+    replies = [row for row in rows if row.type == TYPE_REPLY]
+    assert replies[2].account == chosen[1].account
+    assert replies[3].account == chosen[2].account
+
+
+def test_ten_auto_ids_need_ten_proxy_accounts(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{QUESTION_SOURCE}",씨씨앙,writer,질문형,,,,,자유수다방\n',
+    )
+    book = recognize_proxy_workbook(write_proxy_xlsx(tmp_path, comment_count=10))
+    result = build_gatling_master(
+        brand,
+        manuscript_only=True,
+        proxy_book=book,
+        comment_id_count=10,
+        rng=random.Random(5),
+    )
+    comments = [row for row in result.rows if row.type == TYPE_COMMENT]
+    assert len({row.account for row in comments if row.account}) == 2
+    assert all(row.account for row in comments)
+
+    thin = recognize_proxy_workbook(write_proxy_xlsx(tmp_path, comment_count=4))
+    with pytest.raises(GatlingPasteError, match="댓글 아이디가 10개"):
+        build_gatling_master(
+            brand,
+            manuscript_only=True,
+            proxy_book=thin,
+            comment_id_count=10,
+        )
+
+
+def test_selected_count_overrides_default_six(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{QUESTION_SOURCE}",고요한아침,selfwriter,질문형,,,,,가입인사\n',
+    )
+    book = recognize_proxy_workbook(
+        write_proxy_xlsx(tmp_path, self_comment_count=2)
+    )
+    result = build_gatling_master(
+        brand,
+        manuscript_only=True,
+        proxy_book=book,
+        comment_id_count=2,
+    )
+    comments = [row for row in result.rows if row.type == TYPE_COMMENT]
+    assert all(row.account for row in comments)
+    assert {row.account for row in comments} <= {"s1", "s2"}
