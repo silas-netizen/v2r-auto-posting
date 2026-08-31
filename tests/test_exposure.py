@@ -98,7 +98,10 @@ def test_parse_cafes_uses_defaults() -> None:
     assert "씨씨앙" in cafes
     assert "러브인썸" in cafes
     assert "마이웨딩드림" in cafes
-    assert "우아한갱년기" in cafes
+    assert "고요한아침" in cafes
+    assert "헬씨트리" in cafes
+    assert "쌍둥이맘모여라" in cafes
+    assert "우아한갱년기" not in cafes
 
 
 def test_database_id_from_notion_url() -> None:
@@ -145,6 +148,10 @@ def test_strip_parenthetical_keeps_search_keyword() -> None:
 def test_cafe_name_ignores_spaces() -> None:
     assert matching_cafe_name("러브 인썸 카페", list(DEFAULT_CAFE_NAMES)) == "러브인썸"
     assert matching_cafe_name("마이 웨딩 드림", list(DEFAULT_CAFE_NAMES)) == "마이웨딩드림"
+    assert matching_cafe_name("헬씨 트리", list(DEFAULT_CAFE_NAMES)) == "헬씨트리"
+    assert matching_cafe_name("글로시 마이", list(DEFAULT_CAFE_NAMES)) == "글로시마이"
+    assert matching_cafe_name("웨딩 노트", list(DEFAULT_CAFE_NAMES)) == "웨딩노트"
+    assert matching_cafe_name("쌍둥이맘 모여라", list(DEFAULT_CAFE_NAMES)) == "쌍둥이맘모여라"
     assert matching_cafe_name("다른카페", list(DEFAULT_CAFE_NAMES)) == ""
 
 
@@ -232,11 +239,16 @@ def test_target_cafe_live_slugs_are_known() -> None:
     assert cafe_name_from_url(
         "https://cafe.naver.com/f-e/cafes/26680163/articles/1", names
     ) == "마이웨딩드림"
-    assert cafe_name_from_url("https://cafe.naver.com/wgang/1", names) == "우아한갱년기"
+    assert cafe_name_from_url("https://cafe.naver.com/singorstar/1", names) == "고요한아침"
+    assert cafe_name_from_url("https://cafe.naver.com/thssa/1", names) == "헬씨트리"
+    assert cafe_name_from_url("https://cafe.naver.com/freemtc/1", names) == "송도포털"
+    assert cafe_name_from_url("https://cafe.naver.com/fsmaples/1", names) == "글로시마이"
+    assert cafe_name_from_url("https://cafe.naver.com/sharfova/1", names) == "웨딩노트"
+    assert cafe_name_from_url("https://cafe.naver.com/getamped2/1", names) == "쌍둥이맘모여라"
     assert cafe_name_from_url(
-        "https://cafe.naver.com/f-e/cafes/29349320/articles/1", names
-    ) == "우아한갱년기"
-    assert cafe_name_from_url("https://cafe.naver.com/singorstar/1", ["고요한아침"]) == "고요한아침"
+        "https://cafe.naver.com/f-e/cafes/10174516/articles/1", names
+    ) == "쌍둥이맘모여라"
+    assert cafe_name_from_url("https://cafe.naver.com/wgang/1", names) == ""
 
 
 def test_page_cafe_name_binds_unknown_slug_for_any_target() -> None:
