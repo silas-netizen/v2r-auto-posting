@@ -84,6 +84,35 @@ def test_brand_sheet_preserves_body_unless_special_format_is_enabled(
     assert publisher._destination(informational)["use_comment_ai"] is True
 
 
+def test_normal_self_owned_job_can_use_immediate_destination(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "brand-immediate.csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,"
+        "말머리,계정유형,이미지 없음,게시판명\n"
+        '"키워드","제목 : 제목\n본문 : 본문",헬씨 트리,writer,'
+        "질문형,,,실명,Y,맛있는 건강 식단 공유\n",
+        encoding="utf-8-sig",
+    )
+    job = load_brand_immediate_jobs(path, brand="테스트")[0]
+    job.cafe_id = 23708088
+    job.menu_id = 29
+    job.canonical_cafe_name = "헬씨 트리"
+    job.canonical_board_name = "맛있는 건강 식단 공유"
+    job.publish_immediately = True
+    job.scheduled_at = None
+
+    destination = ImmediateApiPublisher(
+        None,
+        logging.getLogger("immediate-destination-test"),
+    )._destination(job)
+
+    assert destination["start_at"] is None
+    assert destination["cafe_id"] == 23708088
+    assert destination["menu_id"] == 29
+
+
 def test_one_malformed_sheet_row_does_not_abort_other_rows(tmp_path: Path) -> None:
     path = tmp_path / "brand.csv"
     path.write_text(
