@@ -97,6 +97,8 @@ def test_parse_cafes_uses_defaults() -> None:
     cafes = parse_cafes("")
     assert "씨씨앙" in cafes
     assert "러브인썸" in cafes
+    assert "마이웨딩드림" in cafes
+    assert "우아한갱년기" in cafes
 
 
 def test_database_id_from_notion_url() -> None:
@@ -219,6 +221,39 @@ def test_visible_loveinsome_slug_is_kept() -> None:
     hits = merge_visible_our_cafe_hits([], [url], list(DEFAULT_CAFE_NAMES), "")
     assert [hit.cafe_name for hit in hits] == ["러브인썸"]
     assert hits[0].url == url
+
+
+def test_target_cafe_live_slugs_are_known() -> None:
+    names = list(DEFAULT_CAFE_NAMES)
+    assert cafe_name_from_url("https://cafe.naver.com/cantsb/1", names) == "씨씨앙"
+    assert cafe_name_from_url("https://cafe.naver.com/yangmom/1", names) == "양평맘"
+    assert cafe_name_from_url("https://cafe.naver.com/fik50kjkc/1", names) == "러브인썸"
+    assert cafe_name_from_url("https://cafe.naver.com/fik505050/1", names) == "마이웨딩드림"
+    assert cafe_name_from_url(
+        "https://cafe.naver.com/f-e/cafes/26680163/articles/1", names
+    ) == "마이웨딩드림"
+    assert cafe_name_from_url("https://cafe.naver.com/wgang/1", names) == "우아한갱년기"
+    assert cafe_name_from_url(
+        "https://cafe.naver.com/f-e/cafes/29349320/articles/1", names
+    ) == "우아한갱년기"
+    assert cafe_name_from_url("https://cafe.naver.com/singorstar/1", ["고요한아침"]) == "고요한아침"
+
+
+def test_page_cafe_name_binds_unknown_slug_for_any_target() -> None:
+    html = _pack(
+        '<a href="https://cafe.naver.com/newweddingxyz">마이 웨딩 드림</a>'
+        '<a href="https://cafe.naver.com/newweddingxyz/88">우리 글</a>'
+    )
+    names = list(DEFAULT_CAFE_NAMES)
+    hits = collect_our_cafe_hits(html, names)
+    assert [hit.cafe_name for hit in hits] == ["마이웨딩드림"]
+    merged = merge_visible_our_cafe_hits(
+        [],
+        ["https://cafe.naver.com/newweddingxyz/88"],
+        names,
+        html,
+    )
+    assert [hit.cafe_name for hit in merged] == ["마이웨딩드림"]
 
 
 def test_html_without_main_pack_is_never_our_hit() -> None:
