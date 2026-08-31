@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -76,7 +78,6 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
             data_dir / "restricted-accounts.json",
             logger,
         )
-        self.failed_source_urls: set[str] = set()
         self.last_restricted_account = ""
         self.auto_account_limit = 10
 
@@ -186,56 +187,6 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
             )
         )
         return eligible, joined
-
-    def _scan_recent_failures(self, cafe_id: int) -> None:
-        token: str | None = None
-        for _ in range(50):
-            query: dict[str, Any] = {
-                "cafe_id": cafe_id,
-                "days_ago": 30,
-                "include_reserve": "true",
-            }
-            if token:
-                query["next_token"] = token
-            try:
-                response = self._request(
-                    "GET",
-                    "/naver_cafe_articles/board_histories",
-                    query=query,
-                )
-            except AffiliateApiError as exc:
-                if "(404)" not in str(exc):
-                    raise
-                self.logger.warning(
-                    "V2R 최근 실패 이력 API를 사용할 수 없어 "
-                    "이력 검사를 생략하고 현재 작업을 계속합니다"
-                )
-                return
-            for row in response.get("histories", []):
-                if row.get("status") != "FAIL":
-                    continue
-                source_id = str(row.get("source_id") or "")
-                if source_id:
-                    self.failed_source_urls.add(
-                        f"https://v2r.daboja.im/nc/articleDetail/{source_id}"
-                    )
-                reason = str(row.get("fail_reason") or "")
-                account = str(row.get("naver_account_login_id") or "")
-                self.logger.error(
-                    "이전 예약 글 실제 발행 실패: %s / %s / %s",
-                    row.get("title") or source_id,
-                    account,
-                    reason[:180],
-                )
-                if "27000" in reason or "게시글 작성 및 카페" in reason:
-                    self.restrictions.observe_code_27000(
-                        source_id=source_id,
-                        account=account,
-                        reason=reason[:500],
-                    )
-            token = response.get("next_token")
-            if not token:
-                break
 
     def _load_menus(
         self,
@@ -444,7 +395,6 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                         job.status = JobStatus.SKIPPED
                         job.message = "브랜드 원고는 자사 카페에만 발행할 수 있습니다"
 
-            self._scan_recent_failures(cafe.cafe_id)
             eligible, _joined = self._eligible_accounts(cafe.cafe_id)
             menus, healthy = self._load_menus(cafe.cafe_id, eligible)
             if not healthy:
@@ -544,10 +494,102 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                 len({job.account for job in prepared}),
             )
 
-    def consume_failed_source_urls(self) -> set[str]:
-        failed = set(self.failed_source_urls)
-        self.failed_source_urls.clear()
-        return failed
+    def _inspect_saved_source_url(
+        self,
+        url: str,
+        request_timeout: float,
+    ) -> dict[str, str]:
+        source_id = self._source_id_from_url(url)
+        if not source_id:
+            return {"state": "unknown", "reason": "올바른 V2R 링크가 아님"}
+        try:
+            detail = self._request(
+                "GET",
+                "/naver_cafe_articles/article",
+                query={"source_id": source_id},
+                retry_auth=False,
+                max_attempts=1,
+                request_timeout=request_timeout,
+            )
+        except AffiliateApiError as exc:
+            if "DELETED_NAVER_CAFE_ARTICLE_SOURCE" in str(exc):
+                return {"state": "deleted", "reason": str(exc)}
+            return {"state": "unknown", "reason": str(exc)}
+        except Exception as exc:
+            return {"state": "unknown", "reason": str(exc)}
+
+        history = detail.get("naver_cafe_article_history") or {}
+        destination = detail.get("naver_cafe_article_destination") or {}
+        state = str(history.get("status") or destination.get("status") or "")
+        reason = str(
+            history.get("fail_reason")
+            or history.get("reason")
+            or destination.get("fail_reason")
+            or ""
+        )
+        account = str(
+            history.get("naver_account_login_id")
+            or destination.get("naver_login_id")
+            or ""
+        )
+        return {
+            "state": "failed" if state == "FAIL" else "present",
+            "reason": reason,
+            "account": account,
+            "source_id": source_id,
+        }
+
+    def inspect_saved_source_urls(
+        self,
+        urls: set[str],
+    ) -> dict[str, dict[str, str]]:
+        """Inspect only locally saved sources, never a cafe's global history."""
+        unique_urls = {url for url in urls if self._source_id_from_url(url)}
+        if not unique_urls:
+            return {}
+        self._capture_authorization()
+        worker_count = min(6, len(unique_urls))
+        pending_urls = list(unique_urls)
+        results: dict[str, dict[str, str]] = {}
+        deadline = time.monotonic() + 8
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            for offset in range(0, len(pending_urls), worker_count):
+                batch = pending_urls[offset : offset + worker_count]
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    results.update(
+                        {url: {"state": "unknown"} for url in pending_urls[offset:]}
+                    )
+                    break
+                timeout = min(4.0, max(0.1, remaining))
+                states = list(
+                    executor.map(
+                        lambda url: self._inspect_saved_source_url(url, timeout),
+                        batch,
+                    )
+                )
+                results.update(zip(batch, states))
+                if all(item["state"] == "unknown" for item in states):
+                    results.update(
+                        {
+                            url: {"state": "unknown"}
+                            for url in pending_urls[offset + worker_count :]
+                        }
+                    )
+                    break
+
+        for result in results.values():
+            if result.get("state") != "failed":
+                continue
+            reason = result.get("reason", "")
+            if "27000" not in reason and "게시글 작성 및 카페" not in reason:
+                continue
+            self.restrictions.observe_code_27000(
+                source_id=result.get("source_id", ""),
+                account=result.get("account", ""),
+                reason=reason[:500],
+            )
+        return results
 
     def is_deleted_source_url(self, url: str) -> bool:
         status = self.probe_source_urls({url}).get(url)

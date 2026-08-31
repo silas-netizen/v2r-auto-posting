@@ -1602,10 +1602,6 @@ class V2RBrowser:
     def start_affiliate_api_run(self, jobs: list[AffiliateJob] | None = None) -> None:
         publisher = self._get_affiliate_publisher()
         publisher._capture_authorization()
-        if jobs:
-            publisher.cleanup_stale_sources(
-                {job.cafe for job in jobs if job.status == JobStatus.PENDING}
-            )
 
     def load_v2r_cafe_catalog(self):
         """Fetch the current cafe/menu catalog without creating any article."""
@@ -1637,6 +1633,9 @@ class V2RBrowser:
     ) -> dict[str, bool | None]:
         return self._get_affiliate_publisher().probe_source_urls(urls)
 
+    def inspect_immediate_source_urls(self, urls: set[str]):
+        return self._get_immediate_publisher().inspect_saved_source_urls(urls)
+
     def _get_immediate_publisher(self):
         from .immediate_api import ImmediateApiPublisher
 
@@ -1666,9 +1665,6 @@ class V2RBrowser:
 
     def classify_immediate_failure(self, error: Exception) -> tuple[str, bool]:
         return self._get_immediate_publisher().classify_failure(error)
-
-    def consume_failed_immediate_urls(self) -> set[str]:
-        return self._get_immediate_publisher().consume_failed_source_urls()
 
     def is_deleted_immediate_url(self, url: str) -> bool:
         return self._get_immediate_publisher().is_deleted_source_url(url)

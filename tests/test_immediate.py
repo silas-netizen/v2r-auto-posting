@@ -371,7 +371,7 @@ class FakeImmediatePublisher(ImmediateApiPublisher):
         raise AssertionError((method, path, query))
 
 
-def test_missing_history_endpoint_does_not_block_current_jobs() -> None:
+def test_missing_history_endpoint_does_not_block_account_ordering() -> None:
     class MissingHistoryPublisher(ImmediateApiPublisher):
         def _request(self, method, path, payload=None, query=None):
             raise AffiliateApiError(
@@ -381,7 +381,6 @@ def test_missing_history_endpoint_does_not_block_current_jobs() -> None:
 
     publisher = MissingHistoryPublisher(None, logging.getLogger("history-404"))
 
-    publisher._scan_recent_failures(10174516)
     assert publisher._last_used(10174516) == {}
 
 
@@ -1066,7 +1065,7 @@ def test_previous_account_test_success_still_publishes_new_test(
     }
 
 
-def test_deleted_brand_source_is_removed_and_republished(
+def test_failed_local_brand_source_is_removed_and_republished(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "brand.csv"
@@ -1074,23 +1073,26 @@ def test_deleted_brand_source_is_removed_and_republished(
         "키워드,본문,카페명,작성계정,원고유형,완료 링크,"
         "말머리,계정유형,이미지 없음,게시판명\n"
         '"키워드","제목 : 제목\n본문 : 본문",고요한아침,writer-a,'
-        "후기형,https://v2r.example/nc/articleDetail/deleted-source,"
+        "후기형,https://v2r.example/nc/articleDetail/failed-source,"
         ",실명,Y,가입인사\n",
         encoding="utf-8-sig",
     )
     job = load_brand_immediate_jobs(path, brand="브랜드")[0]
     assert job.status == JobStatus.SKIPPED
 
-    class DeletedBrandBrowser:
+    class FailedBrandBrowser:
         published = 0
         sheet_updates = []
 
         def ensure_v2r_login(self, _email, _password):
             return None
 
-        def probe_v2r_source_urls(self, urls):
-            assert next(iter(urls)).endswith("deleted-source")
-            return {url: True for url in urls}
+        def inspect_immediate_source_urls(self, urls):
+            assert next(iter(urls)).endswith("failed-source")
+            return {
+                url: {"state": "failed", "reason": "예약 발행 실패"}
+                for url in urls
+            }
 
         def prepare_immediate_jobs(self, jobs):
             jobs[0].cafe_id = 14567700
@@ -1108,12 +1110,12 @@ def test_deleted_brand_source_is_removed_and_republished(
         def update_sheet_cell(self, url, column, row, value, **kwargs):
             self.sheet_updates.append((column, row, value))
 
-    browser = DeletedBrandBrowser()
+    browser = FailedBrandBrowser()
     runner = ImmediateRunner(
         browser=browser,
         history_path=tmp_path / "history.json",
         report_dir=tmp_path,
-        logger=logging.getLogger("deleted-brand-test"),
+        logger=logging.getLogger("failed-brand-test"),
     )
     result, _report = runner.run(
         [job],

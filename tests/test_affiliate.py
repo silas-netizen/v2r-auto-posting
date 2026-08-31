@@ -1158,8 +1158,11 @@ def test_completed_affiliate_source_is_probed_then_republished(
             self.calls = 0
 
         def probe_v2r_source_urls(self, urls):
-            assert urls == {old_url}
-            return {old_url: True}
+            daily_url = (
+                "https://v2r.daboja.im/nc/articleDetail/deleted-daily"
+            )
+            assert urls == {old_url, daily_url}
+            return {old_url: False, daily_url: True}
 
         def publish_affiliate_revision(
             self,

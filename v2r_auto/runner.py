@@ -217,19 +217,22 @@ class AffiliateRunner:
                     "2. 데이터 확인부터 다시 실행하세요"
                 )
         state_records: dict[int, tuple[str, dict]] = {}
-        saved_affiliate_urls: dict[int, str] = {}
+        saved_affiliate_urls: dict[int, set[str]] = {}
         if self.state and not dry_run:
             for job in jobs:
                 record = self.state.load_or_create(source_sheet_url, job)
                 state_records[id(job)] = (record["job_key"], record)
                 if record["stage"] == "COMPLETED":
-                    saved_affiliate_urls[id(job)] = (
-                        job.completion_url
-                        or (
-                            "https://v2r.daboja.im/nc/articleDetail/"
-                            + str(record.get("revision_source_id") or "")
-                        )
-                    )
+                    source_ids = {
+                        str(record.get("daily_source_id") or ""),
+                        str(record.get("revision_source_id") or ""),
+                    } - {""}
+                    saved_affiliate_urls[id(job)] = {
+                        "https://v2r.daboja.im/nc/articleDetail/" + source_id
+                        for source_id in source_ids
+                    }
+                    if job.completion_url:
+                        saved_affiliate_urls[id(job)].add(job.completion_url)
                 elif record.get("account") and not job.account:
                     job.account = record["account"]
                 if record.get("daily_scheduled_at"):
@@ -241,21 +244,30 @@ class AffiliateRunner:
         if not dry_run:
             for job in jobs:
                 if job.completion_url:
-                    saved_affiliate_urls.setdefault(id(job), job.completion_url)
+                    saved_affiliate_urls.setdefault(id(job), set()).add(
+                        job.completion_url
+                    )
+            all_saved_urls = {
+                url
+                for urls in saved_affiliate_urls.values()
+                for url in urls
+            }
             probe_results = (
                 self.browser.probe_v2r_source_urls(
-                    set(saved_affiliate_urls.values())
+                    all_saved_urls
                 )
-                if saved_affiliate_urls
+                if all_saved_urls
                 else {}
             )
+            recovered_count = 0
+            unknown_count = 0
             for job in jobs:
-                saved_url = saved_affiliate_urls.get(id(job), "")
-                if not saved_url:
+                saved_urls = saved_affiliate_urls.get(id(job), set())
+                if not saved_urls:
                     continue
-                deleted = probe_results.get(saved_url)
+                states = [probe_results.get(url) for url in saved_urls]
                 record_info = state_records.get(id(job))
-                if deleted is True:
+                if any(state is True for state in states):
                     if self.state and record_info:
                         self.state.reset_sources(
                             record_info[0],
@@ -276,22 +288,26 @@ class AffiliateRunner:
                     job.daily_written_at = None
                     job.status = JobStatus.PENDING
                     job.message = ""
-                    self.logger.warning(
-                        "행 %s V2R에서 삭제된 완료 기록을 초기화하고 재발행합니다",
-                        job.row_number,
-                    )
+                    recovered_count += 1
                     continue
                 job.status = JobStatus.SKIPPED
-                if deleted is None:
+                if any(state is None for state in states):
                     job.message = (
                         "V2R 링크 확인 지연으로 기존 완료 기록 유지"
                     )
-                    self.logger.warning(
-                        "행 %s 링크를 4초 안에 확인하지 못해 중복 방지를 유지합니다",
-                        job.row_number,
-                    )
+                    unknown_count += 1
                 else:
                     job.message = "작업 DB에서 이미 완료됨"
+            if recovered_count:
+                self.logger.warning(
+                    "현재 jobs.db 관련 삭제 source %s건을 초기화하고 재발행합니다",
+                    recovered_count,
+                )
+            if unknown_count:
+                self.logger.warning(
+                    "현재 jobs.db 링크 %s건은 상태 확인 불가로 완료 기록을 유지합니다",
+                    unknown_count,
+                )
         self.browser.start_affiliate_api_run(jobs)
         assigned_jobs = self.browser.assign_affiliate_accounts(jobs)
         if not dry_run:
@@ -733,33 +749,63 @@ class ImmediateRunner:
                 if not saved_url:
                     continue
                 saved_urls_by_job[id(job)] = saved_url
-            probe_results = (
-                self.browser.probe_v2r_source_urls(
-                    set(saved_urls_by_job.values())
-                )
-                if saved_urls_by_job
-                else {}
-            )
+            source_states: dict[str, dict[str, str]] = {}
+            if saved_urls_by_job:
+                if hasattr(self.browser, "inspect_immediate_source_urls"):
+                    source_states = self.browser.inspect_immediate_source_urls(
+                        set(saved_urls_by_job.values())
+                    )
+                else:
+                    probe_results = self.browser.probe_v2r_source_urls(
+                        set(saved_urls_by_job.values())
+                    )
+                    source_states = {
+                        url: {
+                            "state": (
+                                "deleted"
+                                if deleted is True
+                                else "present"
+                                if deleted is False
+                                else "unknown"
+                            )
+                        }
+                        for url, deleted in probe_results.items()
+                    }
+            recovered_urls: set[str] = set()
+            recovered_deleted = 0
+            recovered_failed = 0
+            unknown_count = 0
             for job in jobs:
                 saved_url = saved_urls_by_job.get(id(job), "")
                 if not saved_url:
                     continue
-                deleted = probe_results.get(saved_url)
-                if deleted is None:
-                    self.logger.warning(
-                        "행 %s 링크를 4초 안에 확인하지 못해 기존 중복 방지를 유지합니다",
-                        job.row_number,
-                    )
+                state = source_states.get(saved_url, {}).get("state", "unknown")
+                if state == "unknown":
+                    unknown_count += 1
                     continue
-                if not deleted:
+                if state == "present":
                     continue
-                self.history.remove_urls({saved_url})
+                recovered_urls.add(saved_url)
+                if state == "deleted":
+                    recovered_deleted += 1
+                else:
+                    recovered_failed += 1
                 job.completion_url = ""
                 job.status = JobStatus.PENDING
                 job.message = ""
+            removed_local = self.history.remove_urls(recovered_urls)
+            if recovered_deleted or recovered_failed:
                 self.logger.warning(
-                    "행 %s V2R에서 삭제된 과거 링크를 제거하고 새로 발행합니다",
-                    job.row_number,
+                    "현재 작업 관련 과거 source 복구: 삭제 %s건 / 실패 %s건 / "
+                    "로컬 완료 이력 제거 %s건",
+                    recovered_deleted,
+                    recovered_failed,
+                    removed_local,
+                )
+            if unknown_count:
+                self.logger.warning(
+                    "현재 작업 링크 %s건은 상태 확인 불가로 기존 중복 방지를 유지합니다",
+                    unknown_count,
                 )
         if auto_account_limit == 10:
             self.browser.prepare_immediate_jobs(jobs)
@@ -773,14 +819,6 @@ class ImmediateRunner:
             "refresh_immediate_account_grades",
         ):
             self.browser.refresh_immediate_account_grades(jobs)
-        removed_failures = self.history.remove_urls(
-            self.browser.consume_failed_immediate_urls()
-        )
-        if removed_failures:
-            self.logger.warning(
-                "실제 발행 실패 이력 %s건을 중복 완료 목록에서 제거해 재시도합니다",
-                removed_failures,
-            )
         assign_immediate_schedules(
             jobs,
             publish_immediately=publish_immediately,
