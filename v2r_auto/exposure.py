@@ -84,6 +84,17 @@ def spacing_keyword_key(keyword: str) -> str:
     return compact_text(strip_parenthetical(keyword))
 
 
+def has_spacing_variants(keywords: list[str] | tuple[str, ...]) -> bool:
+    """True only when the same search word is spelled with different spaces."""
+    grouped: dict[str, set[str]] = {}
+    for keyword in keywords:
+        key = spacing_keyword_key(keyword)
+        if not key:
+            continue
+        grouped.setdefault(key, set()).add(strip_parenthetical(keyword).strip())
+    return any(len(texts) > 1 for texts in grouped.values())
+
+
 def pick_kept_duplicate(
     candidates: list[tuple[int, str, str]],
     *,
@@ -929,9 +940,12 @@ class ExposureChecker:
                     first_cafe=first_cafe,
                     queue=self._queue,
                 )
-                key = spacing_keyword_key(row.keyword) or spacing_keyword_key(keyword)
-                if key:
-                    self._collapsed_keys.add(key)
+                if getattr(self.notion, "last_duplicate_removed", False):
+                    key = spacing_keyword_key(row.keyword) or spacing_keyword_key(
+                        keyword
+                    )
+                    if key:
+                        self._collapsed_keys.add(key)
             except Exception as exc:
                 self.logger.error("중복 행 정리 실패 (%s): %s", keyword, exc)
         volume = None

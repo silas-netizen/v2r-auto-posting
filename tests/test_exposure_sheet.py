@@ -205,6 +205,38 @@ def test_store_deletes_spacing_duplicate_and_keeps_autocomplete_row() -> None:
     assert other.page_id == "2"
 
 
+def test_store_keeps_identical_keyword_rows() -> None:
+    csv_text = (
+        "카페명,url,발행시간,작성자 아이디,작성자 비밀번호,발행 URL,"
+        "노출 상태,키워드,통합검색,최종 편집 일시,키워드 검색량,노출된 검색량\n"
+        ",,,,,,밀려남,항문가려움피,,,\n"
+        ",,,,,,밀려남,다른키워드,,,\n"
+        ",,,,,,밀려남,항문가려움피,,,\n"
+        "양평맘,,,,,,노출완,엉덩이 종기 치료,,,\n"
+        ",,,,,,밀려남,엉덩이 종기,,,\n"
+        "양평맘,,,,,,노출완,엉덩이 종기 치료,,,\n"
+    )
+    writer = RecordingWriter()
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        __import__("logging").getLogger("test"),
+        opener=lambda request, timeout=30: FakeResponse(csv_text.encode("utf-8")),
+        writer=writer,
+    )
+    store.load_rows()
+    itch = _sheet_row(keyword="항문가려움피", page_id="2")
+    boil = _sheet_row(keyword="엉덩이 종기 치료", page_id="5")
+    assert store.collapse_spacing_duplicates(
+        itch, canonical_keyword="항문가려움피", queue=[itch]
+    ).page_id == "2"
+    assert store.collapse_spacing_duplicates(
+        boil, canonical_keyword="엉덩이 종기 치료", queue=[boil]
+    ).page_id == "5"
+    assert writer.deletes == []
+    assert writer.writes == []
+    assert store.last_duplicate_removed is False
+
+
 def test_store_rewrites_kept_keyword_to_autocomplete_spacing() -> None:
     csv_text = (
         "카페명,url,발행시간,작성자 아이디,작성자 비밀번호,발행 URL,"

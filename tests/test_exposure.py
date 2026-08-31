@@ -27,6 +27,7 @@ from v2r_auto.exposure import (
     pick_kept_duplicate,
     shift_row_page_ids,
     spacing_keyword_key,
+    has_spacing_variants,
     parse_cafes,
     parse_keyword_lines,
     parse_qc_count,
@@ -1692,6 +1693,12 @@ def test_spacing_keyword_key_ignores_spaces_and_notes() -> None:
     assert spacing_keyword_key("무통치질수술 비용 (+무통치질수술)") == spacing_keyword_key(
         "무통 치질수술비용"
     )
+    assert has_spacing_variants(["치핵 수술 비용", "치핵수술비용"])
+    assert has_spacing_variants(["항문 안쪽 통증", "항문안쪽통증"])
+    assert not has_spacing_variants(["항문가려움피", "항문가려움피"])
+    assert not has_spacing_variants(["엉덩이 종기 치료", "엉덩이 종기 치료"])
+    assert not has_spacing_variants(["항문가려움피", "항문 가려움 약"])
+    assert not has_spacing_variants(["엉덩이 종기 치료", "엉덩이 종기"])
 
 
 def test_pick_kept_duplicate_prefers_autocomplete_spacing() -> None:
@@ -1740,8 +1747,11 @@ def test_checker_skips_collapsed_spacing_duplicate() -> None:
     collapsed = []
 
     class FakeSheet:
+        last_duplicate_removed = False
+
         def collapse_spacing_duplicates(self, row, **kwargs):
             collapsed.append((row.keyword, kwargs["canonical_keyword"], kwargs["first_cafe"]))
+            self.last_duplicate_removed = True
             return row
 
         def update_check_result(self, *_args, **_kwargs):
