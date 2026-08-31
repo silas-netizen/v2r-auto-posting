@@ -43,6 +43,28 @@ def _chrome():
     return driver
 
 
+def _schedule_comment_inject(driver, delay_ms: int = 400) -> None:
+    """Start the comment delay after the page is already open.
+
+    A page-load setTimeout can fire during a slow Windows get()/iframe
+    switch, which makes the early-read test see comments immediately.
+    """
+    script = (
+        "setTimeout(function () {"
+        "  if (window.__injectCafeComments) window.__injectCafeComments();"
+        "}, arguments[0]);"
+    )
+    frame = find_cafe_frame(driver)
+    if frame is None:
+        driver.execute_script(script, delay_ms)
+        return
+    driver.switch_to.frame(frame)
+    try:
+        driver.execute_script(script, delay_ms)
+    finally:
+        driver.switch_to.default_content()
+
+
 def test_cafe_article_reader_does_not_click_more_comments() -> None:
     source = inspect.getsource(read_opened_cafe_article)
     source += inspect.getsource(SeleniumNaverSearch.open_post_text)
@@ -83,6 +105,7 @@ def test_read_opened_cafe_article_waits_past_empty_comment_box() -> None:
     driver = _chrome()
     try:
         driver.get(OUTER.as_uri())
+        _schedule_comment_inject(driver)
         text = read_opened_cafe_article(driver, timeout=8)
         assert QUOTE in text
         assert brand_found(text, ["자연방패 항문세정제"]) == "자연방패 항문세정제"
@@ -118,6 +141,7 @@ def test_collect_js_reads_comment_nodes() -> None:
     driver = _chrome()
     try:
         driver.get(INNER.as_uri())
+        _schedule_comment_inject(driver)
         assert wait_for_comments(driver, 8)
         text = collect_cafe_post_text(driver)
         assert QUOTE in text

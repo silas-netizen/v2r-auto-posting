@@ -6,13 +6,15 @@
   <div class="article_container">본문에는 식별어가 없습니다.</div>
   <div class="CommentBox"><div class="comment_info">댓글 0</div></div>
   <script>
-    setTimeout(function () {
-      document.querySelector(".CommentBox").innerHTML =
+    window.__injectCafeComments = function () {
+      var box = document.querySelector(".CommentBox");
+      if (!box) return;
+      box.innerHTML =
         '<ul class="comment_list">' +
         '<li class="CommentItem">' +
         '<span class="text_comment">저는 자연방패 항문세정제 쓰고 있어요.</span>' +
         "</li></ul>";
-    }, 2000);
+    };
   </script>
 </body>
 </html>

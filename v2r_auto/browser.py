@@ -588,14 +588,39 @@ class V2RBrowser:
             return ""
         return str(text or "").replace("\n", "").strip()
 
+    def _send_keys_safe(self, element, *keys) -> bool:
+        try:
+            element.send_keys(*keys)
+            return True
+        except Exception:
+            pass
+        try:
+            actions = ActionChains(self.driver)
+            for key in keys:
+                actions.send_keys(key)
+            actions.perform()
+            return True
+        except Exception:
+            return False
+
     def _clear_editable(self, element) -> None:
+        try:
+            self.driver.execute_script(
+                "const el = arguments[0];"
+                "if (el && el.focus) el.focus();"
+                "try { document.execCommand('selectAll', false, null); } catch (e) {}"
+                "try { document.execCommand('delete', false, null); } catch (e) {}",
+                element,
+            )
+        except Exception:
+            pass
         try:
             element.click()
         except Exception:
             pass
-        element.send_keys(Keys.CONTROL, "a")
-        element.send_keys(Keys.DELETE)
-        element.send_keys(Keys.BACKSPACE)
+        self._send_keys_safe(element, Keys.CONTROL, "a")
+        self._send_keys_safe(element, Keys.DELETE)
+        self._send_keys_safe(element, Keys.BACKSPACE)
 
     def _insert_text(self, element, value: str) -> bool:
         try:
@@ -618,10 +643,12 @@ class V2RBrowser:
             return
         # insertText can paint the in-cell editor without saving a date/number.
         if sheet_value_needs_keystrokes(value):
-            element.send_keys(value)
+            if not self._send_keys_safe(element, value):
+                raise AutomationError("시트 칸에 숫자·날짜를 입력하지 못했습니다")
             return
         if not self._insert_text(element, value):
-            element.send_keys(value)
+            if not self._send_keys_safe(element, value):
+                raise AutomationError("시트 칸에 값을 입력하지 못했습니다")
 
     def _editor_shows_value(self, shown: str, value: str) -> bool:
         if not str(value or "").strip():
@@ -634,25 +661,32 @@ class V2RBrowser:
             return False
         selected = self._selected_sheet_cell()
         try:
-            bar.click()
-        except Exception:
-            return False
-        time.sleep(0.1)
-        current = self._selected_sheet_cell()
-        if selected and current and current != selected:
-            self._cancel_sheet_edit()
-            return False
-        self._fill_editable(bar, value)
-        shown = self._element_edit_text(bar) or self._waffle_editor_text()
-        if value and not self._editor_shows_value(shown, value):
-            self._clear_editable(bar)
-            bar.send_keys(value)
+            try:
+                bar.click()
+            except Exception:
+                return False
+            time.sleep(0.1)
+            current = self._selected_sheet_cell()
+            if selected and current and current != selected:
+                self._cancel_sheet_edit()
+                return False
+            self._fill_editable(bar, value)
             shown = self._element_edit_text(bar) or self._waffle_editor_text()
-        if value and not self._editor_shows_value(shown, value):
+            if value and not self._editor_shows_value(shown, value):
+                self._clear_editable(bar)
+                if not self._send_keys_safe(bar, value):
+                    self._cancel_sheet_edit()
+                    return False
+                shown = self._element_edit_text(bar) or self._waffle_editor_text()
+            if value and not self._editor_shows_value(shown, value):
+                self._cancel_sheet_edit()
+                return False
+            if not self._send_keys_safe(bar, Keys.ENTER):
+                ActionChains(self.driver).send_keys(Keys.ENTER).perform()
+            return True
+        except Exception:
             self._cancel_sheet_edit()
             return False
-        bar.send_keys(Keys.ENTER)
-        return True
 
     def _type_into_cell_editor(self, value: str, editor=None) -> None:
         # F2 binds typing to the selected cell. Never send Ctrl+A/Delete
@@ -678,7 +712,7 @@ class V2RBrowser:
         shown = self._waffle_editor_text()
         if value and not self._editor_shows_value(shown, value):
             self._clear_editable(target)
-            target.send_keys(value)
+            self._send_keys_safe(target, value)
             shown = self._waffle_editor_text()
         if value and not self._editor_shows_value(shown, value):
             self._cancel_sheet_edit()
@@ -686,12 +720,23 @@ class V2RBrowser:
                 f"시트 칸 편집기에 값이 반영되지 않았습니다 "
                 f"(기대 {value} / 실제 {shown or '(비어 있음)'})"
             )
-        target.send_keys(Keys.ENTER)
+        if not self._send_keys_safe(target, Keys.ENTER):
+            ActionChains(self.driver).send_keys(Keys.ENTER).perform()
 
     def _type_sheet_value(self, value: str, editor=None) -> None:
-        if self._type_into_formula_bar(value):
+        # Status cells like G are dropdowns. The formula bar can be visible
+        # but not typeable (element not interactable). Use the cell first
+        # for text; try the formula bar first only for dates/numbers.
+        prefer_bar = sheet_value_needs_keystrokes(value)
+        if prefer_bar and self._type_into_formula_bar(value):
             return
-        self._type_into_cell_editor(value, editor)
+        try:
+            self._type_into_cell_editor(value, editor)
+            return
+        except Exception:
+            if not prefer_bar and self._type_into_formula_bar(value):
+                return
+            raise
 
     def _waffle_editor_text(self) -> str:
         try:

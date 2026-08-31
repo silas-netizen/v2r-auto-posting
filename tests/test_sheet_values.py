@@ -122,6 +122,7 @@ def test_sheet_value_needs_keystrokes_for_dates_and_numbers() -> None:
     assert sheet_value_needs_keystrokes("6700")
     assert sheet_value_needs_keystrokes("1,900")
     assert not sheet_value_needs_keystrokes("밀려남")
+    assert not sheet_value_needs_keystrokes("노출완")
     assert not sheet_value_needs_keystrokes("")
 
 
