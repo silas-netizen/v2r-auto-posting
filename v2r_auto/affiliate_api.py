@@ -889,15 +889,25 @@ class AffiliateApiPublisher:
             config = CAFE_DESTINATIONS.get(cafe_name)
             if not config:
                 continue
-            history = self._request(
-                "GET",
-                "/naver_cafe_articles/board_histories",
-                query={
-                    "cafe_id": config["cafe_id"],
-                    "days_ago": 1,
-                    "include_reserve": "true",
-                },
-            )
+            try:
+                history = self._request(
+                    "GET",
+                    "/naver_cafe_articles/board_histories",
+                    query={
+                        "cafe_id": config["cafe_id"],
+                        "days_ago": 1,
+                        "include_reserve": "true",
+                    },
+                )
+            except AffiliateApiError as exc:
+                if "(404)" not in str(exc):
+                    raise
+                self.logger.warning(
+                    "%s V2R 이력 API를 사용할 수 없어 "
+                    "실패 찌꺼기 사전 정리를 생략합니다",
+                    cafe_name,
+                )
+                continue
             for item in history.get("histories", []):
                 status = item.get("status")
                 created_raw = item.get("created_at")
@@ -1013,11 +1023,20 @@ class AffiliateApiPublisher:
     ) -> dict[str, Any] | None:
         threshold = requested_at - timedelta(seconds=15)
         for _ in range(8):
-            history = self._request(
-                "GET",
-                "/naver_cafe_articles/board_histories",
-                query={"cafe_id": cafe_id, "days_ago": 1, "include_reserve": "true"},
-            )
+            try:
+                history = self._request(
+                    "GET",
+                    "/naver_cafe_articles/board_histories",
+                    query={
+                        "cafe_id": cafe_id,
+                        "days_ago": 1,
+                        "include_reserve": "true",
+                    },
+                )
+            except AffiliateApiError as exc:
+                if "(404)" in str(exc):
+                    return None
+                raise
             item = next(
                 (
                     row
@@ -1065,23 +1084,37 @@ class AffiliateApiPublisher:
         while time.monotonic() < deadline:
             if wait_control:
                 wait_control()
-            history = self._request(
-                "GET",
-                "/naver_cafe_articles/board_histories",
-                query={"cafe_id": cafe_id, "days_ago": 1, "include_reserve": "true"},
+            try:
+                detail = self._request(
+                    "GET",
+                    "/naver_cafe_articles/article",
+                    query={"source_id": source_id},
+                )
+            except AffiliateApiError as exc:
+                if "(404)" in str(exc):
+                    time.sleep(2)
+                    continue
+                raise
+            source = detail.get("naver_cafe_article_source") or {}
+            destination = detail.get("naver_cafe_article_destination") or {}
+            status = destination.get("status") or source.get("status")
+            written_raw = (
+                source.get("written_at")
+                or destination.get("written_at")
+                or source.get("created_at")
             )
-            item = next(
-                (
-                    row
-                    for row in history.get("histories", [])
-                    if row.get("source_id") == source_id
-                ),
-                None,
-            )
-            if item and item.get("status") == "DONE" and item.get("written_at"):
-                return datetime.fromisoformat(str(item["written_at"]).replace("Z", "+00:00"))
-            if item and item.get("status") == "FAIL":
-                reason = str(item.get("fail_reason") or "원인 불명")
+            if status in {"DONE", "SUCCESS"}:
+                if written_raw:
+                    return datetime.fromisoformat(
+                        str(written_raw).replace("Z", "+00:00")
+                    )
+                return datetime.now(timezone.utc)
+            if status == "FAIL":
+                reason = str(
+                    destination.get("fail_reason")
+                    or source.get("fail_reason")
+                    or "원인 불명"
+                )
                 raise AffiliateApiError(f"일상 글 발행 실패: {reason}")
             time.sleep(2)
         raise AffiliateDailyPending(

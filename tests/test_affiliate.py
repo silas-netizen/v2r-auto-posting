@@ -682,6 +682,32 @@ def test_saved_source_probe_stops_after_first_full_outage_batch() -> None:
     assert set(results.values()) == {None}
 
 
+def test_written_status_uses_article_detail_not_removed_history_api() -> None:
+    written_at = "2026-08-31T01:30:00Z"
+
+    class DetailStatusPublisher(AffiliateApiPublisher):
+        def __init__(self):
+            super().__init__(None, logging.getLogger("detail-status-test"))
+            self.paths = []
+
+        def _request(self, method, path, payload=None, query=None, **kwargs):
+            self.paths.append(path)
+            return {
+                "naver_cafe_article_source": {
+                    "source_id": query["source_id"],
+                    "status": "DONE",
+                    "written_at": written_at,
+                },
+                "naver_cafe_article_destination": {"status": "DONE"},
+            }
+
+    publisher = DetailStatusPublisher()
+    result = publisher._wait_for_written_at("source-id", 31670254)
+
+    assert result == datetime(2026, 8, 31, 1, 30, tzinfo=timezone.utc)
+    assert publisher.paths == ["/naver_cafe_articles/article"]
+
+
 def test_affiliate_runner_uses_single_revision_flow(tmp_path: Path) -> None:
     job = load_affiliate_jobs(write_affiliate_csv(tmp_path), selected_row_number=2)[0]
     browser = FakeAffiliateBrowser()
