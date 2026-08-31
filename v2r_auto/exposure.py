@@ -378,6 +378,81 @@ def is_cafe_article_url(url: str) -> bool:
     return False
 
 
+def known_cafe_name(token: str) -> str:
+    return KNOWN_CAFE_KEYS.get(compact_text(token), "")
+
+
+def cafe_name_from_url(url: str, cafe_names: list[str]) -> str:
+    """글 주소의 슬러그/카페ID가 우리 카페면 그 이름을 돌려준다."""
+    identity = cafe_identity(url)
+    if not identity or ":" not in identity:
+        return ""
+    _kind, value = identity.split(":", 1)
+    known = known_cafe_name(value)
+    if not known:
+        return ""
+    return matching_cafe_name(known, cafe_names)
+
+
+def cafe_tokens(url: str) -> set[str]:
+    identity = cafe_identity(url)
+    if not identity or ":" not in identity:
+        return set()
+    _kind, value = identity.split(":", 1)
+    tokens = {identity, value.casefold()}
+    name = known_cafe_name(value)
+    if not name:
+        return tokens
+    tokens.add("name:" + compact_text(name))
+    for key, cafe in KNOWN_CAFE_KEYS.items():
+        if compact_text(cafe) != compact_text(name):
+            continue
+        tokens.add(key)
+        if key.isdigit():
+            tokens.add(f"club:{key}")
+            tokens.add(f"cafe:{key}")
+        else:
+            tokens.add(f"slug:{key}")
+    return tokens
+
+
+def same_cafe_identity(left: str, right: str) -> bool:
+    a = cafe_tokens(left)
+    b = cafe_tokens(right)
+    return bool(a and b and (a & b))
+
+
+def article_number(url: str) -> str:
+    parsed = urlparse(_absolute_url(url))
+    query = parse_qs(parsed.query)
+    article = (query.get("articleid") or query.get("articleId") or [""])[0]
+    if str(article).isdigit():
+        return str(article)
+    parts = [part for part in parsed.path.split("/") if part]
+    lowered = [part.casefold() for part in parts]
+    if "articles" in lowered:
+        index = lowered.index("articles")
+        if index + 1 < len(parts) and parts[index + 1].isdigit():
+            return parts[index + 1]
+    if len(parts) >= 2 and parts[-1].isdigit():
+        return parts[-1]
+    return ""
+
+
+def canonical_cafe_token(url: str) -> str:
+    identity = cafe_identity(url)
+    if not identity or ":" not in identity:
+        return ""
+    _kind, value = identity.split(":", 1)
+    name = known_cafe_name(value)
+    if name:
+        for key, cafe in KNOWN_CAFE_KEYS.items():
+            if compact_text(cafe) == compact_text(name) and key.isdigit():
+                return key
+        return compact_text(name)
+    return identity
+
+
 def cafe_identity(url: str) -> str:
     parsed = urlparse(_absolute_url(url))
     if "cafe.naver.com" not in (parsed.netloc or "").lower():
@@ -401,6 +476,10 @@ def cafe_identity(url: str) -> str:
 
 
 def article_dedupe_key(url: str) -> str:
+    article = article_number(url)
+    cafe = canonical_cafe_token(url)
+    if article and cafe:
+        return f"{cafe}:{article}"
     parsed = urlparse(_absolute_url(url))
     query = parse_qs(parsed.query)
     article = (query.get("articleid") or query.get("articleId") or [""])[0]
@@ -411,7 +490,17 @@ def article_dedupe_key(url: str) -> str:
     return path
 
 
-CAFE_CARD_SPAN = 800
+CAFE_CARD_SPAN = 2400
+KNOWN_CAFE_KEYS = {
+    "cantsb": "씨씨앙",
+    "25016228": "씨씨앙",
+    "yangmom": "양평맘",
+    "22788814": "양평맘",
+    "loveinsome": "러브인썸",
+    "26616683": "러브인썸",
+    "26680163": "마이웨딩드림",
+    "14567700": "고요한아침",
+}
 
 
 def search_result_html(html: str) -> str:
@@ -449,7 +538,7 @@ def collect_our_cafe_hits(html: str, cafe_names: list[str]) -> list[CafeHit]:
         identity = cafe_identity(href)
         cafe = matching_cafe_name(text, cafe_names)
         if identity and cafe and not is_cafe_article_url(href):
-            homes.append((start, identity, cafe))
+            homes.append((start, href, cafe))
         if is_cafe_article_url(href):
             if is_clustered_sub_result(tag):
                 continue
@@ -458,21 +547,21 @@ def collect_our_cafe_hits(html: str, cafe_names: list[str]) -> list[CafeHit]:
     hits: list[CafeHit] = []
     seen: set[str] = set()
     for start, href in articles:
-        identity = cafe_identity(href)
-        if not identity:
+        if not cafe_identity(href):
             continue
-        lo = max(0, start - CAFE_CARD_SPAN)
-        hi = min(len(source), start + 200)
-        card = source[lo:hi]
-        cafe = ""
-        for home_pos, home_id, home_cafe in homes:
-            if home_id != identity or not home_cafe:
+        cafe = cafe_name_from_url(href, cafe_names)
+        if not cafe:
+            lo = max(0, start - CAFE_CARD_SPAN)
+            hi = min(len(source), start + 200)
+            card = source[lo:hi]
+            for home_pos, home_url, home_cafe in homes:
+                if not home_cafe or not same_cafe_identity(home_url, href):
+                    continue
+                if lo <= home_pos <= hi:
+                    cafe = home_cafe
+                    break
+            if not cafe or not matching_cafe_name(_strip_tags(card), [cafe]):
                 continue
-            if lo <= home_pos <= hi:
-                cafe = home_cafe
-                break
-        if not cafe or not matching_cafe_name(_strip_tags(card), [cafe]):
-            continue
         key = article_dedupe_key(href)
         if key in seen:
             continue
@@ -491,6 +580,31 @@ def keep_visible_cafe_hits(
     if not keys:
         return []
     return [hit for hit in hits if article_dedupe_key(hit.url) in keys]
+
+
+def merge_visible_our_cafe_hits(
+    html_hits: list[CafeHit],
+    visible_urls: list[str] | None,
+    cafe_names: list[str],
+) -> list[CafeHit]:
+    """HTML에서 묶은 글 + 화면 주소만으로 우리 카페임이 밝혀진 글."""
+    hits = keep_visible_cafe_hits(html_hits, visible_urls)
+    if not visible_urls:
+        return hits
+    seen = {article_dedupe_key(hit.url) for hit in hits}
+    for url in visible_urls:
+        text = str(url or "").strip()
+        if not text or not is_cafe_article_url(text):
+            continue
+        cafe = cafe_name_from_url(text, cafe_names)
+        if not cafe:
+            continue
+        key = article_dedupe_key(text)
+        if key in seen:
+            continue
+        seen.add(key)
+        hits.append(CafeHit(url=text, cafe_name=cafe))
+    return hits
 
 
 class ExposureChecker:
@@ -587,7 +701,15 @@ class ExposureChecker:
             html = self.naver.search_integrated(keyword)
         except Exception as exc:
             self.logger.error("네이버 검색 실패 (%s): %s", keyword, exc)
-            self._write_result(row, STATUS_HIDDEN, "", None, False, dry_run)
+            self._write_result(
+                row,
+                STATUS_HIDDEN,
+                "",
+                None,
+                False,
+                dry_run,
+                reason="네이버 검색 실패",
+            )
             return
         html_hits = collect_our_cafe_hits(html, self.cafe_names)
         visible_urls: list[str] = []
@@ -602,7 +724,9 @@ class ExposureChecker:
             except Exception as exc:
                 self.logger.warning("통검 화면 글 확인 실패: %s", exc)
                 visible_urls = []
-        hits = keep_visible_cafe_hits(html_hits, visible_urls)
+        hits = merge_visible_our_cafe_hits(
+            html_hits, visible_urls, self.cafe_names
+        )
         if html_hits and len(hits) < len(html_hits):
             kept = {article_dedupe_key(hit.url) for hit in hits}
             hidden_names = ", ".join(
@@ -616,24 +740,26 @@ class ExposureChecker:
             )
         cafe_name = ""
         status = STATUS_HIDDEN
+        reason = "통합검색에 우리 카페 없음"
         if not hits:
-            if html_hits:
-                self.logger.info(
-                    "밀려남: %s / 통검 화면에 우리 카페 글이 보이지 않습니다",
-                    keyword,
-                )
+            if not search_result_html(html).strip():
+                reason = "통검 결과칸을 확인하지 못했습니다"
+                self.logger.info("밀려남: %s / %s", keyword, reason)
+            elif html_hits:
+                reason = "통검 화면에 우리 카페 글이 보이지 않습니다"
+                self.logger.info("밀려남: %s / %s", keyword, reason)
             else:
                 named = matching_cafe_name(
                     _strip_tags(search_result_html(html)), self.cafe_names
                 )
                 if named:
-                    self.logger.warning(
-                        "밀려남: %s / 통검 결과칸에 %s 이름은 보이지만 우리 카페 글 주소를 못 찾았습니다",
-                        keyword,
-                        named,
+                    reason = (
+                        f"통검 결과칸에 {named} 이름은 보이지만 "
+                        "우리 카페 글 주소를 못 찾았습니다"
                     )
+                    self.logger.warning("밀려남: %s / %s", keyword, reason)
                 else:
-                    self.logger.info("밀려남: %s / 통합검색에 우리 카페 없음", keyword)
+                    self.logger.info("밀려남: %s / %s", keyword, reason)
         else:
             names = ", ".join(
                 f"{hit.cafe_name} ({hit.url})" for hit in hits
@@ -650,16 +776,24 @@ class ExposureChecker:
                 if matched:
                     cafe_name = hit.cafe_name
                     status = STATUS_EXPOSED
+                    reason = f"{hit.cafe_name} 글에서 식별어 {matched}"
                     self.logger.info(
-                        "노출완: %s / %s 글에서 식별어 %s / %s",
+                        "노출완: %s / %s / %s",
                         keyword,
-                        hit.cafe_name,
-                        matched,
+                        reason,
                         hit.url,
                     )
                     break
             if status != STATUS_EXPOSED:
-                self.logger.info("밀려남: %s / 우리 카페 글에 브랜드 식별어 없음", keyword)
+                reason = "우리 카페 글에 브랜드 식별어 없음"
+                self.logger.info("밀려남: %s / %s", keyword, reason)
+        self.logger.info(
+            "통검 판단 근거: %s / HTML %s건 / 화면 %s건 / %s",
+            keyword,
+            len(html_hits),
+            len(visible_urls),
+            reason,
+        )
         volume = None
         volume_found = False
         lookup = getattr(self.naver, "lookup_search_volume", None)
@@ -678,6 +812,7 @@ class ExposureChecker:
             volume,
             volume_found,
             dry_run,
+            reason=reason,
         )
 
     def _write_result(
@@ -688,6 +823,7 @@ class ExposureChecker:
         volume: int | None,
         volume_found: bool,
         dry_run: bool,
+        reason: str = "",
     ) -> None:
         cafe_value, cafe_write = cafe_id_for_check(row.current_cafe, status, cafe_name)
         cafe_log = cafe_write or cafe_value or "(없음)"
@@ -721,9 +857,21 @@ class ExposureChecker:
             self.logger.error("시트 저장 실패 (%s): %s", row.keyword, exc)
             return
         if row.current_status != status:
-            self.logger.info("%s 노출상태 변경: %s → %s", label, row.keyword, status)
+            if reason:
+                self.logger.info(
+                    "%s 노출상태 변경: %s → %s / %s",
+                    label,
+                    row.keyword,
+                    status,
+                    reason,
+                )
+            else:
+                self.logger.info("%s 노출상태 변경: %s → %s", label, row.keyword, status)
         else:
-            self.logger.info("상태 유지: %s", status)
+            if reason:
+                self.logger.info("상태 유지: %s / %s", status, reason)
+            else:
+                self.logger.info("상태 유지: %s", status)
         if cafe_write:
             self.logger.info("%s 카페 변경: %s → %s", label, row.keyword, cafe_write)
         row.current_status = status

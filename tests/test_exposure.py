@@ -7,12 +7,15 @@ from v2r_auto.exposure import (
     DEFAULT_CAFE_NAMES,
     ExposureChecker,
     ExposureRow,
+    article_dedupe_key,
     brand_found,
     cafe_id_for_check,
+    cafe_name_from_url,
     cafe_name_option,
     status_option,
     collect_our_cafe_hits,
     keep_visible_cafe_hits,
+    merge_visible_our_cafe_hits,
     search_result_html,
     is_cafe_article_url,
     is_clustered_sub_result,
@@ -229,6 +232,100 @@ def test_header_ssissiang_does_not_count_main_pack_foreign_article() -> None:
     """
     hits = collect_our_cafe_hits(html, list(DEFAULT_CAFE_NAMES))
     assert hits == []
+
+
+def test_mixed_slug_home_and_club_article_is_ssissiang() -> None:
+    html = _pack("""
+      <a href="https://cafe.naver.com/cantsb">국내1위 다이어트 커뮤니티 씨씨앙</a>
+      <a href="https://cafe.naver.com/f-e/cafes/25016228/articles/3453001">
+        칼로리바이크 후기
+      </a>
+    """)
+    hits = collect_our_cafe_hits(html, list(DEFAULT_CAFE_NAMES))
+    assert [hit.cafe_name for hit in hits] == ["씨씨앙"]
+    assert "3453001" in hits[0].url
+
+
+def test_club_article_without_home_link_is_still_ssissiang() -> None:
+    html = _pack(
+        '<a href="https://cafe.naver.com/f-e/cafes/25016228/articles/3453001">'
+        "팥순추출물 후기</a>"
+    )
+    hits = collect_our_cafe_hits(html, list(DEFAULT_CAFE_NAMES))
+    assert [hit.cafe_name for hit in hits] == ["씨씨앙"]
+
+
+def test_known_cafe_url_ignored_when_name_not_configured() -> None:
+    html = _pack(
+        '<a href="https://cafe.naver.com/f-e/cafes/25016228/articles/1">글</a>'
+    )
+    assert collect_our_cafe_hits(html, ["양평맘"]) == []
+
+
+def test_article_dedupe_key_unifies_slug_and_club() -> None:
+    slug = "https://cafe.naver.com/cantsb/3453001"
+    club = "https://cafe.naver.com/f-e/cafes/25016228/articles/3453001"
+    assert article_dedupe_key(slug) == article_dedupe_key(club)
+    assert cafe_name_from_url(club, list(DEFAULT_CAFE_NAMES)) == "씨씨앙"
+
+
+def test_keep_visible_matches_mixed_url_formats() -> None:
+    from v2r_auto.exposure import CafeHit
+
+    html_hit = CafeHit("https://cafe.naver.com/cantsb/3453001", "씨씨앙")
+    visible = ["https://cafe.naver.com/f-e/cafes/25016228/articles/3453001"]
+    assert [hit.cafe_name for hit in keep_visible_cafe_hits([html_hit], visible)] == [
+        "씨씨앙"
+    ]
+
+
+def test_visible_club_url_recovers_html_miss() -> None:
+    html = _pack("<p>카드 묶음 실패</p>")
+    visible = ["https://cafe.naver.com/f-e/cafes/25016228/articles/3453001"]
+    hits = merge_visible_our_cafe_hits(
+        collect_our_cafe_hits(html, list(DEFAULT_CAFE_NAMES)),
+        visible,
+        list(DEFAULT_CAFE_NAMES),
+    )
+    assert [hit.cafe_name for hit in hits] == ["씨씨앙"]
+
+
+def test_visible_foreign_cafe_url_is_not_recovered() -> None:
+    hits = merge_visible_our_cafe_hits(
+        [],
+        ["https://cafe.naver.com/cjsanvi/4214533"],
+        list(DEFAULT_CAFE_NAMES),
+    )
+    assert hits == []
+
+
+def test_mixed_url_visible_card_with_brand_is_exposed() -> None:
+    post = "https://cafe.naver.com/f-e/cafes/25016228/articles/3453001"
+    html = _pack(f"""
+    <a href="https://cafe.naver.com/cantsb">씨씨앙</a>
+    <a href="{post}">칼로리바이크</a>
+    """)
+    updated = []
+    naver = FakeNaver(
+        html,
+        {post: "본문에 팥순추출물 후기"},
+        visible_urls=["https://cafe.naver.com/cantsb/3453001"],
+    )
+
+    class FakeNotion:
+        def update_check_result(
+            self, row, *, status, cafe_name=None, search_volume=None, volume_found=False
+        ):
+            updated.append((status, cafe_name))
+
+    ExposureChecker(
+        FakeNotion(),
+        naver,
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    ).run([_row("칼로리바이크")], dry_run=False)
+    assert naver.opened == [post]
+    assert updated[-1][0] == "노출완"
 
 
 def test_collects_product_review_module_with_long_cafe_name() -> None:
@@ -1226,6 +1323,15 @@ def test_notion_uses_title_when_keyword_cell_is_empty() -> None:
     )
     rows = store.load_rows()
     assert rows[0].keyword == "치질연고"
+
+
+def test_result_scroll_moves_by_viewport() -> None:
+    from v2r_auto.exposure_naver import RESULT_SCROLL_ROUNDS, RESULT_SCROLL_STEP_JS
+
+    assert RESULT_SCROLL_ROUNDS >= 12
+    assert "scrollBy" in RESULT_SCROLL_STEP_JS
+    assert "innerHeight" in RESULT_SCROLL_STEP_JS
+    assert "scrollTo(0, bottom)" not in RESULT_SCROLL_STEP_JS
 
 
 def test_naver_login_detected_from_cookies() -> None:
