@@ -77,6 +77,37 @@ SEARCH_SCOPES = (
 )
 MAX_SEARCH_PAGES = 200
 ARTICLE_ID_KEYS = ("articleId", "articleid", "article_id")
+ARTICLE_LIST_KEYS = ("articleList", "articles", "articleItems")
+PAGE_INFO_LAST_KEYS = (
+    "lastNavigationPageNumber",
+    "lastPage",
+    "totalPages",
+    "pageCount",
+    "endPage",
+)
+PAGE_INFO_TOTAL_KEYS = (
+    "totalArticleCount",
+    "totalCount",
+    "total",
+    "articleCount",
+)
+HTML_ARTICLE_ID_PATTERNS = (
+    re.compile(r"/articles/(\d+)", re.I),
+    re.compile(r"[?&](?:articleid|articleId)=(\d+)", re.I),
+)
+HTML_PAGINATION_BLOCKS = (
+    re.compile(
+        r'(?is)<(?:div|ul|nav|table)[^>]*(?:prev-next|pagination|paginator|Nnavi|page_wrap)[^>]*>.*?</(?:div|ul|nav|table)>'
+    ),
+)
+HTML_SEARCH_REGIONS = (
+    re.compile(
+        r'(?is)<table[^>]*(?:article-board|board-box|article-table|board-list)[^>]*>.*?</table>'
+    ),
+    re.compile(
+        r'(?is)<(?:div|ul)[^>]*(?:ArticleList|article_list|Search_Article|search_list)[^>]*>.*?</(?:div|ul)>'
+    ),
+)
 HTML_NICK_PATTERNS = (
     re.compile(r'data-nickname="([^"]+)"'),
     re.compile(r'"writerNickname"\s*:\s*"([^"]+)"'),
@@ -295,11 +326,112 @@ def nicknames_from_json(payload: Any) -> list[str]:
     return split_nicknames("\n".join(found))
 
 
+def search_articles_from_payload(payload: Any) -> list[Any]:
+    found: list[Any] = []
+
+    def walk(node: Any) -> None:
+        if found:
+            return
+        if isinstance(node, dict):
+            for key in ARTICLE_LIST_KEYS:
+                value = node.get(key)
+                if isinstance(value, list):
+                    found.extend(value)
+                    return
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(payload)
+    return found
+
+
+def is_search_response(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+
+    def walk(node: Any) -> bool:
+        if isinstance(node, dict):
+            if any(key in node for key in ARTICLE_LIST_KEYS):
+                return True
+            if any(key in node for key in PAGE_INFO_LAST_KEYS + PAGE_INFO_TOTAL_KEYS):
+                return True
+            if node.get("pageInfo") is not None or node.get("page") is not None:
+                return True
+            return any(walk(value) for value in node.values())
+        if isinstance(node, list):
+            return any(walk(item) for item in node)
+        return False
+
+    return walk(payload)
+
+
+def nicknames_from_search_payload(payload: Any) -> list[str]:
+    articles = search_articles_from_payload(payload)
+    if articles:
+        return nicknames_from_json(articles)
+    if is_search_response(payload):
+        return []
+    return nicknames_from_json(payload)
+
+
+def search_result_html(html: str) -> str:
+    text = html or ""
+    for pattern in HTML_SEARCH_REGIONS:
+        match = pattern.search(text)
+        if match:
+            return match.group(0)
+    return ""
+
+
 def nicknames_from_html(html: str) -> list[str]:
     found: list[str] = []
     for pattern in HTML_NICK_PATTERNS:
         found.extend(pattern.findall(html or ""))
     return split_nicknames("\n".join(found))
+
+
+def nicknames_from_search_html(html: str) -> list[str]:
+    region = search_result_html(html)
+    if not region:
+        return []
+    return nicknames_from_html(region)
+
+
+def article_ids_from_html(html: str) -> list[str]:
+    region = search_result_html(html)
+    if not region:
+        return []
+    found: list[str] = []
+    seen: set[str] = set()
+    for pattern in HTML_ARTICLE_ID_PATTERNS:
+        for item in pattern.findall(region):
+            if item not in seen:
+                seen.add(item)
+                found.append(item)
+    return found
+
+
+def last_page_from_html(html: str) -> int | None:
+    text = html or ""
+    block = ""
+    for pattern in HTML_PAGINATION_BLOCKS:
+        match = pattern.search(text)
+        if match:
+            block = match.group(0)
+            break
+    if not block:
+        return None
+    pages = [int(item) for item in re.findall(r"(?:[?&](?:search\.)?page=|data-page=[\"']|>)(\d{1,3})(?:[\"'<])", block)]
+    if not pages:
+        pages = [int(item) for item in re.findall(r">\s*([1-9]\d{0,2})\s*<", block)]
+    if not pages:
+        return None
+    if re.search(r">\s*다음\s*<|aria-label=[\"']다음[\"']", block):
+        return None
+    return max(pages)
 
 
 def search_api_urls(
@@ -356,17 +488,40 @@ def article_ids_from_json(payload: Any) -> list[str]:
 def search_page_info(payload: Any) -> tuple[int | None, int | None, bool]:
     last_page: int | None = None
     total: int | None = None
+    per_page: int | None = None
     has_more = False
 
+    def read_info(node: dict[str, Any]) -> None:
+        nonlocal last_page, total, per_page, has_more
+        for key in PAGE_INFO_LAST_KEYS:
+            if node.get(key) not in (None, ""):
+                last_page = int(node[key])
+                break
+        for key in PAGE_INFO_TOTAL_KEYS:
+            if node.get(key) not in (None, ""):
+                total = int(node[key])
+                break
+        for key in ("perPage", "pageSize"):
+            if node.get(key) not in (None, ""):
+                try:
+                    size = int(node[key])
+                except (TypeError, ValueError):
+                    size = 0
+                if size > 0:
+                    per_page = size
+                    break
+        if node.get("visibleNextButton") or node.get("hasMore"):
+            has_more = True
+
     def walk(node: Any) -> None:
-        nonlocal last_page, total, has_more
         if isinstance(node, dict):
-            if node.get("lastNavigationPageNumber") not in (None, ""):
-                last_page = int(node["lastNavigationPageNumber"])
-            if node.get("totalArticleCount") not in (None, ""):
-                total = int(node["totalArticleCount"])
-            if node.get("visibleNextButton") or node.get("hasMore"):
-                has_more = True
+            if any(key in node for key in PAGE_INFO_LAST_KEYS + PAGE_INFO_TOTAL_KEYS) or node.get(
+                "visibleNextButton"
+            ) is not None:
+                read_info(node)
+            info = node.get("pageInfo")
+            if isinstance(info, dict):
+                read_info(info)
             for value in node.values():
                 walk(value)
         elif isinstance(node, list):
@@ -374,6 +529,11 @@ def search_page_info(payload: Any) -> tuple[int | None, int | None, bool]:
                 walk(item)
 
     walk(payload)
+    if last_page is None and total is not None:
+        size = per_page or 50
+        last_page = 1 if total <= 0 else max(1, (total + size - 1) // size)
+        if total <= 0:
+            has_more = False
     return last_page, total, has_more
 
 
@@ -384,34 +544,18 @@ def should_stop_search(
     empty_streak: int,
     new_article_count: int,
 ) -> bool:
+    _ = empty_streak
     if page >= MAX_SEARCH_PAGES:
+        return True
+    if last_page is not None and page >= last_page and not has_more:
         return True
     if new_article_count > 0:
         return False
-    if last_page is not None and page >= last_page and not has_more:
-        return True
-    if page > 1 and empty_streak >= 2:
-        return True
-    if empty_streak >= 3:
-        return True
-    return False
+    return True
 
 
 def payload_has_articles(payload: Any) -> bool:
-    if payload is None:
-        return False
-    if isinstance(payload, list):
-        return bool(payload)
-    if not isinstance(payload, dict):
-        return False
-    for key in ("articles", "articleList", "result", "message", "data"):
-        if key in payload:
-            value = payload[key]
-            if isinstance(value, list):
-                return bool(value)
-            if isinstance(value, dict) and payload_has_articles(value):
-                return True
-    return bool(nicknames_from_json(payload))
+    return bool(search_articles_from_payload(payload))
 
 
 @dataclass(slots=True)

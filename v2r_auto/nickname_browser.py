@@ -13,14 +13,18 @@ from .nickname_exclude import (
     ExcludeSyncResult,
     NicknameExcludeError,
     SearchScope,
+    article_ids_from_html,
     article_ids_from_json,
     build_sync_result,
     cafe_id_from_page,
     cafe_search_url,
     cafe_search_url_modern,
     cookies_show_naver_login,
-    nicknames_from_html,
-    nicknames_from_json,
+    is_search_response,
+    last_page_from_html,
+    nicknames_from_search_html,
+    nicknames_from_search_payload,
+    search_articles_from_payload,
     page_is_missing,
     page_requires_naver_login,
     parse_cafe_address,
@@ -223,7 +227,7 @@ class NicknameExcludeSession:
             new_ids = [item for item in article_ids if item not in seen_articles]
             for item in new_ids:
                 seen_articles.add(item)
-            if page_nicks:
+            if new_ids and page_nicks:
                 found.extend(page_nicks)
                 empty_streak = 0
                 extra = f", 전체 {last_page}페이지" if last_page else ""
@@ -234,18 +238,42 @@ class NicknameExcludeSession:
                     keyword,
                     scope.label,
                     page,
-                    len(page_nicks),
+                    len(split_nicknames("\n".join(page_nicks))),
                     extra,
+                )
+            elif page_nicks and not article_ids and page == 1:
+                found.extend(page_nicks)
+                empty_streak = 0
+                self.logger.info(
+                    "'%s' %s %s페이지에서 닉네임 %s개",
+                    keyword,
+                    scope.label,
+                    page,
+                    len(split_nicknames("\n".join(page_nicks))),
                 )
             else:
                 empty_streak += 1
                 self.logger.info(
-                    "'%s' %s %s페이지에서 새 닉네임이 없습니다",
+                    "'%s' %s %s페이지에서 검색 결과가 더 없습니다",
                     keyword,
                     scope.label,
                     page,
                 )
             if should_stop_search(page, last_page, has_more, empty_streak, len(new_ids)):
+                if last_page is not None and page >= last_page:
+                    self.logger.info(
+                        "'%s' %s 검색 마지막 페이지입니다. %s페이지에서 멈춥니다",
+                        keyword,
+                        scope.label,
+                        page,
+                    )
+                elif not new_ids:
+                    self.logger.info(
+                        "'%s' %s 검색 결과가 더 없어 %s페이지에서 멈춥니다",
+                        keyword,
+                        scope.label,
+                        page,
+                    )
                 break
             has_more = False
             page += 1
@@ -310,15 +338,32 @@ class NicknameExcludeSession:
                     total = info_total
                 if info_more:
                     has_more = True
-                nicks = nicknames_from_json(payload)
-                ids = article_ids_from_json(payload)
+                nicks = nicknames_from_search_payload(payload)
+                articles = search_articles_from_payload(payload)
+                ids = article_ids_from_json(
+                    articles if articles or is_search_response(payload) else payload
+                )
+                if is_search_response(payload):
+                    html_last = last_page_from_html(self._page_html())
+                    if html_last and not last_page:
+                        last_page = html_last
+                    return nicks, ids, last_page, total, has_more
                 if nicks or ids:
                     return nicks, ids, last_page, total, has_more
-            html_nicks = nicknames_from_html(text)
-            if html_nicks:
-                return html_nicks, [], last_page, total, has_more
-        html_nicks = nicknames_from_html(self._page_html())
-        return html_nicks, [], last_page, total, has_more
+            html_nicks = nicknames_from_search_html(text)
+            html_ids = article_ids_from_html(text)
+            if html_nicks or html_ids:
+                html_last = last_page_from_html(text)
+                return html_nicks, html_ids, html_last or last_page, total, has_more
+        page_html = self._page_html()
+        html_last = last_page_from_html(page_html)
+        return (
+            nicknames_from_search_html(page_html),
+            article_ids_from_html(page_html),
+            html_last or last_page,
+            total,
+            has_more,
+        )
 
     def sync(
         self,
