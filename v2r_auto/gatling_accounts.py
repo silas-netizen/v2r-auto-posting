@@ -275,14 +275,24 @@ def recognize_proxy_workbook(path: str | Path) -> ProxyBook:
         f"제휴 댓글 {comments}개 / 자사 작성 {self_authors}개 / "
         f"자사 댓글 {self_comments}개"
     )
-    if comments and comments < MIN_AUTO_ID_COUNT:
+    if comments and comments < COMMENT_ID_COUNT:
         message += (
             f". 양평맘·씨씨앙 댓글을 넣으려면 제휴 댓글 아이디가 "
-            f"{MIN_AUTO_ID_COUNT}개 이상 필요합니다"
+            f"{COMMENT_ID_COUNT}개 이상 필요합니다"
         )
-    if self_comments and self_comments < MIN_AUTO_ID_COUNT:
+    if self_comments and self_comments < COMMENT_ID_COUNT:
         message += (
             f". 자사 카페 댓글을 넣으려면 자사 댓글 아이디가 "
+            f"{COMMENT_ID_COUNT}개 이상 필요합니다"
+        )
+    if affiliate_authors and affiliate_authors < MIN_AUTO_ID_COUNT:
+        message += (
+            f". 양평맘·씨씨앙 본문을 자동 배정하려면 제휴 작성 아이디가 "
+            f"{MIN_AUTO_ID_COUNT}개 이상 필요합니다"
+        )
+    if self_authors and self_authors < MIN_AUTO_ID_COUNT:
+        message += (
+            f". 자사 카페 본문을 자동 배정하려면 자사 작성 아이디가 "
             f"{MIN_AUTO_ID_COUNT}개 이상 필요합니다"
         )
     return ProxyBook(path=file_path, accounts=accounts, message=message, recognized=True)
@@ -371,7 +381,7 @@ def account_for_comment_node(
 
 
 def author_from_sheet(job, book: ProxyBook | None) -> ProxyAccount | None:
-    """본문·대댓글 계정은 시트 작성계정만. 프록시 자사/제휴를 아무거나 쓰지 않는다."""
+    """시트 작성계정이 있으면 그 아이디만 쓴다. 비어 있으면 자동 배정에 맡긴다."""
     name = (getattr(job, "account", None) or "").strip()
     if not name:
         return None
@@ -383,18 +393,78 @@ def author_from_sheet(job, book: ProxyBook | None) -> ProxyAccount | None:
     return ProxyAccount(account=name)
 
 
+def author_pool_for_cafe(book: ProxyBook, cafe: str) -> list[ProxyAccount]:
+    if _is_affiliate_cafe(cafe):
+        return book.affiliate_authors()
+    return book.self_authors()
+
+
+def author_pool_label(cafe: str) -> str:
+    return "제휴" if _is_affiliate_cafe(cafe) else "자사"
+
+
+def sample_author_accounts(
+    book: ProxyBook,
+    cafe: str,
+    rng: random.Random,
+    author_id_count: int = DEFAULT_AUTO_ID_COUNT,
+) -> list[ProxyAccount]:
+    needed = normalize_auto_id_count(author_id_count)
+    pool = author_pool_for_cafe(book, cafe)
+    label = author_pool_label(cafe)
+    if len(pool) < needed:
+        raise _proxy_error(
+            f"{label} 작성 아이디가 {needed}개 필요합니다. "
+            f"지금 {len(pool)}개입니다"
+        )
+    return rng.sample(pool, needed)
+
+
+def assign_auto_authors(
+    jobs: list,
+    book: ProxyBook | None,
+    rng: random.Random | None = None,
+    *,
+    author_id_count: int = DEFAULT_AUTO_ID_COUNT,
+) -> None:
+    """작성계정이 비어 있으면 제휴/자사 본문 아이디를 수량만큼 뽑아 돌려 가며 넣는다."""
+    if book is None:
+        return
+    needed = normalize_auto_id_count(author_id_count)
+    rng = rng or random.SystemRandom()
+    groups = (
+        [job for job in jobs if _is_affiliate_cafe(job.cafe) and not (job.account or "").strip()],
+        [
+            job
+            for job in jobs
+            if not _is_affiliate_cafe(job.cafe) and not (job.account or "").strip()
+        ],
+    )
+    for empty_jobs in groups:
+        if not empty_jobs:
+            continue
+        chosen = sample_author_accounts(
+            book, empty_jobs[0].cafe, rng, needed
+        )
+        for index, job in enumerate(empty_jobs):
+            job.account = chosen[index % needed].account
+
+
 def resolve_job_accounts(
     job,
     book: ProxyBook | None,
     rng: random.Random | None = None,
     *,
     comment_id_count: int = COMMENT_ID_COUNT,
+    author_id_count: int = DEFAULT_AUTO_ID_COUNT,
 ) -> tuple[ProxyAccount | None, dict[str, ProxyAccount]]:
+    rng = rng or random.SystemRandom()
     author = author_from_sheet(job, book)
+    if author is None and book is not None:
+        author = sample_author_accounts(book, job.cafe, rng, author_id_count)[0]
     comment_map: dict[str, ProxyAccount] = {}
     if book is None or not job.article.comments:
         return author, comment_map
-    rng = rng or random.SystemRandom()
     needed = normalize_auto_id_count(comment_id_count)
     if _is_affiliate_cafe(job.cafe):
         comment_map = _comment_id_map(

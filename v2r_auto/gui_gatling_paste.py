@@ -82,11 +82,12 @@ class GatlingPasteApp(AutomationApp):
                 "제목과 본문이 이미 같은 원고만 넣지 않습니다. "
                 "프록시 엑셀을 넣으면 양평맘·씨씨앙은 제휴 댓글 아이디를, "
                 "자사 카페는 자사 댓글 아이디를 같은 후기형·질문형 순서로 랜덤으로 넣습니다. "
-                "아이디를 따로 고르지 않으면 아래 수량만큼 자동 배정합니다. 2~10개 중 고를 수 있고, "
-                "기본은 6개입니다. "
+                "아이디를 따로 고르지 않으면 아래 수량만큼 본문 작성 아이디를 자동 배정합니다. "
+                "2~10개 중 고를 수 있고, 기본은 6개입니다. "
+                "제휴 카페는 프록시 제휴 아이디를, 자사 카페는 자사 아이디를 돌려 가며 넣습니다. "
+                "시트에 작성계정이 있으면 그 아이디를 그대로 씁니다. "
+                "댓글 아이디는 댓글 넣을 때만 제휴 댓·제휴 댓글 / 자사 댓·자사 댓글에서 6개를 씁니다. "
                 "제휴 댓과 자사 댓은 서로 다른 아이디를 씁니다. "
-                "본문과 대댓글 아이디는 구글 시트 작성계정과 같고, "
-                "프록시 자사 아이디를 아무거나 넣지 않습니다. "
                 "작성자 비번·크롬번호는 그 아이디가 프록시에 있을 때만 채웁니다. "
                 "구글 시트 주소를 쓰면 '구글 시트 열기'로 시트를 엽니다. "
                 "V2R은 쓰지 않습니다. 기관총 파일은 엑셀에서 닫아 둔 .xlsm을 고르세요."
@@ -131,7 +132,7 @@ class GatlingPasteApp(AutomationApp):
         ).pack(side=tk.LEFT)
         ttk.Label(
             count_row,
-            text="아이디를 고르지 않으면 이 개수만큼 댓글 아이디를 자동으로 넣습니다",
+            text="아이디를 고르지 않으면 이 개수만큼 본문 작성 아이디를 자동으로 넣습니다. 제휴 카페는 제휴, 자사 카페는 자사에서 고릅니다",
         ).pack(side=tk.LEFT, padx=(8, 0))
 
         actions = ttk.Frame(outer)
@@ -301,7 +302,7 @@ class GatlingPasteApp(AutomationApp):
                 image_resolver=self._image_resolver(),
                 existing_keys=existing_keys,
                 proxy_book=self._proxy_book(),
-                comment_id_count=self._auto_id_count(),
+                author_id_count=self._auto_id_count(),
             )
             counts = result.type_counts()
             self.logger.info(
@@ -365,7 +366,7 @@ class GatlingPasteApp(AutomationApp):
                     image_resolver=self._image_resolver(),
                     image_dir=gatling_image_folder(gatling_path),
                     proxy_book=self._proxy_book(),
-                    comment_id_count=self._auto_id_count(),
+                    author_id_count=self._auto_id_count(),
                 )
                 counts = result.type_counts()
                 self.logger.info(
