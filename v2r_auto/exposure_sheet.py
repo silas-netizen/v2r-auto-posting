@@ -34,6 +34,7 @@ from .exposure import (
     STATUS_HEADERS,
     VOLUME_HEADERS,
     cafe_name_option,
+    has_spacing_variants,
     pick_kept_duplicate,
     shift_row_page_ids,
     spacing_keyword_key,
@@ -278,6 +279,7 @@ class GoogleSheetExposureStore:
         self._status_options: list[str] = []
         self._cafe_options: list[str] = []
         self._written: dict[tuple[int, int], str] = {}
+        self.last_duplicate_removed = False
 
     def load_rows(self) -> list[ExposureRow]:
         text = self._read_csv()
@@ -416,6 +418,7 @@ class GoogleSheetExposureStore:
         first_cafe: str = "",
         queue: list[ExposureRow] | None = None,
     ) -> ExposureRow:
+        self.last_duplicate_removed = False
         if self.writer is None:
             raise SheetError("구글 시트에 쓸 브라우저가 없습니다")
         table = apply_sheet_overlay(parse_sheet_table(self._read_csv()), self._written)
@@ -439,6 +442,8 @@ class GoogleSheetExposureStore:
                 else ""
             )
             candidates.append((number, keyword, cafe))
+        if not has_spacing_variants([keyword for _number, keyword, _cafe in candidates]):
+            return row
         keep_number, keep_keyword, _keep_cafe = pick_kept_duplicate(
             candidates,
             canonical_keyword=canonical_keyword,
@@ -470,6 +475,7 @@ class GoogleSheetExposureStore:
                 keep_number -= 1
             shift_row_page_ids(live_rows, number)
             self._shift_written_after_delete(number)
+            self.last_duplicate_removed = True
         canon = strip_parenthetical(canonical_keyword).strip()
         if canon and strip_parenthetical(keep_keyword).strip() != canon:
             written = self.writer.write_cell(
