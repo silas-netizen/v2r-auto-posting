@@ -54,13 +54,26 @@ NICKNAME_KEYS = (
 SEARCH_API_TEMPLATES = (
     "https://apis.cafe.naver.com/search/v2/cafes/"
     "{cafe_id}/search/articles?query={query}&perPage=50&page={page}"
-    "&menuId=0&ta=ARTICLE_COMMENT&views=MEMBER_LEVEL,COUNT,SALE_INFO,CAFE_MENU",
+    "&menuId=0&ta={ta}&views=MEMBER_LEVEL,COUNT,SALE_INFO,CAFE_MENU",
     "https://apis.naver.com/cafe-web/cafe-searchui-api/v1/cafes/"
     "{cafe_id}/search/articles?query={query}&page={page}&perPage=50"
-    "&ta=ARTICLE_COMMENT",
+    "&ta={ta}",
     "https://apis.naver.com/cafe-web/cafe-mobile/CafeSearchArticleList"
     "?search.clubid={cafe_id}&search.query={query}&search.page={page}"
-    "&search.perPage=50&search.searchBy=0",
+    "&search.perPage=50&search.searchBy={search_by}",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SearchScope:
+    label: str
+    ta: str
+    search_by: int
+
+
+SEARCH_SCOPES = (
+    SearchScope("글 + 댓글", "ARTICLE_COMMENT", 0),
+    SearchScope("댓글내용", "COMMENT", 4),
 )
 MAX_SEARCH_PAGES = 200
 ARTICLE_ID_KEYS = ("articleId", "articleid", "article_id")
@@ -214,12 +227,18 @@ def require_cafe_id(cafe: CafeTarget) -> int:
     return cafe.cafe_id
 
 
-def cafe_search_url(keyword: str, cafe: CafeTarget | None = None, page: int = 1) -> str:
+def cafe_search_url(
+    keyword: str,
+    cafe: CafeTarget | None = None,
+    page: int = 1,
+    scope: SearchScope | None = None,
+) -> str:
     target = cafe or parse_cafe_address(DEFAULT_CAFE_URL)
     cafe_id = require_cafe_id(target)
+    chosen = scope or SEARCH_SCOPES[0]
     return (
         f"https://cafe.naver.com/f-e/cafes/{cafe_id}/menus/0"
-        f"?viewType=L&ta=ARTICLE_COMMENT&page={max(1, int(page))}&q={quote(keyword)}"
+        f"?viewType=L&ta={chosen.ta}&page={max(1, int(page))}&q={quote(keyword)}"
     )
 
 
@@ -227,13 +246,15 @@ def cafe_search_url_modern(
     keyword: str,
     cafe: CafeTarget | None = None,
     page: int = 1,
+    scope: SearchScope | None = None,
 ) -> str:
     target = cafe or parse_cafe_address(DEFAULT_CAFE_URL)
     cafe_id = require_cafe_id(target)
+    chosen = scope or SEARCH_SCOPES[0]
     home = target.home_url or f"https://cafe.naver.com/f-e/cafes/{cafe_id}"
     return (
         f"{home}?iframe_url=/ArticleSearchList.nhn"
-        f"?search.clubid={cafe_id}&search.media=0&search.searchBy=0"
+        f"?search.clubid={cafe_id}&search.media=0&search.searchBy={chosen.search_by}"
         f"&search.defaultValue=1&search.sortBy=date&search.page={max(1, int(page))}"
         f"&search.query={quote(keyword)}"
     )
@@ -285,6 +306,7 @@ def search_api_urls(
     keyword: str,
     page: int,
     cafe: CafeTarget | int | None = None,
+    scope: SearchScope | None = None,
 ) -> list[str]:
     if isinstance(cafe, int):
         cafe_id = cafe
@@ -292,9 +314,16 @@ def search_api_urls(
         cafe_id = require_cafe_id(cafe)
     else:
         cafe_id = DEFAULT_CAFE_ID
+    chosen = scope or SEARCH_SCOPES[0]
     encoded = quote(keyword)
     return [
-        template.format(cafe_id=cafe_id, query=encoded, page=page)
+        template.format(
+            cafe_id=cafe_id,
+            query=encoded,
+            page=page,
+            ta=chosen.ta,
+            search_by=chosen.search_by,
+        )
         for template in SEARCH_API_TEMPLATES
     ]
 

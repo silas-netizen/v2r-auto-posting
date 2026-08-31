@@ -8,9 +8,11 @@ from .browser import V2RBrowser
 from .nickname_exclude import (
     DEFAULT_CAFE_URL,
     NAVER_LOGIN_URL,
+    SEARCH_SCOPES,
     CafeTarget,
     ExcludeSyncResult,
     NicknameExcludeError,
+    SearchScope,
     article_ids_from_json,
     build_sync_result,
     cafe_id_from_page,
@@ -172,8 +174,33 @@ class NicknameExcludeSession:
         should_stop: Callable[[], bool] | None,
     ) -> list[str]:
         require_cafe_id(self.cafe)
-        self.logger.info("카페 글 검색창에서 '%s'를 찾습니다. 모든 페이지를 확인합니다", keyword)
+        self.logger.info(
+            "카페 검색창에서 '%s'를 글 + 댓글, 댓글내용으로 찾습니다. 모든 페이지를 확인합니다",
+            keyword,
+        )
         self._require_cafe_login()
+        found: list[str] = []
+        for scope in SEARCH_SCOPES:
+            found.extend(self._search_one_keyword_scope(keyword, scope, should_stop))
+        nicknames = split_nicknames("\n".join(found))
+        self.logger.info(
+            "'%s' 글 + 댓글과 댓글내용을 합쳐 닉네임 %s개를 모았습니다",
+            keyword,
+            len(nicknames),
+        )
+        return nicknames
+
+    def _search_one_keyword_scope(
+        self,
+        keyword: str,
+        scope: SearchScope,
+        should_stop: Callable[[], bool] | None,
+    ) -> list[str]:
+        self.logger.info(
+            "카페 검색창에서 '%s'를 %s로 찾습니다. 모든 페이지를 확인합니다",
+            keyword,
+            scope.label,
+        )
         found: list[str] = []
         seen_articles: set[str] = set()
         page = 1
@@ -183,10 +210,11 @@ class NicknameExcludeSession:
         while True:
             if should_stop and should_stop():
                 raise NicknameExcludeError("확인을 중지했습니다")
-            self._open_search_page(keyword, page)
+            self._open_search_page(keyword, page, scope)
             page_nicks, article_ids, page_last, page_total, page_more = self._search_page(
                 keyword,
                 page,
+                scope,
             )
             if page_last:
                 last_page = page_last
@@ -202,15 +230,21 @@ class NicknameExcludeSession:
                 if page_total:
                     extra += f", 글 {page_total}개"
                 self.logger.info(
-                    "'%s' %s페이지에서 닉네임 %s개%s",
+                    "'%s' %s %s페이지에서 닉네임 %s개%s",
                     keyword,
+                    scope.label,
                     page,
                     len(page_nicks),
                     extra,
                 )
             else:
                 empty_streak += 1
-                self.logger.info("'%s' %s페이지에서 새 닉네임이 없습니다", keyword, page)
+                self.logger.info(
+                    "'%s' %s %s페이지에서 새 닉네임이 없습니다",
+                    keyword,
+                    scope.label,
+                    page,
+                )
             if should_stop_search(page, last_page, has_more, empty_streak, len(new_ids)):
                 break
             has_more = False
@@ -218,15 +252,21 @@ class NicknameExcludeSession:
             time.sleep(0.35)
         nicknames = split_nicknames("\n".join(found))
         self.logger.info(
-            "'%s' 검색을 %s페이지까지 확인했고 닉네임 %s개를 모았습니다",
+            "'%s' %s 검색을 %s페이지까지 확인했고 닉네임 %s개를 모았습니다",
             keyword,
+            scope.label,
             page,
             len(nicknames),
         )
         return nicknames
 
-    def _open_search_page(self, keyword: str, page: int) -> None:
-        url = cafe_search_url(keyword, self.cafe, page=page)
+    def _open_search_page(
+        self,
+        keyword: str,
+        page: int,
+        scope: SearchScope,
+    ) -> None:
+        url = cafe_search_url(keyword, self.cafe, page=page, scope=scope)
         self.browser._navigate(url, self.cafe_handle)
         time.sleep(0.8)
         assert self.browser.driver
@@ -238,7 +278,7 @@ class NicknameExcludeSession:
             or page_is_missing(html, current)
         ):
             self.browser._navigate(
-                cafe_search_url_modern(keyword, self.cafe, page=page),
+                cafe_search_url_modern(keyword, self.cafe, page=page, scope=scope),
                 self.cafe_handle,
             )
             time.sleep(0.8)
@@ -247,11 +287,12 @@ class NicknameExcludeSession:
         self,
         keyword: str,
         page: int,
+        scope: SearchScope,
     ) -> tuple[list[str], list[str], int | None, int | None, bool]:
         last_page: int | None = None
         total: int | None = None
         has_more = False
-        for url in search_api_urls(keyword, page, self.cafe):
+        for url in search_api_urls(keyword, page, self.cafe, scope=scope):
             result = self._fetch(url)
             if not result.get("ok"):
                 continue
