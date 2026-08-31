@@ -13,6 +13,7 @@ from v2r_auto.gatling_accounts import (
 from v2r_auto.images import ResolvedImage
 from v2r_auto.gatling_paste import (
     AFFILIATE_BOARD_LINKS,
+    SELF_OWNED_BOARD_LINKS,
     SELF_OWNED_CAFE_IDS,
     AFFILIATE_EXACT_BOARDS,
     MASTER_HEADER_ROW,
@@ -234,7 +235,7 @@ def test_affiliate_new_post_gets_board_link_only() -> None:
     assert yang[0].link == AFFILIATE_BOARD_LINKS["양평맘"]
     assert all(row.link != AFFILIATE_BOARD_LINKS["양평맘"] for row in yang[1:])
     assert self_owned[0].type == TYPE_NEW_POST
-    assert self_owned[0].link is None
+    assert self_owned[0].link == SELF_OWNED_BOARD_LINKS["고요한아침"]
 
 
 def test_self_owned_new_post_gets_board_link() -> None:
@@ -242,7 +243,7 @@ def test_self_owned_new_post_gets_board_link() -> None:
         make_job(cafe="러브인썸", board="뷰티미용", with_daily=False)
     )
     wedding = build_master_rows(
-        make_job(cafe="마이 웨딩 드림", board="웨딩홀탐방기", with_daily=False)
+        make_job(cafe="마이 웨딩 드림", board="뷰티다이어트", with_daily=False)
     )
     love_home = build_master_rows(
         make_job(cafe="러브 인썸 (Love in Some)", board="뷰티&미용", with_daily=False)
@@ -253,21 +254,41 @@ def test_self_owned_new_post_gets_board_link() -> None:
         f"https://cafe.naver.com/f-e/cafes/{SELF_OWNED_CAFE_IDS['러브인썸']}"
         "/menus/18?viewType=L"
     )
-    assert wedding[0].link == (
-        f"https://cafe.naver.com/f-e/cafes/{SELF_OWNED_CAFE_IDS['마이웨딩드림']}"
-        "/menus/5?viewType=L"
-    )
+    assert wedding[0].link == SELF_OWNED_BOARD_LINKS["마이웨딩드림"]
     assert love_home[0].link == love[0].link
     assert all(
         row.link != love[0].link for row in love[1:] if row.type != TYPE_NEW_POST
     )
 
 
-def test_self_owned_board_link_follows_sheet_board() -> None:
-    assert self_owned_board_link("러브인썸", "신혼 가전 후기").endswith("/menus/29?viewType=L")
-    assert self_owned_board_link("마이웨딩드림", "웨딩홀탑방기").endswith("/menus/5?viewType=L")
-    assert self_owned_board_link("러브인썸", "").endswith("/menus/18?viewType=L")
-    assert self_owned_board_link("고요한아침", "가입인사") == ""
+def test_self_owned_board_link_is_one_url_per_cafe() -> None:
+    assert self_owned_board_link("러브인썸", "뷰티미용") == SELF_OWNED_BOARD_LINKS["러브인썸"]
+    assert self_owned_board_link("마이웨딩드림", "뷰티다이어트") == (
+        SELF_OWNED_BOARD_LINKS["마이웨딩드림"]
+    )
+    assert self_owned_board_link("고요한 아침") == SELF_OWNED_BOARD_LINKS["고요한아침"]
+    assert self_owned_board_link("헬씨 트리") == SELF_OWNED_BOARD_LINKS["헬씨트리"]
+    assert self_owned_board_link("송도포털") == SELF_OWNED_BOARD_LINKS["송도포털"]
+    assert self_owned_board_link("글로시 마이") == SELF_OWNED_BOARD_LINKS["글로시마이"]
+    assert self_owned_board_link("웨딩 노트") == SELF_OWNED_BOARD_LINKS["웨딩노트"]
+    assert SELF_OWNED_BOARD_LINKS["고요한아침"].endswith("/menus/29?viewType=L")
+    assert SELF_OWNED_BOARD_LINKS["헬씨트리"].endswith("/menus/27?viewType=L")
+    assert SELF_OWNED_BOARD_LINKS["송도포털"].endswith("/menus/19?viewType=L")
+    assert SELF_OWNED_BOARD_LINKS["글로시마이"].endswith("/menus/50?viewType=L")
+    assert SELF_OWNED_BOARD_LINKS["웨딩노트"].endswith("/menus/32?viewType=L")
+    assert self_owned_board_link("없는카페") == ""
+
+
+def test_new_self_owned_cafes_write_stored_board_link() -> None:
+    rows = build_master_rows(
+        make_job(cafe="헬씨 트리", board="자유로운 건강 수다방", with_daily=False)
+    )
+    assert rows[0].type == TYPE_NEW_POST
+    assert rows[0].link == SELF_OWNED_BOARD_LINKS["헬씨트리"]
+    songdo = build_master_rows(
+        make_job(cafe="송도포털", board="친해지는 수다", with_daily=False)
+    )
+    assert songdo[0].link == SELF_OWNED_BOARD_LINKS["송도포털"]
 
 
 def test_affiliate_without_daily_post_raises() -> None:

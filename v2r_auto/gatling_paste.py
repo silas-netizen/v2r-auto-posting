@@ -43,60 +43,39 @@ AFFILIATE_BOARD_LINKS = {
 SELF_OWNED_CAFE_IDS = {
     "러브인썸": 26616683,
     "마이웨딩드림": 26680163,
+    "고요한아침": 14567700,
+    "헬씨트리": 23708088,
+    "송도포털": 16149995,
+    "글로시마이": 15175096,
+    "웨딩노트": 15441090,
 }
-SELF_OWNED_DEFAULT_MENUS = {
+SELF_OWNED_BOARD_MENUS = {
     "러브인썸": 18,
-    "마이웨딩드림": 5,
+    "마이웨딩드림": 1,
+    "고요한아침": 29,
+    "헬씨트리": 27,
+    "송도포털": 19,
+    "글로시마이": 50,
+    "웨딩노트": 32,
 }
-SELF_OWNED_BOARD_MENUS: dict[str, dict[str, int]] = {
-    "러브인썸": {
-        normalized_name("뷰티&미용"): 18,
-        normalized_name("인썸 수다방"): 5,
-        normalized_name("인썸 고민방"): 6,
-        normalized_name("가입인사"): 14,
-        normalized_name("웨딩 준비"): 15,
-        normalized_name("신혼 생활"): 16,
-        normalized_name("신혼여행 후기"): 17,
-        normalized_name("신혼집 인테리어"): 19,
-        normalized_name("일상 TALK"): 20,
-        normalized_name("웨딩홀 투어 후기"): 22,
-        normalized_name("드레스 골라주세요"): 23,
-        normalized_name("촬영·스냅 후기"): 24,
-        normalized_name("헤어·메이크업 후기"): 25,
-        normalized_name("예물·예단·예복"): 26,
-        normalized_name("준비 질문 있어요"): 27,
-        normalized_name("업체 견적 비교"): 28,
-        normalized_name("신혼 가전 후기"): 29,
-        normalized_name("살림 노하우"): 30,
-        normalized_name("신혼 일기장"): 31,
-        normalized_name("맛집·데이트"): 32,
-        normalized_name("커플 이야기"): 33,
-        normalized_name("혜택·이벤트 소식"): 34,
-    },
-    "마이웨딩드림": {
-        normalized_name("웨딩홀 탐방기"): 5,
-        normalized_name("웨딩홀탑방기"): 5,
-        normalized_name("뷰티&다이어트"): 1,
-        normalized_name("웨딩 이야기"): 13,
-        normalized_name("마웨드 일상"): 14,
-        normalized_name("첫 인사"): 15,
-        normalized_name("드레스 투어 리뷰"): 16,
-        normalized_name("맛집·데이트 코스"): 17,
-        normalized_name("부부 이야기"): 18,
-        normalized_name("톡톡 수다방"): 21,
-        normalized_name("고민 나누기"): 22,
-        normalized_name("스냅·촬영 리뷰"): 23,
-        normalized_name("헤어메이크업 리뷰"): 24,
-        normalized_name("예물·예단·예복 정보"): 25,
-        normalized_name("준비 Q&A"): 26,
-        normalized_name("견적 비교"): 27,
-        normalized_name("신혼 이야기"): 30,
-        normalized_name("허니문 다녀왔어요"): 31,
-        normalized_name("신혼집 꾸미기"): 32,
-        normalized_name("가전 사용기"): 33,
-        normalized_name("살림 꿀팁"): 34,
-        normalized_name("신혼 일기"): 35,
-    },
+SELF_OWNED_EXACT_BOARDS = {
+    "러브인썸": "뷰티&미용",
+    "마이웨딩드림": "뷰티&다이어트",
+    "고요한아침": "약과 영양, 병원의 기억",
+    "헬씨트리": "자유로운 건강 수다방",
+    "송도포털": "친해지는 수다",
+    "글로시마이": "다이어트 · 운동 톡",
+    "웨딩노트": "뷰티 · 다이어트",
+}
+
+
+def _menu_board_url(cafe_id: int, menu_id: int) -> str:
+    return f"https://cafe.naver.com/f-e/cafes/{cafe_id}/menus/{menu_id}?viewType=L"
+
+
+SELF_OWNED_BOARD_LINKS = {
+    key: _menu_board_url(SELF_OWNED_CAFE_IDS[key], menu)
+    for key, menu in SELF_OWNED_BOARD_MENUS.items()
 }
 KNOWN_EXACT_BOARDS = (
     "자유 수다방",
@@ -273,36 +252,21 @@ def affiliate_board_link(cafe: str) -> str:
     return AFFILIATE_BOARD_LINKS.get((cafe or "").strip(), "")
 
 
-def _menu_board_url(cafe_id: int, menu_id: int) -> str:
-    return f"https://cafe.naver.com/f-e/cafes/{cafe_id}/menus/{menu_id}?viewType=L"
-
-
 def self_owned_cafe_key(cafe: str) -> str:
     hangul = korean_name(cafe)
     compact = normalized_name(cafe)
-    for key in SELF_OWNED_CAFE_IDS:
+    for key in SELF_OWNED_BOARD_LINKS:
         if hangul == key or compact == normalized_name(key) or hangul.startswith(key):
             return key
     return ""
 
 
 def self_owned_board_link(cafe: str, board: str = "") -> str:
-    """러브인썸·마이웨딩드림 새글 링크 열에 넣는 게시판 주소."""
+    """자사 카페 새글 링크 열에 넣는, 카페마다 하나인 게시판 주소."""
     key = self_owned_cafe_key(cafe)
     if not key:
         return ""
-    cafe_id = SELF_OWNED_CAFE_IDS[key]
-    wanted = normalized_name(board)
-    menus = SELF_OWNED_BOARD_MENUS.get(key, {})
-    if wanted:
-        menu_id = menus.get(wanted)
-        if menu_id is None:
-            alias = BOARD_NAME_ALIASES.get(wanted)
-            if alias:
-                menu_id = menus.get(normalized_name(alias))
-        if menu_id is not None:
-            return _menu_board_url(cafe_id, menu_id)
-    return _menu_board_url(cafe_id, SELF_OWNED_DEFAULT_MENUS[key])
+    return SELF_OWNED_BOARD_LINKS[key]
 
 
 def exact_board_name(
@@ -317,6 +281,9 @@ def exact_board_name(
     default = AFFILIATE_EXACT_BOARDS.get(cafe_name, "")
     if default:
         known.append(default)
+    self_board = SELF_OWNED_EXACT_BOARDS.get(self_owned_cafe_key(cafe_name), "")
+    if self_board:
+        known.append(self_board)
     known.extend(KNOWN_EXACT_BOARDS)
     known.extend(name.strip() for name in extra_exact_names if str(name).strip())
 
