@@ -190,6 +190,37 @@ def test_collects_only_our_cafe_articles() -> None:
     assert all("othercafe" not in hit.url for hit in hits)
 
 
+def test_loveinsome_real_slug_is_our_cafe() -> None:
+    url = "https://cafe.naver.com/fik50kjkc/914"
+    assert cafe_name_from_url(url, list(DEFAULT_CAFE_NAMES)) == "러브인썸"
+    html = _pack(
+        '<a href="https://cafe.naver.com/fik50kjkc">러브 인썸 (Love in Some)</a>'
+        '<a href="https://cafe.naver.com/fik50kjkc/914">마이해빗 혈당컷</a>'
+    )
+    hits = collect_our_cafe_hits(html, list(DEFAULT_CAFE_NAMES))
+    assert [hit.cafe_name for hit in hits] == ["러브인썸"]
+    assert hits[0].url.endswith("/fik50kjkc/914")
+
+
+def test_same_cafe_slug_pairs_when_home_anchor_is_just_outside_card() -> None:
+    pad = "<!--" + ("가" * 2600) + "-->"
+    html = _pack(
+        '<a href="https://cafe.naver.com/unknownlove">러브 인썸 (Love in Some)</a>'
+        + pad
+        + '<a href="https://cafe.naver.com/unknownlove/914">마이해빗 혈당컷</a>'
+    )
+    hits = collect_our_cafe_hits(html, list(DEFAULT_CAFE_NAMES))
+    assert [hit.cafe_name for hit in hits] == ["러브인썸"]
+    assert hits[0].url.endswith("/unknownlove/914")
+
+
+def test_visible_loveinsome_slug_is_kept() -> None:
+    url = "https://cafe.naver.com/fik50kjkc/914"
+    hits = merge_visible_our_cafe_hits([], [url], list(DEFAULT_CAFE_NAMES), "")
+    assert [hit.cafe_name for hit in hits] == ["러브인썸"]
+    assert hits[0].url == url
+
+
 def test_html_without_main_pack_is_never_our_hit() -> None:
     html = """
     <div id="header"><a href="https://cafe.naver.com/cantsb">씨씨앙</a></div>

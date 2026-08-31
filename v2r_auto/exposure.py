@@ -497,6 +497,7 @@ KNOWN_CAFE_KEYS = {
     "yangmom": "양평맘",
     "22788814": "양평맘",
     "loveinsome": "러브인썸",
+    "fik50kjkc": "러브인썸",
     "26616683": "러브인썸",
     "26680163": "마이웨딩드림",
     "14567700": "고요한아침",
@@ -557,10 +558,17 @@ def collect_our_cafe_hits(html: str, cafe_names: list[str]) -> list[CafeHit]:
             for home_pos, home_url, home_cafe in homes:
                 if not home_cafe or not same_cafe_identity(home_url, href):
                     continue
-                if lo <= home_pos <= hi:
+                if lo <= home_pos <= hi or matching_cafe_name(
+                    _strip_tags(card), [home_cafe]
+                ):
                     cafe = home_cafe
                     break
-            if not cafe or not matching_cafe_name(_strip_tags(card), [cafe]):
+            if not cafe:
+                for _home_pos, home_url, home_cafe in homes:
+                    if home_cafe and same_cafe_identity(home_url, href):
+                        cafe = home_cafe
+                        break
+            if not cafe:
                 continue
         key = article_dedupe_key(href)
         if key in seen:
