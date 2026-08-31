@@ -202,6 +202,46 @@ def parse_sheet_int(value: str) -> int:
     return int(number)
 
 
+def sheet_value_needs_keystrokes(value: str) -> bool:
+    """Date and number cells ignore insertText on the in-cell editor."""
+    if parse_sheet_datetime(value) is not None:
+        return True
+    return parse_sheet_number(value) is not None
+
+
+def format_sheet_locale_datetime(value: str | datetime) -> str | None:
+    """Korean Sheets date cells accept 2026. 9. 1 오전 1:43:13."""
+    parsed = value if isinstance(value, datetime) else parse_sheet_datetime(str(value or ""))
+    if parsed is None:
+        return None
+    period = "오전" if parsed.hour < 12 else "오후"
+    hour12 = parsed.hour % 12 or 12
+    return (
+        f"{parsed.year}. {parsed.month}. {parsed.day} "
+        f"{period} {hour12}:{parsed.minute:02d}:{parsed.second:02d}"
+    )
+
+
+def sheet_typing_variants(value: str) -> list[str]:
+    """Try ISO, then the locale date, then a forced text date."""
+    text = str(value or "")
+    variants = [text]
+    locale = format_sheet_locale_datetime(text) if text else None
+    if locale and locale not in variants:
+        variants.append(locale)
+    if text and parse_sheet_datetime(text) is not None and not text.startswith("'"):
+        quoted = "'" + text
+        if quoted not in variants:
+            variants.append(quoted)
+    return variants
+
+
+def pick_sheet_typing_value(value: str, attempt: int) -> str:
+    variants = sheet_typing_variants(value)
+    index = max(1, int(attempt)) - 1
+    return variants[min(index, len(variants) - 1)]
+
+
 def parse_sheet_datetime(value: str) -> datetime | None:
     text = sheet_plain_text(value)
     if not text:
