@@ -49,6 +49,7 @@ AFFILIATE_COLUMNS = {
 AFFILIATE_PREFIX_COLUMN = "말머리"
 AFFILIATE_ACCOUNT_TYPE_COLUMN = "계정유형"
 AFFILIATE_IMAGE_DISABLED_COLUMN = "이미지 없음"
+AFFILIATE_REVISION_BOARD_COLUMN = "게시판명"
 
 
 @dataclass(slots=True)
@@ -232,6 +233,9 @@ def load_affiliate_jobs(
                 account=account,
                 article_type=article_type,
                 prefix=_clean_cell(row.get(AFFILIATE_PREFIX_COLUMN)),
+                revision_board=_clean_cell(
+                    row.get(AFFILIATE_REVISION_BOARD_COLUMN)
+                ),
                 account_type=_clean_cell(row.get(AFFILIATE_ACCOUNT_TYPE_COLUMN)),
                 image_disabled=(
                     _clean_cell(row.get(AFFILIATE_IMAGE_DISABLED_COLUMN)).casefold()

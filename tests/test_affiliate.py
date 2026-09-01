@@ -51,6 +51,35 @@ def test_completion_link_skips_affiliate_row(tmp_path: Path) -> None:
     assert jobs[0].status == JobStatus.SKIPPED
 
 
+def test_cccang_revision_board_comes_from_optional_j_column(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "cccang-board.csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,"
+        "말머리,계정유형,이미지 없음,게시판명\n"
+        '"키워드","제목 : 제목\n본문 : 본문",씨씨앙,writer,'
+        "질문형,,,,Y,자유수다방\n",
+        encoding="utf-8-sig",
+    )
+
+    job = load_affiliate_jobs(path, selected_row_number=2)[0]
+
+    assert job.revision_board == "자유수다방"
+    assert job.validate() == []
+
+
+def test_cccang_rejects_unknown_revision_board(tmp_path: Path) -> None:
+    job = load_affiliate_jobs(
+        write_affiliate_csv(tmp_path),
+        selected_row_number=2,
+    )[0]
+    job.cafe = "씨씨앙"
+    job.revision_board = "임의 게시판"
+
+    assert "J열 게시판명" in " ".join(job.validate())
+
+
 def test_failure_text_in_completion_column_is_retried(tmp_path: Path) -> None:
     jobs = load_affiliate_jobs(
         write_affiliate_csv(
@@ -164,14 +193,8 @@ def test_affiliate_daily_schedules_are_random_and_independent_per_cafe(
     )
 
 
-def test_cccang_daily_disables_comments_but_revision_enables_them() -> None:
+def test_cccang_daily_and_revision_both_allow_comments() -> None:
     assert CAFE_DELAYS == {"씨씨앙": 4, "양평맘": 20}
-    assert (
-        AffiliateApiPublisher._write_options(enable_comment=False)[
-            "enableComment"
-        ]
-        is False
-    )
     assert (
         AffiliateApiPublisher._write_options(enable_comment=True)[
             "enableComment"
@@ -225,6 +248,25 @@ def test_affiliate_revision_uses_planned_daily_time_without_waiting(
                 "parent_id": None,
             }
 
+        def _retarget_destination(
+            self,
+            destination,
+            *,
+            menu_id,
+            menu_name,
+            head_name=None,
+        ):
+            result = dict(destination)
+            result.update(
+                {
+                    "menu_id": menu_id,
+                    "menu_name": menu_name,
+                    "head_id": 900 if head_name else None,
+                    "head_name": head_name,
+                }
+            )
+            return result
+
         def _create_source(
             self,
             title,
@@ -246,7 +288,7 @@ def test_affiliate_revision_uses_planned_daily_time_without_waiting(
             )
             return f"source-{len(self.created)}"
 
-        def _verify_comment_permission(self, source_id, expected):
+        def _verify_destination_settings(self, source_id, **kwargs):
             return None
 
         def _comments(self, job, start_at, cafe_id, comment_accounts=None):
@@ -255,7 +297,7 @@ def test_affiliate_revision_uses_planned_daily_time_without_waiting(
         def _prepare_revision_content(self, job, destination):
             return _content_json(job.body)
 
-        def _verify(self, source_id, job, start_at):
+        def _verify(self, source_id, job, start_at, **kwargs):
             return None
 
     job = load_affiliate_jobs(
@@ -280,12 +322,24 @@ def test_affiliate_revision_uses_planned_daily_time_without_waiting(
     assert publisher.created[0]["destination"]["start_at"] == (
         "2026-08-13T09:10:00Z"
     )
-    assert publisher.created[0]["enable_comment"] is False
+    assert publisher.created[0]["destination"]["menu_id"] == 2458
+    assert publisher.created[0]["destination"]["head_id"] == 900
+    assert publisher.created[0]["enable_comment"] is True
     assert publisher.created[1]["destination"]["start_at"] == (
         "2026-08-13T13:10:00Z"
     )
+    assert publisher.created[1]["destination"]["menu_id"] == 2458
+    assert publisher.created[1]["destination"]["head_id"] is None
     assert publisher.created[1]["parent"] == "source-1"
     assert publisher.created[1]["enable_comment"] is True
+
+    job.revision_board = "자유수다방"
+    moved_publisher = PairPublisher()
+    moved_publisher.publish(job, dry_run=False)
+
+    assert moved_publisher.created[0]["destination"]["menu_id"] == 2458
+    assert moved_publisher.created[1]["destination"]["menu_id"] == 328
+    assert moved_publisher.created[1]["destination"]["head_id"] is None
 
 
 def test_api_content_preserves_blank_lines_as_paragraphs() -> None:

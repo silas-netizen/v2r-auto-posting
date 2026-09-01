@@ -32,6 +32,9 @@ COMMENT_ACCOUNTS = (
     "colpith",
 )
 CAFE_DELAYS = {"씨씨앙": 4, "양평맘": 20}
+CCCANG_CURRENT_BOARD = {"menu_id": 328, "menu_name": "자유 수다방"}
+CCCANG_OLD_BOARD = {"menu_id": 2458, "menu_name": "자유수다방(구)"}
+CCCANG_DAILY_HEAD = "[댓글 이벤트 X]"
 CAFE_DESTINATIONS = {
     "씨씨앙": {
         "cafe_id": 25016228,
@@ -409,7 +412,7 @@ class AffiliateApiPublisher:
 
         head_id = None
         head_name = None
-        if job.prefix:
+        if job.prefix and job.cafe != "씨씨앙":
             heads = self._request(
                 "GET",
                 "/naver_cafes/heads",
@@ -445,6 +448,53 @@ class AffiliateApiPublisher:
             "use_comment_ai": True,
             "parent_id": None,
         }
+
+    def _retarget_destination(
+        self,
+        destination: dict[str, Any],
+        *,
+        menu_id: int,
+        menu_name: str,
+        head_name: str | None = None,
+    ) -> dict[str, Any]:
+        result = dict(destination)
+        result.update(
+            {
+                "menu_id": menu_id,
+                "menu_name": menu_name,
+                "head_id": None,
+                "head_name": None,
+            }
+        )
+        if not head_name:
+            return result
+        heads = self._request(
+            "GET",
+            "/naver_cafes/heads",
+            query={
+                "cafe_id": result["cafe_id"],
+                "naver_login_id": result["naver_login_id"],
+                "menu_id": menu_id,
+            },
+        )
+        head = next(
+            (
+                item
+                for item in _walk_dicts(heads)
+                if _normalized(
+                    str(self._field(item, "head_name", "headName") or "")
+                )
+                == _normalized(head_name)
+            ),
+            None,
+        )
+        if not head:
+            raise AffiliateApiError(
+                f"V2R에서 말머리를 찾지 못했습니다: {head_name}"
+            )
+        result["head_id"] = self._field(head, "head_id", "headId")
+        result["head_name"] = self._field(head, "head_name", "headName")
+        return result
 
     def _last_used(self, cafe_id: int) -> dict[str, str]:
         rows: list[dict[str, Any]] = []
@@ -1169,6 +1219,42 @@ class AffiliateApiPublisher:
                 f"기대 {expected} / 실제 {actual}"
             )
 
+    def _verify_destination_settings(
+        self,
+        source_id: str,
+        *,
+        expected_menu_id: int,
+        expected_head_id: int | None,
+        expected_comment: bool,
+    ) -> None:
+        detail = self._request(
+            "GET",
+            "/naver_cafe_articles/article",
+            query={"source_id": source_id},
+        )
+        destination = detail.get("naver_cafe_article_destination") or {}
+        actual_menu_id = destination.get("menu_id")
+        actual_head_id = destination.get("head_id")
+        if int(actual_menu_id or 0) != expected_menu_id:
+            raise AffiliateApiError(
+                "등록 후 게시판 검증에 실패했습니다: "
+                f"기대 {expected_menu_id} / 실제 {actual_menu_id}"
+            )
+        if (
+            int(actual_head_id or 0)
+            != int(expected_head_id or 0)
+        ):
+            raise AffiliateApiError(
+                "등록 후 말머리 검증에 실패했습니다: "
+                f"기대 {expected_head_id} / 실제 {actual_head_id}"
+            )
+        actual_comment = self._comment_permission(detail)
+        if actual_comment is not expected_comment:
+            raise AffiliateApiError(
+                "등록 후 댓글 허용 설정 검증에 실패했습니다: "
+                f"기대 {expected_comment} / 실제 {actual_comment}"
+            )
+
     def _comment(
         self,
         account: str,
@@ -1425,7 +1511,15 @@ class AffiliateApiPublisher:
         )
         return _content_json(job.body, components)
 
-    def _verify(self, source_id: str, job: AffiliateJob, start_at: datetime) -> None:
+    def _verify(
+        self,
+        source_id: str,
+        job: AffiliateJob,
+        start_at: datetime,
+        *,
+        expected_menu_id: int,
+        expected_head_id: int | None,
+    ) -> None:
         detail = self._request(
             "GET", "/naver_cafe_articles/article", query={"source_id": source_id}
         )
@@ -1435,6 +1529,10 @@ class AffiliateApiPublisher:
             raise AffiliateApiError(
                 "등록 후 수정 글 댓글 허용 설정 검증에 실패했습니다"
             )
+        if int(destination.get("menu_id") or 0) != expected_menu_id:
+            raise AffiliateApiError("등록 후 수정 글 게시판 검증에 실패했습니다")
+        if int(destination.get("head_id") or 0) != int(expected_head_id or 0):
+            raise AffiliateApiError("등록 후 수정 글 말머리 검증에 실패했습니다")
         comments = detail["naver_cafe_article_source_comments"]
         document = json.loads(detail["naver_cafe_article_source_detail"]["body"])
         body_lines = [
@@ -1540,12 +1638,34 @@ class AffiliateApiPublisher:
             raise AffiliateApiError("배정된 일상 글이 없습니다")
         self._capture_authorization()
         destination = self._resolve_destination(job)
+        daily_destination_template = dict(destination)
+        revision_destination_template = dict(destination)
+        if job.cafe == "씨씨앙":
+            daily_destination_template = self._retarget_destination(
+                destination,
+                menu_id=int(CCCANG_OLD_BOARD["menu_id"]),
+                menu_name=str(CCCANG_OLD_BOARD["menu_name"]),
+                head_name=CCCANG_DAILY_HEAD,
+            )
+            revision_board = (
+                CCCANG_CURRENT_BOARD
+                if job.revision_board.replace(" ", "") == "자유수다방"
+                else CCCANG_OLD_BOARD
+            )
+            revision_destination_template = self._retarget_destination(
+                destination,
+                menu_id=int(revision_board["menu_id"]),
+                menu_name=str(revision_board["menu_name"]),
+                head_name=None,
+            )
         if dry_run:
             self.logger.info(
-                "행 %s API 검증 완료: %s / %s",
+                "행 %s API 검증 완료: %s / 일상 %s (%s) / 수정 %s (말머리 없음)",
                 job.row_number,
                 destination["cafe_name"],
-                destination["menu_name"],
+                daily_destination_template["menu_name"],
+                daily_destination_template["head_name"] or "말머리 없음",
+                revision_destination_template["menu_name"],
             )
             return ""
 
@@ -1570,14 +1690,24 @@ class AffiliateApiPublisher:
                     "Z", "+00:00"
                 )
             )
-            self._verify(revision_source_id, job, revision_at)
+            self._verify(
+                revision_source_id,
+                job,
+                revision_at,
+                expected_menu_id=int(revision_destination_template["menu_id"]),
+                expected_head_id=(
+                    int(revision_destination_template["head_id"])
+                    if revision_destination_template.get("head_id") is not None
+                    else None
+                ),
+            )
             if checkpoint:
                 checkpoint("VERIFIED", revision_source_id=revision_source_id)
             return f"https://v2r.daboja.im/nc/articleDetail/{revision_source_id}"
 
         daily_source_id = str(resume.get("daily_source_id") or "")
         if not daily_source_id:
-            daily_destination = dict(destination)
+            daily_destination = dict(daily_destination_template)
             daily_destination["start_at"] = (
                 job.daily_scheduled_at.isoformat().replace("+00:00", "Z")
             )
@@ -1588,7 +1718,7 @@ class AffiliateApiPublisher:
                 daily_destination,
                 [],
                 recovery_statuses=("RESERVED", "DONE"),
-                enable_comment=job.cafe != "씨씨앙",
+                enable_comment=True,
             )
             if checkpoint:
                 checkpoint(
@@ -1605,15 +1735,21 @@ class AffiliateApiPublisher:
                 job.daily_scheduled_at.astimezone().strftime(
                     "%Y-%m-%d %H:%M"
                 ),
-                job.cafe != "씨씨앙",
+                True,
             )
         job.daily_post_url = (
             f"https://v2r.daboja.im/nc/articleDetail/{daily_source_id}"
         )
         try:
-            self._verify_comment_permission(
+            self._verify_destination_settings(
                 daily_source_id,
-                expected=job.cafe != "씨씨앙",
+                expected_menu_id=int(daily_destination_template["menu_id"]),
+                expected_head_id=(
+                    int(daily_destination_template["head_id"])
+                    if daily_destination_template.get("head_id") is not None
+                    else None
+                ),
+                expected_comment=True,
             )
             if daily_only:
                 return (
@@ -1626,7 +1762,7 @@ class AffiliateApiPublisher:
                 hours=CAFE_DELAYS[job.cafe]
             )
 
-            revision_destination = dict(destination)
+            revision_destination = dict(revision_destination_template)
             revision_destination["start_at"] = revision_at.isoformat().replace(
                 "+00:00", "Z"
             )
@@ -1653,7 +1789,17 @@ class AffiliateApiPublisher:
                     daily_source_id=daily_source_id,
                     revision_source_id=revision_source_id,
                 )
-            self._verify(revision_source_id, job, revision_at)
+            self._verify(
+                revision_source_id,
+                job,
+                revision_at,
+                expected_menu_id=int(revision_destination["menu_id"]),
+                expected_head_id=(
+                    int(revision_destination["head_id"])
+                    if revision_destination.get("head_id") is not None
+                    else None
+                ),
+            )
             if checkpoint:
                 checkpoint(
                     "VERIFIED",

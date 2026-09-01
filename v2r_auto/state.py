@@ -115,6 +115,7 @@ class JobStateStore:
                 job.cafe,
                 job.article_type,
                 job.brand,
+                job.revision_board,
                 "image-disabled" if job.image_disabled else "image-enabled",
             )
         )

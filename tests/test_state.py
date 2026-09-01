@@ -53,6 +53,19 @@ def test_changed_content_creates_new_job_identity(tmp_path: Path) -> None:
     store.close()
 
 
+def test_changed_revision_board_creates_new_job_identity(tmp_path: Path) -> None:
+    store = JobStateStore(tmp_path / "jobs.db")
+    old_board = sample_job()
+    current_board = sample_job()
+    current_board.revision_board = "자유수다방"
+
+    first = store.load_or_create("https://sheet.example", old_board)
+    second = store.load_or_create("https://sheet.example", current_board)
+
+    assert first["job_key"] != second["job_key"]
+    store.close()
+
+
 def test_instance_lock_rejects_second_worker(tmp_path: Path) -> None:
     path = tmp_path / "worker.lock"
     with InstanceLock(path):
