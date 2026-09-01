@@ -224,13 +224,7 @@ def test_daily_excel_interleaves_cafes_without_reordering_each_cafe(
 
     jobs = load_daily_excel_jobs(path)
 
-    assert [job.cafe for job in jobs] == [
-        "헬씨트리",
-        "송도포털",
-        "글로시 마이",
-        "헬씨트리",
-        "송도포털",
-    ]
+    assert all(first.cafe != second.cafe for first, second in zip(jobs, jobs[1:]))
     assert [job.title for job in jobs if job.cafe == "헬씨트리"] == [
         "헬씨1",
         "헬씨2",
@@ -901,6 +895,44 @@ def test_auto_assignment_uses_only_selected_number_of_accounts(
         "writer-b",
         "writer-a",
     ]
+
+
+def test_auto_assignment_prefers_accounts_covering_requested_boards(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "daily-board-coverage.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["카페명", "게시판명", "각색제목", "각색본문"])
+    sheet.append(["헬씨트리", "게시판1", "제목1", "본문1"])
+    sheet.append(["헬씨트리", "게시판2", "제목2", "본문2"])
+    workbook.save(path)
+    jobs = load_daily_excel_jobs(path)
+    for job, menu_id in zip(jobs, (1, 2)):
+        job.cafe_id = 23708088
+        job.menu_id = menu_id
+        job.canonical_cafe_name = "헬씨 트리"
+
+    publisher = ImmediateApiPublisher(None, logging.getLogger("coverage-test"))
+    publisher.auto_account_limit = 2
+    publisher.cafe_pools[23708088] = ["limited", "all-a", "all-b"]
+    publisher.menu_pools[(23708088, 1)] = ["limited", "all-a", "all-b"]
+    publisher.menu_pools[(23708088, 2)] = ["all-a", "all-b"]
+    publisher.global_accounts = {
+        account: {"my_info_v2": {"is_real_name": True}}
+        for account in ("limited", "all-a", "all-b")
+    }
+
+    publisher._prepare_auto_account_pools(
+        jobs,
+        ["limited", "all-a", "all-b"],
+    )
+
+    assert publisher.auto_selected_pools[(23708088, "실명")] == [
+        "all-a",
+        "all-b",
+    ]
+    assert publisher.pick_account(jobs[1]) in {"all-a", "all-b"}
 
 
 def test_duplicate_skip_reason_is_written_to_live_log(

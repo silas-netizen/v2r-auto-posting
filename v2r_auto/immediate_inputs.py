@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import heapq
 import re
 from collections import deque
 from pathlib import Path
@@ -255,12 +256,22 @@ def interleave_daily_jobs_by_cafe(
     for job in jobs:
         queues.setdefault(job.cafe, deque()).append(job)
     result: list[ImmediateJob] = []
-    while queues:
-        for cafe in list(queues):
-            queue = queues[cafe]
-            result.append(queue.popleft())
-            if not queue:
-                queues.pop(cafe)
+    heap = [
+        (-len(queue), order, cafe)
+        for order, (cafe, queue) in enumerate(queues.items())
+    ]
+    heapq.heapify(heap)
+    held: tuple[int, int, str] | None = None
+    while heap:
+        remaining, order, cafe = heapq.heappop(heap)
+        result.append(queues[cafe].popleft())
+        remaining += 1
+        if held is not None:
+            heapq.heappush(heap, held)
+        held = (remaining, order, cafe) if remaining < 0 else None
+    if held is not None:
+        _remaining, _order, cafe = held
+        result.extend(queues[cafe])
     return result
 
 

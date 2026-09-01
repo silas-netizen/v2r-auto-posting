@@ -67,6 +67,7 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         super().__init__(browser, logger)
         self.menu_pools: dict[tuple[int, int], list[str]] = {}
         self.cafe_pools: dict[int, list[str]] = {}
+        self.auto_selected_pools: dict[tuple[int, str], list[str]] = {}
         self.pool_indexes: dict[tuple[int, str], int] = {}
         self.global_accounts: dict[str, dict[str, Any]] = {}
         data_dir = (
@@ -445,8 +446,9 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                     )
                     if menu is None:
                         raise CatalogMatchError(
-                            "V2R에서 게시판링크의 게시판 ID를 찾지 못했습니다: "
-                            f"{input_menu_id}"
+                            "게시판링크의 게시판 ID를 사용할 수 있는 작성계정이 "
+                            f"없습니다: {input_menu_id} "
+                            "(카페 등급·게시판 작성 권한 확인 필요)"
                         )
                 except CatalogMatchError as exc:
                     job.status = JobStatus.FAILED
@@ -460,6 +462,11 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                 job.menu_id = menu.menu_id
                 job.canonical_cafe_name = cafe.name
                 job.canonical_board_name = menu.name
+
+            self._prepare_auto_account_pools(cafe_jobs, healthy)
+            for job in cafe_jobs:
+                if job.status != JobStatus.PENDING:
+                    continue
                 menu_pool = self.menu_pools.get((job.cafe_id, job.menu_id), [])
                 if job.account:
                     account_info = self.global_accounts.get(job.account) or {}
@@ -636,6 +643,67 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
             return "연속 글 등록 제한", False
         return AffiliateApiPublisher.classify_failure(error)
 
+    def _prepare_auto_account_pools(
+        self,
+        jobs: list[ImmediateJob],
+        healthy_accounts: list[str],
+    ) -> None:
+        grouped_menu_ids: dict[tuple[int, str], set[int]] = {}
+        for job in jobs:
+            if job.status != JobStatus.PENDING or job.account:
+                continue
+            required_type = (
+                "실명" if job.source_kind == "daily" else job.account_type or "전체"
+            )
+            grouped_menu_ids.setdefault(
+                (job.cafe_id, required_type),
+                set(),
+            ).add(job.menu_id)
+
+        original_order = {
+            account: index for index, account in enumerate(healthy_accounts)
+        }
+        for key, menu_ids in grouped_menu_ids.items():
+            cafe_id, required_type = key
+            candidates = list(healthy_accounts)
+            if required_type in {"실명", "비실명"}:
+                wanted_real_name = required_type == "실명"
+                candidates = [
+                    account
+                    for account in candidates
+                    if (
+                        (self.global_accounts[account].get("my_info_v2") or {}).get(
+                            "is_real_name"
+                        )
+                        is wanted_real_name
+                    )
+                ]
+            candidates.sort(
+                key=lambda account: (
+                    -sum(
+                        account
+                        in self.menu_pools.get((cafe_id, menu_id), [])
+                        for menu_id in menu_ids
+                    ),
+                    original_order[account],
+                )
+            )
+            selected = [
+                account
+                for account in candidates
+                if any(
+                    account in self.menu_pools.get((cafe_id, menu_id), [])
+                    for menu_id in menu_ids
+                )
+            ][: self.auto_account_limit]
+            self.auto_selected_pools[key] = selected
+            self.logger.info(
+                "%s 자동 배정 계정 선택: %s개 / 요청 게시판 %s개",
+                jobs[0].canonical_cafe_name if jobs else cafe_id,
+                len(selected),
+                len(menu_ids),
+            )
+
     def _pool_for(
         self,
         job: ImmediateJob,
@@ -643,6 +711,10 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         pool = self.cafe_pools.get(job.cafe_id, [])
         allowed = set(self.menu_pools.get((job.cafe_id, job.menu_id), []))
         required_type = "실명" if job.source_kind == "daily" else job.account_type
+        selected_key = (job.cafe_id, required_type or "전체")
+        has_selected_pool = selected_key in self.auto_selected_pools
+        if has_selected_pool:
+            pool = self.auto_selected_pools[selected_key]
         if required_type in {"실명", "비실명"}:
             wanted = required_type == "실명"
             pool = [
@@ -656,9 +728,13 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                 )
             ]
             key = (job.cafe_id, required_type)
-            return key, pool[: self.auto_account_limit], allowed
+            return key, (
+                pool if has_selected_pool else pool[: self.auto_account_limit]
+            ), allowed
         key = (job.cafe_id, "전체")
-        return key, pool[: self.auto_account_limit], allowed
+        return key, (
+            pool if has_selected_pool else pool[: self.auto_account_limit]
+        ), allowed
 
     def pick_account(self, job: ImmediateJob) -> str:
         key, pool, allowed = self._pool_for(job)
