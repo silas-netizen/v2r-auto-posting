@@ -62,6 +62,7 @@ class ImmediateAutomationApp(AutomationApp):
         self.dry_run = tk.BooleanVar(value=True)
         self.publish_mode = tk.StringVar(value="reserved")
         self.auto_account_limit = tk.IntVar(value=10)
+        self.immediate_interval_minutes = tk.IntVar(value=1)
         self.progress_text = tk.StringVar(value="대기 중")
 
     def _build_ui(self) -> None:
@@ -144,6 +145,17 @@ class ImmediateAutomationApp(AutomationApp):
             options,
             textvariable=self.auto_account_limit,
             values=tuple(range(2, 11)),
+            width=4,
+            state="readonly",
+        ).pack(side=tk.LEFT)
+        ttk.Label(options, text="즉시 간격(분)").pack(
+            side=tk.LEFT,
+            padx=(20, 6),
+        )
+        ttk.Combobox(
+            options,
+            textvariable=self.immediate_interval_minutes,
+            values=tuple(range(1, 16)),
             width=4,
             state="readonly",
         ).pack(side=tk.LEFT)
@@ -337,6 +349,7 @@ class ImmediateAutomationApp(AutomationApp):
         )
         publish_immediately = self.publish_mode.get() == "immediate"
         auto_account_limit = self.auto_account_limit.get()
+        immediate_interval_minutes = self.immediate_interval_minutes.get()
         if not dry_run and not messagebox.askyesno(
             f"실제 {mode_label}",
             f"검증 모드가 꺼져 있습니다.\n글을 실제로 {mode_label}할까요?",
@@ -379,6 +392,7 @@ class ImmediateAutomationApp(AutomationApp):
                     pause_event=self.pause_event,
                     publish_immediately=publish_immediately,
                     auto_account_limit=auto_account_limit,
+                    immediate_interval_minutes=immediate_interval_minutes,
                 )
                 self.ui_queue.put(
                     (

@@ -167,6 +167,76 @@ def test_daily_excel_accepts_optional_account_column(tmp_path: Path) -> None:
     assert jobs[1].account == ""
 
 
+def test_daily_excel_maps_columns_by_header_and_reads_board_link(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "daily-current-layout.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(
+        [
+            "카페명",
+            "게시판명",
+            "게시판링크",
+            "작성계정",
+            "각색제목",
+            "각색본문",
+            "등록시각",
+        ]
+    )
+    sheet.append(
+        [
+            "헬씨트리",
+            "오프라인 건강 강좌 신청",
+            "https://cafe.naver.com/f-e/cafes/23708088/menus/17?viewType=L",
+            "azqpale",
+            "9월 무릎 관절 스트레칭 강좌 신청받습니다",
+            "물리치료사 선생님과 함께하는 실제 본문입니다",
+            "2026-09-01 12:17",
+        ]
+    )
+    workbook.save(path)
+
+    job = load_daily_excel_jobs(path)[0]
+
+    assert job.cafe == "헬씨트리"
+    assert job.board == "오프라인 건강 강좌 신청"
+    assert job.cafe_id == 23708088
+    assert job.menu_id == 17
+    assert job.account == "azqpale"
+    assert job.title == "9월 무릎 관절 스트레칭 강좌 신청받습니다"
+    assert "실제 본문" in job.body
+
+
+def test_daily_excel_interleaves_cafes_without_reordering_each_cafe(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "daily-interleaved.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["카페명", "게시판명", "각색제목", "각색본문"])
+    sheet.append(["헬씨트리", "게시판", "헬씨1", "본문"])
+    sheet.append(["헬씨트리", "게시판", "헬씨2", "본문"])
+    sheet.append(["송도포털", "게시판", "송도1", "본문"])
+    sheet.append(["송도포털", "게시판", "송도2", "본문"])
+    sheet.append(["글로시 마이", "게시판", "글로시1", "본문"])
+    workbook.save(path)
+
+    jobs = load_daily_excel_jobs(path)
+
+    assert [job.cafe for job in jobs] == [
+        "헬씨트리",
+        "송도포털",
+        "글로시 마이",
+        "헬씨트리",
+        "송도포털",
+    ]
+    assert [job.title for job in jobs if job.cafe == "헬씨트리"] == [
+        "헬씨1",
+        "헬씨2",
+    ]
+
+
 def test_loads_only_checked_one_line_account_tests(tmp_path: Path) -> None:
     path = tmp_path / "account-tests.csv"
     path.write_text(
@@ -626,6 +696,9 @@ def test_twin_mom_sheet_account_board_and_grade_refresh(
         encoding="utf-8-sig",
     )
     job = load_brand_immediate_jobs(path, brand="테스트")[0]
+    job.cafe_id = 10174516
+    job.menu_id = 664
+    job.board = "Excel 표시명이 달라도 링크 ID 우선"
 
     class TwinMomPublisher(ImmediateApiPublisher):
         def __init__(self):

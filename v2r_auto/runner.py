@@ -725,7 +725,10 @@ class ImmediateRunner:
         pause_event: threading.Event | None = None,
         publish_immediately: bool = False,
         auto_account_limit: int = 10,
+        immediate_interval_minutes: int = 1,
     ) -> tuple[RunResult, Path]:
+        if not 1 <= immediate_interval_minutes <= 15:
+            raise ValueError("즉시 발행 간격은 1분부터 15분까지 선택하세요")
         started_at = datetime.now()
         pause_event = pause_event or threading.Event()
         for job in jobs:
@@ -931,6 +934,7 @@ class ImmediateRunner:
         emit_status()
         total = len(jobs)
         last_cafe_started: dict[int, float] = {}
+        last_immediate_started = 0.0
 
         def wait_if_paused() -> float:
             if not pause_event.is_set():
@@ -1017,10 +1021,29 @@ class ImmediateRunner:
 
             while True:
                 if not dry_run:
-                    remaining = 20 - (
-                        time.monotonic() - last_cafe_started.get(job.cafe_id, 0)
+                    immediate_with_interval = (
+                        job.publish_immediately
+                        and job.source_kind != "account_test"
+                    )
+                    required_gap = (
+                        immediate_interval_minutes * 60
+                        if immediate_with_interval
+                        else 20
+                    )
+                    previous_started = (
+                        last_immediate_started
+                        if immediate_with_interval
+                        else last_cafe_started.get(job.cafe_id, 0)
+                    )
+                    remaining = required_gap - (
+                        time.monotonic() - previous_started
                     )
                     if remaining > 0:
+                        if immediate_with_interval:
+                            self.logger.info(
+                                "다음 즉시 발행까지 %.0f초 대기",
+                                remaining,
+                            )
                         deadline = time.monotonic() + remaining
                         while time.monotonic() < deadline:
                             paused_seconds = wait_if_paused()
@@ -1042,7 +1065,10 @@ class ImmediateRunner:
                                 job.message,
                             )
                             break
-                    last_cafe_started[job.cafe_id] = time.monotonic()
+                    if immediate_with_interval:
+                        last_immediate_started = time.monotonic()
+                    else:
+                        last_cafe_started[job.cafe_id] = time.monotonic()
                 if job.scheduled_at is not None:
                     minimum_start = datetime.now(timezone.utc) + timedelta(minutes=2)
                     if job.scheduled_at < minimum_start:

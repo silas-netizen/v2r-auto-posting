@@ -412,17 +412,42 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
             for job in cafe_jobs:
                 if job.status != JobStatus.PENDING:
                     continue
+                input_cafe_id = job.cafe_id
+                input_menu_id = job.menu_id
+                if input_cafe_id and input_cafe_id != cafe.cafe_id:
+                    job.status = JobStatus.FAILED
+                    job.message = (
+                        "게시판링크의 카페 ID가 카페명과 다릅니다: "
+                        f"{input_cafe_id} != {cafe.cafe_id}"
+                    )
+                    continue
                 job.cafe_id = cafe.cafe_id
                 wanted_board = BOARD_ALIASES.get(
                     (cafe.cafe_id, normalized_name(job.board)),
                     job.board,
                 )
                 try:
-                    menu = match_catalog_name(
-                        wanted_board,
-                        menus,
-                        label="게시판",
+                    menu = (
+                        next(
+                            (
+                                candidate
+                                for candidate in menus
+                                if candidate.menu_id == input_menu_id
+                            ),
+                            None,
+                        )
+                        if input_menu_id
+                        else match_catalog_name(
+                            wanted_board,
+                            menus,
+                            label="게시판",
+                        )
                     )
+                    if menu is None:
+                        raise CatalogMatchError(
+                            "V2R에서 게시판링크의 게시판 ID를 찾지 못했습니다: "
+                            f"{input_menu_id}"
+                        )
                 except CatalogMatchError as exc:
                     job.status = JobStatus.FAILED
                     job.message = str(exc)
