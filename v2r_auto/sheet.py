@@ -206,6 +206,9 @@ def load_affiliate_jobs(
             cafe = _clean_cell(row.get(AFFILIATE_COLUMNS["cafe"]))
             account = _clean_cell(row.get(AFFILIATE_COLUMNS["account"]))
             article_type = _clean_cell(row.get(AFFILIATE_COLUMNS["article_type"]))
+            prefix = _clean_cell(row.get(AFFILIATE_PREFIX_COLUMN))
+            if not keyword and cafe == "씨씨앙":
+                keyword = prefix
             missing_required = [
                 label
                 for label, value in (
@@ -232,7 +235,7 @@ def load_affiliate_jobs(
                 cafe=cafe,
                 account=account,
                 article_type=article_type,
-                prefix=_clean_cell(row.get(AFFILIATE_PREFIX_COLUMN)),
+                prefix=prefix,
                 revision_board=_clean_cell(
                     row.get(AFFILIATE_REVISION_BOARD_COLUMN)
                 ),

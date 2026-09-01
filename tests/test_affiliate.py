@@ -71,6 +71,25 @@ def test_cccang_revision_board_comes_from_optional_j_column(
     assert job.validate() == []
 
 
+def test_cccang_uses_legacy_g_column_when_keyword_is_blank(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "cccang-keyword-fallback.csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,"
+        "말머리,계정유형,이미지 없음,게시판명\n"
+        ',"제목 : 제목\n본문 : 본문",씨씨앙,writer,질문형,,'
+        "팍시 다이어트,비실명,Y,\n",
+        encoding="utf-8-sig",
+    )
+
+    job = load_affiliate_jobs(path, selected_row_number=2)[0]
+
+    assert job.keyword == "팍시 다이어트"
+    assert job.prefix == "팍시 다이어트"
+    assert job.validate() == []
+
+
 def test_cccang_rejects_unknown_revision_board(tmp_path: Path) -> None:
     job = load_affiliate_jobs(
         write_affiliate_csv(tmp_path),
