@@ -34,7 +34,7 @@ COMMENT_ACCOUNTS = (
 CAFE_DELAYS = {"씨씨앙": 4, "양평맘": 20}
 CCCANG_CURRENT_BOARD = {"menu_id": 328, "menu_name": "자유 수다방"}
 CCCANG_OLD_BOARD = {"menu_id": 2458, "menu_name": "자유수다방(구)"}
-CCCANG_DAILY_HEAD = "[댓글 이벤트 X]"
+CCCANG_DAILY_HEAD = {"head_id": 1749, "head_name": "댓글 이벤트 X"}
 CAFE_DESTINATIONS = {
     "씨씨앙": {
         "cafe_id": 25016228,
@@ -456,6 +456,7 @@ class AffiliateApiPublisher:
         menu_id: int,
         menu_name: str,
         head_name: str | None = None,
+        head_id: int | None = None,
     ) -> dict[str, Any]:
         result = dict(destination)
         result.update(
@@ -467,6 +468,10 @@ class AffiliateApiPublisher:
             }
         )
         if not head_name:
+            return result
+        if head_id is not None:
+            result["head_id"] = head_id
+            result["head_name"] = head_name
             return result
         heads = self._request(
             "GET",
@@ -1645,7 +1650,8 @@ class AffiliateApiPublisher:
                 destination,
                 menu_id=int(CCCANG_OLD_BOARD["menu_id"]),
                 menu_name=str(CCCANG_OLD_BOARD["menu_name"]),
-                head_name=CCCANG_DAILY_HEAD,
+                head_name=str(CCCANG_DAILY_HEAD["head_name"]),
+                head_id=int(CCCANG_DAILY_HEAD["head_id"]),
             )
             revision_board = (
                 CCCANG_CURRENT_BOARD

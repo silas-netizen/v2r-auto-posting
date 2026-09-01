@@ -11,6 +11,8 @@ from v2r_auto.affiliate_api import (
     AffiliateApiPublisher,
     AffiliateDailyPending,
     CAFE_DELAYS,
+    CCCANG_DAILY_HEAD,
+    CCCANG_OLD_BOARD,
     _content_json,
 )
 from v2r_auto.content import parse_article
@@ -195,6 +197,11 @@ def test_affiliate_daily_schedules_are_random_and_independent_per_cafe(
 
 def test_cccang_daily_and_revision_both_allow_comments() -> None:
     assert CAFE_DELAYS == {"씨씨앙": 4, "양평맘": 20}
+    assert CCCANG_OLD_BOARD["menu_id"] == 2458
+    assert CCCANG_DAILY_HEAD == {
+        "head_id": 1749,
+        "head_name": "댓글 이벤트 X",
+    }
     assert (
         AffiliateApiPublisher._write_options(enable_comment=True)[
             "enableComment"
@@ -255,13 +262,14 @@ def test_affiliate_revision_uses_planned_daily_time_without_waiting(
             menu_id,
             menu_name,
             head_name=None,
+            head_id=None,
         ):
             result = dict(destination)
             result.update(
                 {
                     "menu_id": menu_id,
                     "menu_name": menu_name,
-                    "head_id": 900 if head_name else None,
+                    "head_id": head_id if head_name else None,
                     "head_name": head_name,
                 }
             )
@@ -323,7 +331,7 @@ def test_affiliate_revision_uses_planned_daily_time_without_waiting(
         "2026-08-13T09:10:00Z"
     )
     assert publisher.created[0]["destination"]["menu_id"] == 2458
-    assert publisher.created[0]["destination"]["head_id"] == 900
+    assert publisher.created[0]["destination"]["head_id"] == 1749
     assert publisher.created[0]["enable_comment"] is True
     assert publisher.created[1]["destination"]["start_at"] == (
         "2026-08-13T13:10:00Z"
