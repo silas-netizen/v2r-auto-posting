@@ -18,6 +18,7 @@ from selenium.common.exceptions import (
     NoAlertPresentException,
     NoSuchElementException,
     NoSuchWindowException,
+    StaleElementReferenceException,
     TimeoutException,
     UnexpectedAlertPresentException,
 )
@@ -448,11 +449,17 @@ class V2RBrowser:
 
     def _visible_se_one_selections(self):
         assert self.driver
-        return [
-            item
-            for item in self.driver.find_elements(By.CSS_SELECTOR, ".n-base-selection")
-            if item.is_displayed()
-        ]
+        visible = []
+        for item in self.driver.find_elements(
+            By.CSS_SELECTOR,
+            ".n-base-selection",
+        ):
+            try:
+                if item.is_displayed():
+                    visible.append(item)
+            except StaleElementReferenceException:
+                continue
+        return visible
 
     def _se_one_option_matches(self, label: str, value: str, option_text: str) -> bool:
         if label == "계정":
@@ -475,13 +482,17 @@ class V2RBrowser:
         )
 
         def visible_options():
-            return [
-                item
-                for item in self.driver.find_elements(
-                    By.CSS_SELECTOR, ".n-base-select-option"
-                )
-                if item.is_displayed()
-            ]
+            visible = []
+            for item in self.driver.find_elements(
+                By.CSS_SELECTOR,
+                ".n-base-select-option",
+            ):
+                try:
+                    if item.is_displayed():
+                        visible.append(item)
+                except StaleElementReferenceException:
+                    continue
+            return visible
 
         search_value = (
             AFFILIATE_CAFE_SEARCH_TERMS.get(value, value)
@@ -490,21 +501,43 @@ class V2RBrowser:
         )
 
         def search_inputs():
-            fields = [
-                item
-                for item in selection.find_elements(By.CSS_SELECTOR, "input")
-                if item.is_displayed() and item.is_enabled()
-            ]
+            try:
+                selection_fields = selection.find_elements(
+                    By.CSS_SELECTOR,
+                    "input",
+                )
+            except StaleElementReferenceException:
+                selection_fields = []
+            fields = []
+            for item in selection_fields:
+                try:
+                    if item.is_displayed() and item.is_enabled():
+                        fields.append(item)
+                except StaleElementReferenceException:
+                    continue
             if fields:
                 return fields
-            return [
-                item
-                for item in self.driver.find_elements(
-                    By.CSS_SELECTOR,
-                    ".n-base-select-menu input, .n-base-selection input",
+            visible = []
+            for item in self.driver.find_elements(
+                By.CSS_SELECTOR,
+                ".n-base-select-menu input, .n-base-selection input",
+            ):
+                try:
+                    if item.is_displayed() and item.is_enabled():
+                        visible.append(item)
+                except StaleElementReferenceException:
+                    continue
+            return visible
+
+        def matches(option_element) -> bool:
+            try:
+                return self._se_one_option_matches(
+                    label,
+                    value,
+                    option_element.text,
                 )
-                if item.is_displayed() and item.is_enabled()
-            ]
+            except StaleElementReferenceException:
+                return False
 
         option_wait = WebDriverWait(
             self.driver,
@@ -586,7 +619,7 @@ class V2RBrowser:
             (
                 item
                 for item in options
-                if self._se_one_option_matches(label, value, item.text)
+                if matches(item)
             ),
             None,
         )
@@ -611,7 +644,7 @@ class V2RBrowser:
                 (
                     item
                     for item in visible_options()
-                    if self._se_one_option_matches(label, value, item.text)
+                    if matches(item)
                 ),
                 False,
             )
@@ -1446,7 +1479,11 @@ class V2RBrowser:
 
                 self.wait.until(editor_document_ready)
                 return
-            except (AutomationError, TimeoutException) as exc:
+            except (
+                AutomationError,
+                StaleElementReferenceException,
+                TimeoutException,
+            ) as exc:
                 last_error = exc
                 if attempt == 3:
                     break

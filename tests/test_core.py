@@ -3,6 +3,7 @@ from pathlib import Path
 import threading
 
 import pytest
+from selenium.common.exceptions import StaleElementReferenceException
 
 from v2r_auto.browser import (
     AFFILIATE_CAFE_SEARCH_TERMS,
@@ -133,6 +134,54 @@ def test_se_one_board_waits_without_repeatedly_toggling_dropdown() -> None:
 
     assert state["opened"] == 1
     assert state["polled"] >= 3
+    assert state["selected"] is True
+
+
+def test_se_one_selection_ignores_stale_dropdown_options() -> None:
+    state = {"selected": False}
+
+    class FakeSelection:
+        text = ""
+
+        def click(self):
+            return None
+
+        def find_elements(self, by, selector):
+            return []
+
+    class StaleOption:
+        def is_displayed(self):
+            raise StaleElementReferenceException("rerendered")
+
+    class LiveOption:
+        text = "자유 수다방"
+
+        def is_displayed(self):
+            return True
+
+        def click(self):
+            state["selected"] = True
+            selection.text = self.text
+
+    selection = FakeSelection()
+
+    class FakeDriver:
+        def execute_script(self, script, element):
+            return None
+
+        def find_elements(self, by, selector):
+            return [StaleOption(), LiveOption()]
+
+    class BoardBrowser(V2RBrowser):
+        def _visible_se_one_selections(self):
+            return [selection]
+
+    browser = object.__new__(BoardBrowser)
+    browser.driver = FakeDriver()
+    browser.logger = __import__("logging").getLogger("stale-option-test")
+
+    browser._select_se_one_option("게시판", "자유 수다방", 0)
+
     assert state["selected"] is True
 
 
