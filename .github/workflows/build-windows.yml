@@ -8,6 +8,10 @@ on:
       - "downloads/**"
   workflow_dispatch:
 
+concurrency:
+  group: v2r-windows-executable-publish
+  cancel-in-progress: false
+
 permissions:
   actions: write
   contents: write
