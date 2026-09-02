@@ -10,6 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 from .daily_posts import load_daily_posts
 from .gui import AutomationApp
 from .images import load_sheet_brand
+from .models import JobStatus
 from .photo_washer import (
     PhotoWashPlan,
     needs_photo_wash,
@@ -218,10 +219,18 @@ class AffiliateAutomationApp(AutomationApp):
                 ),
                 logger=self.logger,
             )
+            pending = sum(job.status == JobStatus.PENDING for job in jobs)
+            completed = sum(
+                job.status == JobStatus.SKIPPED and bool(job.completion_url)
+                for job in jobs
+            )
             self.logger.info(
-                "처리 대상 확인 완료: 원고 %s건 / 일상 글 %s건 / "
+                "처리 대상 확인 완료: 전체 %s건 / 실제 처리 %s건 / "
+                "완료 제외 %s건 / 일상 글 %s건 / "
                 "사진 선택 %s개 / 수동 세탁 대기",
                 len(jobs),
+                pending,
+                completed,
                 len(daily_posts),
                 self.photo_wash_plan.selected_count,
             )
@@ -230,7 +239,9 @@ class AffiliateAutomationApp(AutomationApp):
                     "info",
                     (
                         "처리 대상 확인",
-                        f"A~E열이 모두 채워진 원고 {len(jobs)}건\n"
+                        f"전체 원고 {len(jobs)}건\n"
+                        f"실제 처리 대상 {pending}건\n"
+                        f"완료 링크 제외 {completed}건\n"
                         f"제휴 일상 글 {len(daily_posts)}건\n"
                         f"사진 선택 {self.photo_wash_plan.selected_count}개\n"
                         f"사진 준비 실패 원고 "
