@@ -9,6 +9,7 @@ from .browser import V2RBrowser
 from selenium.common.exceptions import NoAlertPresentException
 
 from .cafe_posts import (
+    LIST_PAGE_SIZE,
     NAVER_LOGIN_URL,
     CafeBoardTarget,
     CafeComment,
@@ -20,6 +21,7 @@ from .cafe_posts import (
     article_ids_from_html,
     article_ids_from_payload,
     article_url,
+    board_menu_ids_from_payload,
     cafe_id_from_text,
     cafe_name_from_info_payload,
     cafe_name_from_intro_html,
@@ -28,7 +30,12 @@ from .cafe_posts import (
     comments_from_payload,
     cookies_show_naver_login,
     last_page_from_payload,
+    list_looks_truncated,
+    list_total_from_payload,
     loads_maybe_json,
+    menu_ids_from_html,
+    next_list_last_page,
+    payload_looks_like_article_list,
     newer_duplicate_rows,
     parse_cafe_datetime,
     post_from_payload,
@@ -87,6 +94,13 @@ MAX_LIST_PAGES = 400
 ARTICLE_LIST_TEMPLATES = (
     "https://apis.naver.com/cafe-web/cafe-boardlist-api/v1/cafes/{cafe_id}/menus/{menu_id}/articles?page={page}&pageSize=50&sortBy=TIME&viewType=L",
     "https://apis.naver.com/cafe-web/cafe2/ArticleList.json?search.clubid={cafe_id}&search.menuid={menu_id}&search.page={page}&search.perPage=50",
+    "https://apis.naver.com/cafe-web/cafe-articleapi/v2.1/cafes/{cafe_id}/menus/{menu_id}/articles?page={page}&pageSize=50&sortBy=TIME&viewType=L",
+)
+MENU_LIST_TEMPLATES = (
+    "https://apis.naver.com/cafe-web/cafe2/SideMenuList.json?cafeId={cafe_id}",
+    "https://apis.naver.com/cafe-web/cafe2/SideMenuList.json?clubid={cafe_id}",
+    "https://cafe.naver.com/f-e/v1/cafes/{cafe_id}/menus",
+    "https://cafe.naver.com/f-e/cafes/{cafe_id}/side-menu",
 )
 ARTICLE_DETAIL_TEMPLATES = (
     "https://apis.naver.com/cafe-web/cafe-articleapi/v2.1/cafes/{cafe_id}/articles/{article_id}?useCafeId=true",
@@ -220,6 +234,7 @@ class CafePostSession:
         self.rows: list[CafePostRow] = []
         self._found_count = 0
         self._list_dates: dict[int, datetime] = {}
+        self._list_truncated = False
 
     def open_login_window(self, should_stop: Callable[[], bool] | None = None) -> None:
         self.browser.start()
@@ -268,6 +283,7 @@ class CafePostSession:
         self.rows = []
         self._found_count = 0
         self._list_dates = {}
+        self._list_truncated = False
         for article_id in self._iter_article_ids(should_stop):
             if should_stop and should_stop():
                 break
@@ -495,10 +511,48 @@ class CafePostSession:
     ) -> Iterator[int]:
         cafe_id = self._require_cafe_id()
         menu_id = int(self.target.menu_id or 0)
-        scope = "전체 게시글" if menu_id == 0 else f"게시판 {menu_id}"
-        self.logger.info("%s 목록을 읽으면서 글을 모읍니다", scope)
         seen: set[int] = set()
+        if menu_id != 0:
+            self.logger.info("게시판 %s 목록을 읽으면서 글을 모읍니다", menu_id)
+            yield from self._iter_menu_article_ids(
+                cafe_id, menu_id, seen, should_stop
+            )
+            return
+        self.logger.info("전체 게시글 목록을 읽으면서 글을 모읍니다")
+        yield from self._iter_menu_article_ids(cafe_id, 0, seen, should_stop)
+        if not self._list_truncated:
+            self.logger.info("글이 있는 마지막 페이지까지 모았습니다")
+            return
+        extra = self._list_board_menu_ids(cafe_id)
+        if not extra:
+            self.logger.warning(
+                "전체 목록이 중간에 끊긴 것 같은데 게시판 목록을 찾지 못했습니다. "
+                "지금까지 찾은 글만 모읍니다"
+            )
+            return
+        self.logger.info(
+            "전체 목록이 %s개에서 끊긴 것 같아 게시판 %s개에서 빠진 글을 찾습니다",
+            len(seen),
+            len(extra),
+        )
+        for board_id in extra:
+            if should_stop and should_stop():
+                return
+            self.logger.info("게시판 %s 목록을 읽으면서 글을 모읍니다", board_id)
+            yield from self._iter_menu_article_ids(
+                cafe_id, board_id, seen, should_stop
+            )
+
+    def _iter_menu_article_ids(
+        self,
+        cafe_id: int,
+        menu_id: int,
+        seen: set[int],
+        should_stop: Callable[[], bool] | None,
+    ) -> Iterator[int]:
         last_page = MAX_LIST_PAGES
+        previous_id_count = 0
+        self._list_truncated = False
         for page in range(1, MAX_LIST_PAGES + 1):
             if should_stop and should_stop():
                 return
@@ -508,33 +562,87 @@ class CafePostSession:
             if payload is not None:
                 self._list_dates.update(article_dates_from_payload(payload))
             ids = article_ids_from_payload(payload) if payload is not None else []
-            if not ids:
+            if not ids and not payload_looks_like_article_list(payload):
                 ids = article_ids_from_html(html)
             fresh = [item for item in ids if item not in seen]
             if not fresh:
+                self._list_truncated = list_looks_truncated(
+                    previous_id_count, len(fresh)
+                )
+                if page == 1 and seen:
+                    self.logger.info(
+                        "게시판 %s 목록은 이미 모은 글입니다",
+                        "전체" if menu_id == 0 else menu_id,
+                    )
+                elif self._list_truncated:
+                    self.logger.info(
+                        "목록 %s페이지에 글이 없어 이 목록을 끝냅니다", page
+                    )
+                elif page > 1:
+                    self.logger.info("더 이상 새 글이 없어 목록을 끝냅니다")
                 return
             for item in fresh:
                 seen.add(item)
             self._found_count = len(seen)
-            self.logger.info("목록 %s페이지에서 글 %s개를 더 찾았습니다", page, len(fresh))
+            self.logger.info(
+                "목록 %s페이지에서 글 %s개를 더 찾았습니다", page, len(fresh)
+            )
             guessed = last_page_from_payload(payload) if payload is not None else None
-            if guessed:
-                last_page = min(last_page, guessed)
+            last_page = next_list_last_page(
+                page, len(ids), guessed, cap=MAX_LIST_PAGES
+            )
+            previous_id_count = len(ids)
+            if page == 1 and payload is not None:
+                total = list_total_from_payload(payload)
+                if total:
+                    self.logger.info("이 목록의 전체 글 수는 %s개로 보입니다", total)
             for item in fresh:
                 if should_stop and should_stop():
                     return
                 yield item
 
+    def _list_board_menu_ids(self, cafe_id: int) -> list[int]:
+        found: list[int] = []
+        seen: set[int] = set()
+
+        def add(ids: list[int]) -> None:
+            for menu_id in ids:
+                if menu_id <= 0 or menu_id in seen:
+                    continue
+                seen.add(menu_id)
+                found.append(menu_id)
+
+        for template in MENU_LIST_TEMPLATES:
+            result = self._fetch(template.format(cafe_id=cafe_id))
+            text = str(result.get("text") or "")
+            payload = loads_maybe_json(text)
+            if payload is not None:
+                add(board_menu_ids_from_payload(payload))
+            add(menu_ids_from_html(text))
+        add(menu_ids_from_html(self._page_html()))
+        try:
+            add(menu_ids_from_html(self._cafe_main_html()))
+        except Exception:
+            pass
+        return found
+
     def _fetch_list_page(
         self, cafe_id: int, menu_id: int, page: int
     ) -> tuple[Any, str]:
+        empty_json: tuple[Any, str] | None = None
         for template in ARTICLE_LIST_TEMPLATES:
             url = template.format(cafe_id=cafe_id, menu_id=menu_id, page=page)
             result = self._fetch(url)
             text = str(result.get("text") or "")
             payload = loads_maybe_json(text)
-            if payload is not None and article_ids_from_payload(payload):
+            if payload is None:
+                continue
+            if article_ids_from_payload(payload):
                 return payload, text
+            if payload_looks_like_article_list(payload):
+                empty_json = (payload, text)
+        if empty_json is not None:
+            return empty_json
         list_url = (
             f"{self.target.home_url}?iframe_url=/ArticleList.nhn"
             f"?search.clubid={cafe_id}&search.menuid={menu_id}"
