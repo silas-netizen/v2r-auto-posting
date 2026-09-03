@@ -10,16 +10,20 @@ from v2r_auto.cafe_posts import (
     CafePostError,
     CafePostRow,
     apply_intro_cafe_name,
+    article_checkbox_ids_from_html,
     article_ids_from_html,
     article_ids_from_payload,
     article_url,
     cafe_name_from_info_payload,
     cafe_name_from_intro_html,
     comments_from_payload,
+    duplicate_content_key,
     excel_filename,
     format_comments,
     html_to_text,
+    newer_duplicate_rows,
     parse_cafe_board_target,
+    parse_cafe_datetime,
     post_from_payload,
     write_cafe_posts_xlsx,
 )
@@ -112,8 +116,10 @@ def test_post_from_payload_reads_fields() -> None:
     payload = {
         "result": {
             "article": {
+                "articleId": 77,
                 "subject": "제목입니다",
                 "contentHtml": "<p>본문입니다</p>",
+                "writeDateTimestamp": 1693700000000,
                 "writer": {"nickname": "작성닉"},
                 "menuName": "자유게시판",
                 "cafeName": "씨씨앙",
@@ -130,6 +136,8 @@ def test_post_from_payload_reads_fields() -> None:
     assert row.title == "제목입니다"
     assert row.body == "본문입니다"
     assert row.comment_text() == "댓닉\n댓글이다"
+    assert row.article_id == 77
+    assert row.written_at == parse_cafe_datetime(1693700000000)
 
 
 def test_write_excel_has_requested_columns(tmp_path: Path) -> None:
@@ -171,6 +179,8 @@ def test_gui_mentions_excel_and_login() -> None:
     assert "카페소개" in source
     assert "중지를 눌러도" in source
     assert "_write_collected_excel" in source
+    assert "중복 글 삭제" in source
+    assert "제목·본문이 같은 최신 글 삭제" in source
 
 
 def test_intro_html_uses_cafe_name_row() -> None:
@@ -249,3 +259,157 @@ def test_stop_still_writes_partial_excel(tmp_path: Path) -> None:
     path = write_cafe_posts_xlsx(tmp_path / excel_filename("웨딩 노트"), rows)
     book = load_workbook(path)
     assert book.active["A2"].value == "웨딩 노트"
+
+
+def test_newer_duplicates_keep_oldest_date() -> None:
+    older = CafePostRow(
+        "웨딩 노트",
+        "자유",
+        "닉",
+        "같은 제목",
+        "같은 본문",
+        article_id=10,
+        written_at=datetime(2026, 1, 1, 10, 0),
+    )
+    newer = CafePostRow(
+        "웨딩 노트",
+        "자유",
+        "닉",
+        "같은 제목",
+        "같은 본문",
+        article_id=20,
+        written_at=datetime(2026, 8, 1, 10, 0),
+    )
+    newest = CafePostRow(
+        "웨딩 노트",
+        "자유",
+        "닉",
+        " 같은   제목 ",
+        "같은\n본문",
+        article_id=30,
+        written_at=datetime(2026, 9, 1, 10, 0),
+    )
+    unique = CafePostRow(
+        "웨딩 노트",
+        "자유",
+        "닉",
+        "같은 제목",
+        "다른 본문",
+        article_id=40,
+        written_at=datetime(2026, 9, 2, 10, 0),
+    )
+    deleted = newer_duplicate_rows([newer, unique, newest, older])
+    assert [row.article_id for row in deleted] == [20, 30]
+    assert duplicate_content_key("같은 제목", "같은 본문") == duplicate_content_key(
+        " 같은   제목 ", "같은\n본문"
+    )
+
+
+def test_title_only_match_is_not_duplicate() -> None:
+    rows = [
+        CafePostRow("카페", "게시판", "닉", "제목", "본문A", article_id=1),
+        CafePostRow("카페", "게시판", "닉", "제목", "본문B", article_id=2),
+    ]
+    assert newer_duplicate_rows(rows) == []
+
+
+def test_checkbox_ids_from_staff_list_html() -> None:
+    html = """
+    <table class="article-table">
+      <tr>
+        <td><input type="checkbox" name="articleid" value="101"></td>
+        <td><a class="article" href="/ArticleRead.nhn?articleid=101">첫째</a></td>
+      </tr>
+      <tr>
+        <td><input type="checkbox" name="articleid" value="202"></td>
+        <td><a href="/articles/202">둘째</a></td>
+      </tr>
+    </table>
+    """
+    assert article_checkbox_ids_from_html(html) == [101, 202]
+
+
+def test_wedding_note_style_161_posts_delete_newer_only() -> None:
+    rows: list[CafePostRow] = []
+    expected: list[int] = []
+    article_id = 1000
+    day = 1
+    for index in range(40):
+        title = f"웨딩 중복 {index}"
+        body = f"본문 내용 {index} " * 3
+        older_id = article_id
+        article_id += 1
+        newer_id = article_id
+        article_id += 1
+        rows.append(
+            CafePostRow(
+                "웨딩 노트",
+                "자유",
+                "닉",
+                title,
+                body,
+                article_id=older_id,
+                written_at=datetime(2026, 1, min(day, 28), 9, 0),
+            )
+        )
+        rows.append(
+            CafePostRow(
+                "웨딩 노트",
+                "자유",
+                "닉",
+                title,
+                body,
+                article_id=newer_id,
+                written_at=datetime(2026, 8, min(day, 28), 9, 0),
+            )
+        )
+        expected.append(newer_id)
+        day += 1
+    for index in range(20):
+        title = f"웨딩 삼중복 {index}"
+        body = f"세 번 올린 본문 {index}"
+        first = article_id
+        article_id += 1
+        second = article_id
+        article_id += 1
+        third = article_id
+        article_id += 1
+        for offset, aid in enumerate((first, second, third)):
+            rows.append(
+                CafePostRow(
+                    "웨딩 노트",
+                    "자유",
+                    "닉",
+                    title,
+                    body,
+                    article_id=aid,
+                    written_at=datetime(2026, 2 + offset, min(index + 1, 28), 10, 0),
+                )
+            )
+        expected.extend([second, third])
+    for index in range(21):
+        rows.append(
+            CafePostRow(
+                "웨딩 노트",
+                "자유",
+                "닉",
+                f"유일 글 {index}",
+                f"유일한 본문 {index}",
+                article_id=article_id,
+                written_at=datetime(2026, 3, min(index + 1, 28), 11, 0),
+            )
+        )
+        article_id += 1
+    assert len(rows) == 161
+    deleted = newer_duplicate_rows(rows)
+    assert len(deleted) == 80
+    assert sorted(row.article_id for row in deleted) == sorted(expected)
+    assert 1000 not in {row.article_id for row in deleted}
+    assert 1001 in {row.article_id for row in deleted}
+
+
+def test_browser_deletes_with_checkbox() -> None:
+    source = Path("v2r_auto/cafe_post_browser.py").read_text(encoding="utf-8")
+    assert "board.removeArticles" in source
+    assert "delete_newer_duplicates" in source
+    assert "관리자 계정" in source

@@ -61,6 +61,24 @@ PAGE_LAST_KEYS = (
     "pageCount",
     "endPage",
 )
+DATE_KEYS = (
+    "writeDateTimestamp",
+    "writeDate",
+    "addDate",
+    "createdAt",
+    "createdDate",
+)
+DATE_FORMATS = (
+    "%Y.%m.%d. %H:%M:%S",
+    "%Y.%m.%d. %H:%M",
+    "%Y.%m.%d %H:%M:%S",
+    "%Y.%m.%d %H:%M",
+    "%Y.%m.%d.",
+    "%Y.%m.%d",
+    "%Y-%m-%d %H:%M:%S",
+    "%Y-%m-%dT%H:%M:%S",
+    "%Y-%m-%d",
+)
 
 
 class CafePostError(ValueError):
@@ -99,6 +117,8 @@ class CafePostRow:
     title: str
     body: str
     comments: list[CafeComment] = field(default_factory=list)
+    article_id: int = 0
+    written_at: datetime | None = None
 
     def comment_text(self) -> str:
         return format_comments(self.comments)
@@ -441,6 +461,53 @@ def apply_intro_cafe_name(
     return collected
 
 
+def parse_cafe_datetime(value: Any) -> datetime | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        ts = float(value)
+        if ts <= 0:
+            return None
+        if ts > 1e12:
+            ts /= 1000.0
+        if ts < 1e9:
+            return None
+        try:
+            return datetime.fromtimestamp(ts)
+        except (OSError, OverflowError, ValueError):
+            return None
+    text = clean_text(str(value))
+    if not text or "전" in text:
+        return None
+    text = re.sub(r"\s*[오전오후]\s*", " ", text).strip()
+    for fmt in DATE_FORMATS:
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def written_at_from_obj(obj: dict[str, Any]) -> datetime | None:
+    for key in DATE_KEYS:
+        parsed = parse_cafe_datetime(obj.get(key))
+        if parsed:
+            return parsed
+    return None
+
+
+def article_dates_from_payload(payload: Any) -> dict[int, datetime]:
+    found: dict[int, datetime] = {}
+    for obj in walk_dicts(payload):
+        if _first_int(obj, COMMENT_ID_KEYS) and not _first_str(obj, TITLE_KEYS):
+            continue
+        article_id = _first_int(obj, ARTICLE_ID_KEYS)
+        written_at = written_at_from_obj(obj)
+        if article_id and written_at and article_id not in found:
+            found[article_id] = written_at
+    return found
+
+
 def post_from_payload(
     payload: Any,
     *,
@@ -451,6 +518,8 @@ def post_from_payload(
     board = ""
     cafe = ""
     body = ""
+    article_id = 0
+    written_at: datetime | None = None
     for obj in walk_dicts(payload):
         title = title or _first_str(obj, TITLE_KEYS)
         author = author or _first_str(obj, AUTHOR_KEYS)
@@ -459,6 +528,12 @@ def post_from_payload(
         raw_body = _first_str(obj, BODY_KEYS)
         if raw_body and len(raw_body) > len(body):
             body = raw_body
+        if not article_id:
+            if _first_int(obj, COMMENT_ID_KEYS) and not _first_str(obj, TITLE_KEYS):
+                continue
+            article_id = _first_int(obj, ARTICLE_ID_KEYS) or 0
+        if written_at is None:
+            written_at = written_at_from_obj(obj)
     base = fallback or CafePostRow("", "", "", "", "")
     return CafePostRow(
         cafe_name=clean_text(cafe) or base.cafe_name,
@@ -467,7 +542,82 @@ def post_from_payload(
         title=clean_text(title) or base.title,
         body=html_to_text(body) or base.body,
         comments=comments_from_payload(payload) or list(base.comments),
+        article_id=article_id or base.article_id,
+        written_at=written_at or base.written_at,
     )
+
+
+def normalize_duplicate_text(value: str) -> str:
+    return re.sub(r"\s+", " ", clean_text(value)).casefold()
+
+
+def duplicate_content_key(title: str, body: str) -> str:
+    title_key = normalize_duplicate_text(title)
+    body_key = normalize_duplicate_text(body)
+    if not title_key or not body_key:
+        return ""
+    return f"{title_key}\n{body_key}"
+
+
+def row_recency_key(row: CafePostRow) -> tuple[float, int]:
+    article_id = int(row.article_id or 0)
+    if row.written_at is not None:
+        return (row.written_at.timestamp(), article_id)
+    return (float(article_id), article_id)
+
+
+def newer_duplicate_rows(rows: Iterable[CafePostRow]) -> list[CafePostRow]:
+    groups: dict[str, list[CafePostRow]] = {}
+    for row in rows:
+        key = duplicate_content_key(row.title, row.body)
+        if not key:
+            continue
+        groups.setdefault(key, []).append(row)
+    to_delete: list[CafePostRow] = []
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        ordered = sorted(group, key=row_recency_key)
+        to_delete.extend(ordered[1:])
+    return to_delete
+
+
+def article_checkbox_ids_from_html(html: str) -> list[int]:
+    found: list[int] = []
+    seen: set[int] = set()
+    for match in re.finditer(
+        r"<input\b[^>]*type=['\"]checkbox['\"][^>]*>",
+        html or "",
+        flags=re.I,
+    ):
+        tag = match.group(0)
+        value_match = re.search(r"\bvalue=['\"](\d+)['\"]", tag, flags=re.I)
+        if not value_match:
+            value_match = re.search(
+                r"data-article-?id=['\"](\d+)['\"]", tag, flags=re.I
+            )
+        if not value_match:
+            continue
+        article_id = int(value_match.group(1))
+        if article_id <= 0 or article_id in seen:
+            continue
+        seen.add(article_id)
+        found.append(article_id)
+    for match in re.finditer(r"(?is)<tr\b[^>]*>(.*?)</tr>", html or ""):
+        row = match.group(1)
+        if "checkbox" not in row.lower():
+            continue
+        link = re.search(
+            r"(?:articleid=|/articles/|articleId=)(\d+)", row, flags=re.I
+        )
+        if not link:
+            continue
+        article_id = int(link.group(1))
+        if article_id in seen:
+            continue
+        seen.add(article_id)
+        found.append(article_id)
+    return found
 
 
 def excel_filename(cafe_name: str, when: datetime | None = None) -> str:
