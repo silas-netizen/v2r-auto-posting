@@ -6,6 +6,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from v2r_auto.affiliate_api import (
     AffiliateApiError,
     AffiliateApiPublisher,
