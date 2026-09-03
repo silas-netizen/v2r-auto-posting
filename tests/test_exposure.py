@@ -8,6 +8,10 @@ from v2r_auto.exposure import (
     ExposureChecker,
     ExposureRow,
     article_dedupe_key,
+    filter_exposed_rows,
+    format_exposed_post_urls,
+    is_exposed_status,
+    unique_exposed_urls,
     brand_found,
     cafe_id_for_check,
     cafe_name_from_url,
@@ -1891,3 +1895,110 @@ def test_hidden_keeps_cafe_and_clears_exposed_volume() -> None:
     ).run([row], dry_run=False)
     assert results == [("밀려남", None, 50, True)]
     assert row.current_cafe == "씨씨앙/dtsx"
+
+
+def test_is_exposed_status_ignores_spaces() -> None:
+    assert is_exposed_status("노출완")
+    assert is_exposed_status("노출 완")
+    assert not is_exposed_status("밀려남")
+    assert not is_exposed_status("")
+
+
+def test_filter_exposed_rows_keeps_only_exposed() -> None:
+    rows = [
+        _row("항문 연고", "노출완"),
+        _row("엉덩이 종기", "밀려남"),
+        _row("치핵 수술", "노출 완"),
+    ]
+    kept = filter_exposed_rows(rows)
+    assert [row.keyword for row in kept] == ["항문 연고", "치핵 수술"]
+
+
+def test_format_exposed_post_urls_is_links_only() -> None:
+    first = "https://cafe.naver.com/yangmom/123"
+    club = "https://cafe.naver.com/f-e/cafes/22788814/articles/123"
+    text = format_exposed_post_urls(["", first, first, club, "https://cafe.naver.com/cantsb/9"])
+    assert "항문" not in text
+    assert text == (
+        "https://cafe.naver.com/yangmom/123\n"
+        "https://cafe.naver.com/cantsb/9\n"
+    )
+    assert unique_exposed_urls([first, club]) == [first]
+
+
+def test_checker_collects_exposed_post_url() -> None:
+    first = "https://cafe.naver.com/ccang/1"
+    second = "https://cafe.naver.com/yangpyeongmom/2"
+    html = _pack(f"""
+    <a href="https://cafe.naver.com/ccang">씨씨앙</a>
+    <a href="{first}">글1</a>
+    <a href="https://cafe.naver.com/yangpyeongmom">양평맘</a>
+    <a href="{second}">글2</a>
+    """)
+    checker = ExposureChecker(
+        object(),
+        FakeNaver(
+            html,
+            {first: "일반 글", second: "댓글에 코숨핏 후기"},
+            visible_urls=[first, second],
+        ),
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    )
+    checker.run([_row("키워드")], dry_run=True)
+    assert checker.exposed_urls == [second]
+
+
+def test_urls_only_skips_hidden_rows_and_does_not_write() -> None:
+    post = "https://cafe.naver.com/ccang/1"
+    html = _pack(f"""
+    <a href="https://cafe.naver.com/ccang">씨씨앙</a>
+    <a href="{post}">글</a>
+    """)
+    written = []
+
+    class FakeNotion:
+        def update_check_result(self, row, *, status, cafe_name=None, search_volume=None, volume_found=False):
+            written.append((row.keyword, status, search_volume))
+
+        def write_volume_totals(self):
+            written.append("totals")
+
+    class VolumeNaver(FakeNaver):
+        def lookup_search_volume(self, keyword: str) -> int:
+            written.append(("volume", keyword))
+            return 10
+
+    checker = ExposureChecker(
+        FakeNotion(),
+        VolumeNaver(
+            {
+                "항문 연고": html,
+                "엉덩이 종기": html,
+            },
+            {post: "코숨핏 후기"},
+            visible_urls=[post],
+        ),
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    )
+    checker.run(
+        [_row("항문 연고", "노출완"), _row("엉덩이 종기", "밀려남")],
+        dry_run=False,
+        urls_only=True,
+    )
+    assert checker.exposed_urls == [post]
+    assert written == []
+    assert checker.naver.searched == ["항문 연고"]
+
+
+def test_exposure_gui_has_url_extract_controls() -> None:
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "v2r_auto" / "gui_exposure.py").read_text(
+        encoding="utf-8"
+    )
+    assert "노출완 내 글 URL도 모으기" in source
+    assert "노출완 URL만 추출" in source
+    assert "urls_only" in source
+    assert "노출완글링크.txt" in source

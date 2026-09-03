@@ -10,10 +10,14 @@ from .exposure import (
     DEFAULT_BRAND_MARKERS,
     DEFAULT_CAFE_NAMES,
     ExposureChecker,
+    filter_exposed_rows,
     match_selected_rows,
+    open_text_notepad,
     parse_brands,
     parse_cafes,
     parse_keyword_lines,
+    unique_exposed_urls,
+    write_exposed_post_urls,
 )
 from .exposure_naver import SeleniumNaverSearch
 from .exposure_notion import NotionError, NotionExposureStore
@@ -39,8 +43,8 @@ class ExposureApp(AutomationApp):
             messagebox.showerror("중복 실행", str(exc))
             self.destroy()
             raise SystemExit(1) from exc
-        self.geometry("960x880")
-        self.minsize(880, 760)
+        self.geometry("960x920")
+        self.minsize(880, 780)
         self._load_settings()
         self._apply_source()
 
@@ -67,6 +71,8 @@ class ExposureApp(AutomationApp):
         cafes = str(data.get("cafes") or "").strip()
         if cafes:
             self.cafes.set(cafes)
+        if "collect_exposed_urls" in data:
+            self.collect_exposed_urls.set(bool(data.get("collect_exposed_urls")))
 
     def _save_settings(self) -> None:
         payload = {
@@ -76,6 +82,7 @@ class ExposureApp(AutomationApp):
             "sheet_url": self.sheet_url.get().strip(),
             "brands": self.brands.get().strip(),
             "cafes": self.cafes.get().strip(),
+            "collect_exposed_urls": self.collect_exposed_urls.get(),
         }
         self._settings_path().write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
@@ -90,6 +97,7 @@ class ExposureApp(AutomationApp):
         self.cafes = tk.StringVar(value=", ".join(DEFAULT_CAFE_NAMES))
         self.brands = tk.StringVar(value=", ".join(DEFAULT_BRAND_MARKERS))
         self.dry_run = tk.BooleanVar(value=True)
+        self.collect_exposed_urls = tk.BooleanVar(value=False)
         self.progress_text = tk.StringVar(value="대기 중")
         self.selected_count = tk.StringVar(value="0개 키워드")
         self.pause_event = threading.Event()
@@ -161,16 +169,25 @@ class ExposureApp(AutomationApp):
             side=tk.LEFT, padx=6
         )
 
-        actions = ttk.Frame(outer)
-        actions.grid(row=9, column=0, columnspan=3, sticky="ew", pady=8)
+        controls = ttk.Frame(outer)
+        controls.grid(row=9, column=0, columnspan=3, sticky="ew", pady=8)
+        options = ttk.Frame(controls)
+        options.pack(fill=tk.X)
         self.dry_run_check = ttk.Checkbutton(
-            actions,
+            options,
             text="검증 모드(노션에 쓰지 않음)",
             variable=self.dry_run,
         )
         self.dry_run_check.pack(side=tk.LEFT)
+        ttk.Checkbutton(
+            options,
+            text="노출완 내 글 URL도 모으기",
+            variable=self.collect_exposed_urls,
+        ).pack(side=tk.LEFT, padx=(16, 0))
+        actions = ttk.Frame(controls)
+        actions.pack(fill=tk.X, pady=(8, 0))
         ttk.Button(actions, text="1. 크롬 준비", command=self._open_login).pack(
-            side=tk.LEFT, padx=(16, 0)
+            side=tk.LEFT
         )
         ttk.Button(actions, text="2. 키워드 확인", command=self._check_data).pack(
             side=tk.LEFT, padx=6
@@ -179,6 +196,10 @@ class ExposureApp(AutomationApp):
             actions, text="3. 전체 조회 시작", command=self._start
         )
         self.start_button.pack(side=tk.LEFT)
+        self.extract_button = ttk.Button(
+            actions, text="노출완 URL만 추출", command=self._start_extract
+        )
+        self.extract_button.pack(side=tk.LEFT, padx=(6, 0))
         self.pause_button = ttk.Button(
             actions, text="일시 중지", command=self._pause, state=tk.DISABLED
         )
@@ -336,7 +357,31 @@ class ExposureApp(AutomationApp):
             return
         self._begin_check(selected_only=True, selected=selected)
 
-    def _begin_check(self, *, selected_only: bool, selected: list[str] | None = None) -> None:
+    def _start_extract(self) -> None:
+        selected = parse_keyword_lines(self.keyword_text.get("1.0", tk.END))
+        self._begin_check(
+            selected_only=bool(selected),
+            selected=selected or None,
+            urls_only=True,
+        )
+
+    def _export_exposed_urls(self, urls: list[str]) -> Path | None:
+        items = unique_exposed_urls(urls)
+        if not items:
+            self.logger.info("모을 노출완 글 링크가 없습니다")
+            return None
+        path = write_exposed_post_urls(self.data_dir / "노출완글링크.txt", items)
+        open_text_notepad(path)
+        self.logger.info("노출완 글 링크 %s개를 메모장에 띄웠습니다: %s", len(items), path)
+        return path
+
+    def _begin_check(
+        self,
+        *,
+        selected_only: bool,
+        selected: list[str] | None = None,
+        urls_only: bool = False,
+    ) -> None:
         if self.worker and not self.worker.done():
             return
         try:
@@ -347,8 +392,19 @@ class ExposureApp(AutomationApp):
             messagebox.showerror("입력 오류", str(exc))
             return
         dry_run = self.dry_run.get()
+        collect_urls = self.collect_exposed_urls.get() or urls_only
         label = getattr(store, "label", self._source_label())
-        if dry_run:
+        if urls_only:
+            scope = "선택한 키워드 중 노출완" if selected_only else "표의 노출완"
+            if not messagebox.askyesno(
+                "노출완 URL 추출",
+                (
+                    f"{scope}만 통검해서 내 글 주소를 모읍니다. "
+                    f"{label}은 바꾸지 않습니다. 계속할까요?"
+                ),
+            ):
+                return
+        elif dry_run:
             if not messagebox.askyesno(
                 "검증 모드",
                 f"검증 모드입니다. 네이버만 확인하고 {label}에는 쓰지 않습니다. 계속할까요?",
@@ -376,6 +432,7 @@ class ExposureApp(AutomationApp):
         self.pause_event.clear()
         self.start_button.configure(state=tk.DISABLED)
         self.selected_button.configure(state=tk.DISABLED)
+        self.extract_button.configure(state=tk.DISABLED)
         self.pause_button.configure(state=tk.NORMAL)
         self.resume_button.configure(state=tk.DISABLED)
         self.stop_button.configure(state=tk.NORMAL)
@@ -399,6 +456,18 @@ class ExposureApp(AutomationApp):
                             )
                         )
                         return
+                if urls_only:
+                    rows = filter_exposed_rows(rows)
+                    if not rows:
+                        self.ui_queue.put(
+                            (
+                                "error",
+                                ("노출완 URL 추출", f"{label}에서 노출완 키워드를 찾지 못했습니다"),
+                            )
+                        )
+                        return
+                    self.logger.info("노출완 URL 추출 %s건을 검색합니다", len(rows))
+                elif selected_only:
                     self.logger.info("선택 조회 %s건을 검사합니다", len(rows))
                 else:
                     self.logger.info("전체 조회 %s건을 검사합니다", len(rows))
@@ -413,24 +482,49 @@ class ExposureApp(AutomationApp):
                 )
                 checker.run(
                     rows,
-                    dry_run=dry_run,
+                    dry_run=dry_run or urls_only,
                     stop_event=self.stop_event,
                     pause_event=self.pause_event,
                     progress=self._set_progress,
+                    urls_only=urls_only,
                 )
+                exported = None
+                if collect_urls:
+                    exported = self._export_exposed_urls(checker.exposed_urls)
                 if self.stop_event.is_set():
+                    note = ""
+                    if exported is not None:
+                        note = " 지금까지 모은 링크는 메모장에 띄웠습니다."
                     self.ui_queue.put(
                         (
                             "info",
-                            ("검사 중지", "중지했습니다. 이어서 보려면 다시 시작을 누르세요"),
+                            ("검사 중지", f"중지했습니다. 이어서 보려면 다시 시작을 누르세요.{note}"),
+                        )
+                    )
+                elif urls_only:
+                    count = len(unique_exposed_urls(checker.exposed_urls))
+                    self.ui_queue.put(
+                        (
+                            "info",
+                            (
+                                "노출완 URL 추출",
+                                (
+                                    f"노출완 글 링크 {count}개를 메모장에 띄웠습니다."
+                                    if exported is not None
+                                    else "모을 노출완 글 링크가 없습니다."
+                                ),
+                            ),
                         )
                     )
                 else:
-                    label = "선택 조회" if selected_only else "전체 조회"
+                    kind = "선택 조회" if selected_only else "전체 조회"
+                    extra = ""
+                    if exported is not None:
+                        extra = " 노출완 글 링크도 메모장에 띄웠습니다."
                     self.ui_queue.put(
                         (
                             "info",
-                            ("검사 종료", f"{label} {len(rows)}건 검사를 마쳤습니다"),
+                            ("검사 종료", f"{kind} {len(rows)}건 검사를 마쳤습니다.{extra}"),
                         )
                     )
             except Exception as exc:
@@ -468,6 +562,7 @@ class ExposureApp(AutomationApp):
     def _worker_finished(self) -> None:
         super()._worker_finished()
         self.selected_button.configure(state=tk.NORMAL)
+        self.extract_button.configure(state=tk.NORMAL)
         self.pause_button.configure(state=tk.DISABLED)
         self.resume_button.configure(state=tk.DISABLED)
         self.pause_event.clear()
