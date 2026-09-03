@@ -8,6 +8,7 @@ from v2r_auto.exposure import (
     ExposureChecker,
     ExposureRow,
     article_dedupe_key,
+    display_exposed_post_url,
     filter_exposed_rows,
     format_exposed_post_urls,
     is_exposed_status,
@@ -1924,6 +1925,21 @@ def test_format_exposed_post_urls_is_links_only() -> None:
         "https://cafe.naver.com/cantsb/9\n"
     )
     assert unique_exposed_urls([first, club]) == [first]
+
+
+def test_display_exposed_post_url_stops_at_article_number() -> None:
+    raw = (
+        "https://cafe.naver.com/yangmom/726595?art="
+        "ZXh0ZXJuYWwtc2VydmljZS1uYXZlci1zZWFyY2gtY2FmZS1wcg."
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+        "eyJjYWZlVHlwZSI6IkNBRkVfVVJMIiwiY2FmZVVybCI6Inlhbmdtb20iLCJhcnRpY2xlSWQiOjcyNjU5NSwiaXNzdWVkQXQiOjE3ODg0MTkzMzg0Njd9."
+        "c6cUZbkUXCPVmJyjhQla1buefgtMWieGhRo505NF3jI"
+    )
+    assert display_exposed_post_url(raw) == "https://cafe.naver.com/yangmom/726595"
+    assert unique_exposed_urls([raw, raw + "#comment"]) == [
+        "https://cafe.naver.com/yangmom/726595"
+    ]
+    assert format_exposed_post_urls([raw]) == "https://cafe.naver.com/yangmom/726595\n"
 
 
 def test_checker_collects_exposed_post_url() -> None:
