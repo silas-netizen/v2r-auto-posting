@@ -337,6 +337,110 @@ def comments_from_payload(payload: Any) -> list[CafeComment]:
     return comments
 
 
+def clean_intro_cafe_name(value: str) -> str:
+    name = clean_text(html_to_text(value))
+    name = re.sub(r"(?:\s*(?:수정|EDIT))+$", "", name, flags=re.I).strip()
+    if "\n" in name:
+        name = clean_text(name.split("\n", 1)[0])
+    if not name or name.startswith("http"):
+        return ""
+    if re.fullmatch(r"카페\s*(이름|주소|매니저|소개|주제|창립일|설명)", name):
+        return ""
+    return name
+
+
+def cafe_name_from_intro_html(html: str) -> str:
+    text = html or ""
+    match = re.search(
+        r'(?is)<table[^>]*class="[^"]*(?:tbl_cafe_info|cafe_info)[^"]*"[^>]*>(.*?)</table>',
+        text,
+    )
+    if match:
+        named = re.search(
+            r'(?is)<strong[^>]*class="[^"]*cafe_name[^"]*"[^>]*>(.*?)</strong>',
+            match.group(1),
+        )
+        if named:
+            name = clean_intro_cafe_name(named.group(1))
+            if name:
+                return name
+        row = re.search(
+            r"(?is)<th[^>]*>\s*카페\s*이름\s*</th>\s*<td[^>]*>(.*?)</td>",
+            match.group(1),
+        )
+        if row:
+            name = clean_intro_cafe_name(row.group(1))
+            if name:
+                return name
+    row = re.search(
+        r"(?is)<th[^>]*>\s*카페\s*이름\s*</th>\s*<td[^>]*>(.*?)</td>",
+        text,
+    )
+    if row:
+        name = clean_intro_cafe_name(row.group(1))
+        if name:
+            return name
+    named = re.search(
+        r'(?is)<(?:strong|span|a)[^>]*class="[^"]*cafe_name[^"]*"[^>]*>(.*?)</(?:strong|span|a)>',
+        text,
+    )
+    if named:
+        name = clean_intro_cafe_name(named.group(1))
+        if name:
+            return name
+    return cafe_name_from_intro_text(text)
+
+
+def cafe_name_from_intro_text(text: str) -> str:
+    lines = [clean_text(line) for line in (text or "").splitlines()]
+    lines = [line for line in lines if line]
+    for index, line in enumerate(lines):
+        if not re.fullmatch(r"카페\s*이름", line):
+            continue
+        for nxt in lines[index + 1 :]:
+            if nxt.casefold() in {"수정", "edit"}:
+                continue
+            name = clean_intro_cafe_name(nxt)
+            if name:
+                return name
+            break
+    match = re.search(
+        r"카페\s*이름\s+(.+?)(?:\s+수정\b|\s+카페\s+주소\b|$)",
+        re.sub(r"\s+", " ", text or ""),
+        flags=re.I,
+    )
+    if match:
+        return clean_intro_cafe_name(match.group(1))
+    return ""
+
+
+def cafe_name_from_info_payload(payload: Any) -> str:
+    for obj in walk_dicts(payload):
+        view = obj.get("cafeInfoView")
+        if isinstance(view, dict):
+            name = clean_intro_cafe_name(_first_str(view, CAFE_NAME_KEYS))
+            if name:
+                return name
+        if not any(key in obj for key in ("cafeUrl", "clubUrl", "cafeId", "clubId")):
+            continue
+        name = clean_intro_cafe_name(_first_str(obj, CAFE_NAME_KEYS))
+        if name:
+            return name
+    return ""
+
+
+def apply_intro_cafe_name(
+    rows: Iterable[CafePostRow], cafe_name: str
+) -> list[CafePostRow]:
+    name = clean_intro_cafe_name(cafe_name)
+    collected = list(rows)
+    if not name:
+        return collected
+    for row in collected:
+        row.cafe_name = name
+    return collected
+
+
 def post_from_payload(
     payload: Any,
     *,

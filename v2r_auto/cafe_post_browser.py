@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
+from urllib.parse import quote
 
 from .browser import V2RBrowser
 from .cafe_posts import (
@@ -10,10 +11,15 @@ from .cafe_posts import (
     CafeComment,
     CafePostError,
     CafePostRow,
+    apply_intro_cafe_name,
     article_ids_from_html,
     article_ids_from_payload,
     article_url,
     cafe_id_from_text,
+    cafe_name_from_info_payload,
+    cafe_name_from_intro_html,
+    cafe_name_from_intro_text,
+    clean_intro_cafe_name,
     comments_from_payload,
     cookies_show_naver_login,
     last_page_from_payload,
@@ -68,6 +74,34 @@ ARTICLE_DETAIL_TEMPLATES = (
 COMMENT_TEMPLATES = (
     "https://apis.naver.com/cafe-web/cafe-articleapi/v2/cafes/{cafe_id}/articles/{article_id}/comments/pages?requestFrom=A&orderBy=asc&page={page}",
 )
+INTRO_API_TEMPLATES = (
+    "https://apis.naver.com/cafe-web/cafe2/CafeGateInfo.json?clubid={cafe_id}",
+    "https://apis.naver.com/cafe-web/cafe2/CafeGateInfo.json?cluburl={slug}",
+)
+INTRO_PAGE_TEMPLATES = (
+    "https://cafe.naver.com/CafeProfileView.nhn?clubid={cafe_id}",
+    "https://cafe.naver.com/MyCafeIntro.nhn?clubid={cafe_id}",
+)
+INTRO_NAME_JS = r"""
+const text = (el) => (el && (el.innerText || el.textContent) || '').trim();
+const table = document.querySelector('table.tbl_cafe_info, table.cafe_info, table[class*="cafe_info"]');
+if (table) {
+  const named = table.querySelector('strong.cafe_name, .cafe_name');
+  if (named && text(named)) return {name: text(named), html: table.outerHTML};
+  for (const tr of table.querySelectorAll('tr')) {
+    const label = text(tr.querySelector('th'));
+    const value = text(tr.querySelector('td'));
+    if (/^카페\s*이름$/.test(label) && value) return {name: value, html: tr.outerHTML};
+  }
+  return {name: '', html: table.outerHTML};
+}
+for (const row of document.querySelectorAll('tr, li, .info_item, dl > div')) {
+  const label = text(row.querySelector('th, dt, .tit, .label'));
+  const value = text(row.querySelector('td, dd, .val, .value'));
+  if (/^카페\s*이름$/.test(label) && value) return {name: value, html: row.outerHTML || ''};
+}
+return {name: '', html: document.documentElement ? document.documentElement.outerHTML : ''};
+"""
 
 
 class CafePostSession:
@@ -76,6 +110,9 @@ class CafePostSession:
         self.logger = browser.logger
         self.target = target
         self.handle: str | None = None
+        self.intro_cafe_name = ""
+        self.rows: list[CafePostRow] = []
+        self._found_count = 0
 
     def open_login_window(self, should_stop: Callable[[], bool] | None = None) -> None:
         self.browser.start()
@@ -120,18 +157,14 @@ class CafePostSession:
     ) -> list[CafePostRow]:
         self.wait_for_naver_login(should_stop=should_stop)
         self._open_cafe_home()
-        article_ids = self._list_article_ids(should_stop)
-        if not article_ids:
-            raise CafePostError("모을 글을 찾지 못했습니다. 카페·게시판 주소를 확인해 주세요")
-        self.logger.info("글 %s개를 찾았습니다. 제목·본문·댓글을 읽습니다", len(article_ids))
-        rows: list[CafePostRow] = []
-        total = len(article_ids)
-        for index, article_id in enumerate(article_ids, start=1):
+        self._load_intro_cafe_name()
+        self.rows = []
+        self._found_count = 0
+        for article_id in self._iter_article_ids(should_stop):
             if should_stop and should_stop():
-                self.logger.info("중지를 눌러 여기까지 모은 글만 저장합니다")
                 break
             if progress:
-                progress(index - 1, total)
+                progress(len(self.rows), max(self._found_count, 1))
             try:
                 row = self._read_article(article_id)
             except Exception as exc:
@@ -140,40 +173,51 @@ class CafePostSession:
             if not row.title and not row.body:
                 self.logger.info("글 %s는 비어 있어 건너뜁니다", article_id)
                 continue
-            rows.append(row)
+            if self.intro_cafe_name:
+                row.cafe_name = self.intro_cafe_name
+            self.rows.append(row)
             if progress:
-                progress(index, total)
+                progress(len(self.rows), max(self._found_count, len(self.rows)))
             time.sleep(0.2)
-        return rows
+        apply_intro_cafe_name(self.rows, self.intro_cafe_name)
+        if should_stop and should_stop():
+            self.logger.info("중지를 눌러 여기까지 모은 글만 저장합니다")
+        elif not self.rows:
+            raise CafePostError("모을 글을 찾지 못했습니다. 카페·게시판 주소를 확인해 주세요")
+        return self.rows
 
-    def _list_article_ids(self, should_stop: Callable[[], bool] | None) -> list[int]:
+    def _iter_article_ids(
+        self, should_stop: Callable[[], bool] | None
+    ) -> Iterator[int]:
         cafe_id = self._require_cafe_id()
         menu_id = int(self.target.menu_id or 0)
         scope = "전체 게시글" if menu_id == 0 else f"게시판 {menu_id}"
-        self.logger.info("%s 목록을 읽습니다", scope)
-        found: list[int] = []
+        self.logger.info("%s 목록을 읽으면서 글을 모읍니다", scope)
         seen: set[int] = set()
         last_page = MAX_LIST_PAGES
         for page in range(1, MAX_LIST_PAGES + 1):
             if should_stop and should_stop():
-                break
+                return
             if page > last_page:
-                break
+                return
             payload, html = self._fetch_list_page(cafe_id, menu_id, page)
             ids = article_ids_from_payload(payload) if payload is not None else []
             if not ids:
                 ids = article_ids_from_html(html)
             fresh = [item for item in ids if item not in seen]
             if not fresh:
-                break
+                return
             for item in fresh:
                 seen.add(item)
-                found.append(item)
+            self._found_count = len(seen)
+            self.logger.info("목록 %s페이지에서 글 %s개를 더 찾았습니다", page, len(fresh))
             guessed = last_page_from_payload(payload) if payload is not None else None
             if guessed:
                 last_page = min(last_page, guessed)
-            self.logger.info("목록 %s페이지에서 글 %s개를 더 찾았습니다", page, len(fresh))
-        return found
+            for item in fresh:
+                if should_stop and should_stop():
+                    return
+                yield item
 
     def _fetch_list_page(
         self, cafe_id: int, menu_id: int, page: int
@@ -220,9 +264,101 @@ class CafePostSession:
             )
         else:
             row.comments = comments
-        if not row.cafe_name and self.target.slug:
-            row.cafe_name = self.target.slug
+        if self.intro_cafe_name:
+            row.cafe_name = self.intro_cafe_name
         return row
+
+    def _load_intro_cafe_name(self) -> None:
+        cafe_id = self.target.cafe_id
+        slug = self.target.slug
+        page_urls: list[str] = []
+        api_urls: list[str] = []
+        if cafe_id:
+            page_urls.extend(
+                template.format(cafe_id=cafe_id) for template in INTRO_PAGE_TEMPLATES
+            )
+            api_urls.append(INTRO_API_TEMPLATES[0].format(cafe_id=cafe_id, slug=slug))
+        if slug:
+            api_urls.append(INTRO_API_TEMPLATES[1].format(cafe_id=cafe_id or 0, slug=slug))
+        for url in page_urls:
+            result = self._fetch(url)
+            name = cafe_name_from_intro_html(str(result.get("text") or ""))
+            if name:
+                self.intro_cafe_name = name
+                self.logger.info("카페소개에서 카페 이름을 읽었습니다: %s", name)
+                return
+        name = self._scrape_intro_page()
+        if name:
+            self.intro_cafe_name = name
+            self.logger.info("카페소개에서 카페 이름을 읽었습니다: %s", name)
+            return
+        for url in api_urls:
+            result = self._fetch(url)
+            name = self._name_from_intro_response(str(result.get("text") or ""))
+            if name:
+                self.intro_cafe_name = name
+                self.logger.info("카페소개에서 카페 이름을 읽었습니다: %s", name)
+                return
+        self.logger.warning(
+            "카페소개에서 카페 이름을 찾지 못했습니다. 글에서 읽은 이름을 씁니다"
+        )
+
+    def _name_from_intro_response(self, text: str) -> str:
+        payload = loads_maybe_json(text)
+        if payload is not None:
+            name = cafe_name_from_info_payload(payload)
+            if name:
+                return name
+        return cafe_name_from_intro_html(text) or cafe_name_from_intro_text(text)
+
+    def _scrape_intro_page(self) -> str:
+        cafe_id = self.target.cafe_id
+        if not cafe_id:
+            return ""
+        iframe = quote(f"/CafeProfileView.nhn?clubid={cafe_id}", safe="")
+        intro_url = f"{self.target.home_url}?iframe_url={iframe}"
+        self._switch()
+        self.browser._navigate(intro_url, self.handle)
+        time.sleep(1.0)
+        html, raw = self._intro_page_bits()
+        name = clean_intro_cafe_name(str(raw.get("name") or ""))
+        if name:
+            return name
+        return (
+            cafe_name_from_intro_html(html)
+            or cafe_name_from_intro_text(str(raw.get("html") or html))
+        )
+
+    def _intro_page_bits(self) -> tuple[str, dict[str, Any]]:
+        assert self.browser.driver
+        driver = self.browser.driver
+        switched = False
+        try:
+            for frame in driver.find_elements(
+                "css selector", "iframe#cafe_main, iframe[name='cafe_main']"
+            ):
+                driver.switch_to.frame(frame)
+                switched = True
+                break
+        except Exception:
+            pass
+        raw: dict[str, Any] = {}
+        html = ""
+        try:
+            try:
+                raw = driver.execute_script(INTRO_NAME_JS) or {}
+            except Exception:
+                raw = {}
+            if not isinstance(raw, dict):
+                raw = {}
+            html = str(raw.get("html") or "") or self._page_html()
+        finally:
+            if switched:
+                try:
+                    driver.switch_to.default_content()
+                except Exception:
+                    pass
+        return html, raw
 
     def _read_comments(self, cafe_id: int, article_id: int) -> list[CafeComment]:
         found: list[CafeComment] = []

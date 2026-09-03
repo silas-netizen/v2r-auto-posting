@@ -10,6 +10,7 @@ from tkinter import messagebox, ttk
 from .cafe_post_browser import CafePostSession
 from .cafe_posts import (
     CafePostError,
+    apply_intro_cafe_name,
     excel_filename,
     parse_cafe_board_target,
     write_cafe_posts_xlsx,
@@ -81,6 +82,8 @@ class CafePostApp(AutomationApp):
             text=(
                 "네이버 로그인 창을 연 뒤, 카페 전체 글을 엑셀로 모읍니다. "
                 "특정 게시판만 필요하면 게시판 주소를 넣으세요. "
+                "카페명은 카페소개의 카페 이름입니다. "
+                "중지를 눌러도 지금까지 모은 글로 엑셀을 만듭니다. "
                 "엑셀 열은 카페명, 게시판, 작성자 닉네임, 제목, 본문, 댓글입니다. "
                 "댓글은 위에서부터 닉네임과 내용이 한 쌍씩 들어갑니다."
             ),
@@ -176,43 +179,67 @@ class CafePostApp(AutomationApp):
         self.progress_text.set("로그인 확인")
 
         def work() -> None:
+            session: CafePostSession | None = None
+            error: Exception | None = None
             try:
                 session = CafePostSession(self.browser, target)
-                rows = session.collect(
+                session.collect(
                     should_stop=self.stop_event.is_set,
                     progress=self._set_progress,
                 )
-                if not rows:
-                    self.ui_queue.put(
-                        ("error", ("수집 결과", "저장할 글이 없습니다"))
-                    )
-                    return
-                cafe_name = next((row.cafe_name for row in rows if row.cafe_name), "")
-                path = write_cafe_posts_xlsx(
-                    self.data_dir / excel_filename(cafe_name),
-                    rows,
-                )
-                self._open_excel(path)
-                self.logger.info("엑셀 %s개 글을 저장했습니다: %s", len(rows), path)
+            except CafePostError as exc:
+                error = exc
+                self.logger.error("%s", exc)
+            except Exception as exc:
+                error = exc
+                self.logger.exception("카페 글 수집 실패")
+            rows = list(session.rows) if session is not None else []
+            intro_name = session.intro_cafe_name if session is not None else ""
+            apply_intro_cafe_name(rows, intro_name)
+            if rows:
+                self._write_collected_excel(rows, intro_name)
+            elif self.stop_event.is_set():
                 self.ui_queue.put(
                     (
-                        "info",
+                        "error",
                         (
-                            "수집 완료",
-                            f"글 {len(rows)}개를 엑셀로 저장했습니다.\n{path}",
+                            "수집 중지",
+                            "아직 모은 글이 없어 엑셀을 만들지 못했습니다",
                         ),
                     )
                 )
-            except CafePostError as exc:
-                self.logger.error("%s", exc)
-                self.ui_queue.put(("error", ("수집 실패", str(exc))))
-            except Exception as exc:
-                self.logger.exception("카페 글 수집 실패")
-                self.ui_queue.put(("error", ("실행 실패", str(exc))))
-            finally:
-                self.ui_queue.put(("finished", None))
+            elif error is not None:
+                title = "수집 실패" if isinstance(error, CafePostError) else "실행 실패"
+                self.ui_queue.put(("error", (title, str(error))))
+            else:
+                self.ui_queue.put(("error", ("수집 결과", "저장할 글이 없습니다")))
+            self.ui_queue.put(("finished", None))
 
         self.worker = self.executor.submit(work)
+
+    def _write_collected_excel(
+        self, rows: list, intro_name: str = ""
+    ) -> None:
+        cafe_name = intro_name or next(
+            (row.cafe_name for row in rows if row.cafe_name), ""
+        )
+        path = write_cafe_posts_xlsx(
+            self.data_dir / excel_filename(cafe_name),
+            rows,
+        )
+        self._open_excel(path)
+        stopped = self.stop_event.is_set()
+        title = "수집 중지" if stopped else "수집 완료"
+        self.logger.info("엑셀 %s개 글을 저장했습니다: %s", len(rows), path)
+        self.ui_queue.put(
+            (
+                "info",
+                (
+                    title,
+                    f"글 {len(rows)}개를 엑셀로 저장했습니다.\n{path}",
+                ),
+            )
+        )
 
     @staticmethod
     def _open_excel(path: Path) -> None:
