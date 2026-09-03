@@ -89,11 +89,32 @@ def filter_exposed_rows(rows: list[ExposureRow]) -> list[ExposureRow]:
     return [row for row in rows if is_exposed_status(row.current_status)]
 
 
+def display_exposed_post_url(url: str) -> str:
+    """Keep the cafe post path through the article number. Drop ?art= tokens."""
+    href = str(url or "").strip()
+    if not href:
+        return ""
+    parsed = urlparse(_absolute_url(href))
+    path = parsed.path or ""
+    parts = [part for part in path.split("/") if part]
+    if parts and parts[-1].isdigit():
+        return f"{parsed.scheme}://{parsed.netloc}{path}"
+    lowered = [part.casefold() for part in parts]
+    if "articles" in lowered:
+        index = lowered.index("articles")
+        if index + 1 < len(parts) and parts[index + 1].isdigit():
+            keep = "/" + "/".join(parts[: index + 2])
+            return f"{parsed.scheme}://{parsed.netloc}{keep}"
+    if "?" in href and article_number(href) and "articleread" not in path.casefold():
+        return href.split("?", 1)[0]
+    return href.split("#", 1)[0]
+
+
 def unique_exposed_urls(urls: Iterable[str]) -> list[str]:
     found: list[str] = []
     seen: set[str] = set()
     for raw in urls:
-        href = str(raw or "").strip()
+        href = display_exposed_post_url(raw)
         if not href:
             continue
         key = article_dedupe_key(href) or href.casefold()
