@@ -54,13 +54,26 @@ CAFE_NAME_KEYS = ("cafeName", "clubName", "cafe")
 BODY_KEYS = ("contentHtml", "content", "articleContent", "body")
 COMMENT_ID_KEYS = ("commentId", "commentid", "comment_id")
 COMMENT_TEXT_KEYS = ("content", "commentContent", "comment", "body", "text")
+# lastNavigationPageNumber 는 화면에 보이는 페이지 숫자(보통 10)라서
+# 마지막 페이지로 쓰면 500개에서 끊깁니다. 쓰지 않습니다.
 PAGE_LAST_KEYS = (
-    "lastNavigationPageNumber",
     "lastPage",
     "totalPages",
     "pageCount",
     "endPage",
 )
+PAGE_SIZE_KEYS = ("pageSize", "perPage", "userDisplay")
+TOTAL_COUNT_KEYS = (
+    "totalCount",
+    "articleCount",
+    "itemCount",
+    "totalArticleCount",
+)
+MENU_ID_KEYS = ("menuId", "menuid", "boardId", "boardid")
+SKIP_MENU_TYPE_TOKENS = frozenset(
+    {"f", "folder", "group", "g", "link", "l", "all", "home", "a"}
+)
+LIST_PAGE_SIZE = 50
 DATE_KEYS = (
     "writeDateTimestamp",
     "writeDate",
@@ -329,16 +342,142 @@ def article_ids_from_html(html: str) -> list[int]:
     return found
 
 
+def _pages_from_total(total: int, size: int | None) -> int:
+    page_size = size if size and size > 0 else LIST_PAGE_SIZE
+    if total <= 0:
+        return 1
+    return max(1, (total + page_size - 1) // page_size)
+
+
+def _obj_has_article_list(obj: dict[str, Any]) -> bool:
+    return any(key in obj for key in ("articleList", "articles", "articleIds"))
+
+
+def list_total_from_payload(payload: Any) -> int | None:
+    """목록 JSON의 전체 글 수. 댓글 개수처럼 작은 totalCount 는 무시합니다."""
+    best: int | None = None
+    for obj in walk_dicts(payload):
+        total = _first_int(obj, TOTAL_COUNT_KEYS)
+        if total is None:
+            continue
+        size = _first_int(obj, PAGE_SIZE_KEYS)
+        if not (size or _obj_has_article_list(obj) or total > LIST_PAGE_SIZE):
+            continue
+        if best is None or total > best:
+            best = total
+    return best
+
+
 def last_page_from_payload(payload: Any) -> int | None:
+    """목록 JSON에서 마지막 페이지를 찾습니다.
+
+    화면에 찍힌 페이지 숫자(lastNavigationPageNumber)는 무시하고,
+    전체 글 수 ÷ 페이지 크기를 우선합니다. 전체 글 수가 없으면
+    lastPage 같은 값만 쓰고, 그마저 없으면 None 이라서 빈 페이지까지 이어 읽습니다.
+    """
+    total = list_total_from_payload(payload)
+    if total is not None:
+        size: int | None = None
+        for obj in walk_dicts(payload):
+            found = _first_int(obj, PAGE_SIZE_KEYS)
+            if found:
+                size = found
+                break
+        return _pages_from_total(total, size)
     best = 0
     for obj in walk_dicts(payload):
-        for key in PAGE_LAST_KEYS:
-            value = obj.get(key)
-            if isinstance(value, int) and value > best:
-                best = value
-            elif isinstance(value, str) and value.isdigit() and int(value) > best:
-                best = int(value)
+        page_hint = _first_int(obj, PAGE_LAST_KEYS)
+        if page_hint and page_hint > best:
+            best = page_hint
     return best or None
+
+
+def payload_looks_like_article_list(payload: Any) -> bool:
+    for obj in walk_dicts(payload):
+        if any(key in obj for key in ("articleList", "articles", "articleIds")):
+            return True
+    return False
+
+
+def next_list_last_page(
+    page: int,
+    id_count: int,
+    guessed_last: int | None,
+    *,
+    page_size: int = LIST_PAGE_SIZE,
+    cap: int = 400,
+) -> int:
+    """이번 페이지를 본 뒤, 더 볼 마지막 페이지를 정합니다.
+
+    글이 페이지 크기보다 적으면 여기가 끝입니다.
+    글이 가득 찼는데 추정 마지막 페이지가 지금과 같으면(보통 10페이지),
+    실제 글이 더 있는지 다음 페이지를 한 번 더 봅니다.
+    다음 페이지가 비면 호출 쪽에서 멈춥니다.
+    """
+    if id_count <= 0:
+        return max(1, page - 1) if page > 1 else 1
+    if id_count < page_size:
+        return page
+    if guessed_last and guessed_last > page:
+        return min(cap, guessed_last)
+    return cap
+
+
+def list_looks_truncated(
+    previous_id_count: int,
+    fresh_count: int,
+    *,
+    page_size: int = LIST_PAGE_SIZE,
+) -> bool:
+    """직전 페이지는 가득 찼는데 새 글이 없으면, 목록 API가 중간에 끊긴 것으로 봅니다."""
+    return previous_id_count >= page_size and fresh_count <= 0
+
+
+def board_menu_ids_from_payload(payload: Any) -> list[int]:
+    """사이드 메뉴 JSON에서 실제 게시판 번호만 모읍니다. 전체글·폴더는 빼습니다."""
+    found: list[int] = []
+    seen: set[int] = set()
+    for obj in walk_dicts(payload):
+        menu_id = _first_int(obj, MENU_ID_KEYS)
+        if menu_id is None or menu_id <= 0:
+            continue
+        name = ""
+        for key in ("menuName", "name", "boardName", "title"):
+            value = obj.get(key)
+            if isinstance(value, str) and value.strip():
+                name = value.strip()
+                break
+        if "전체글" in name or "전체 게시" in name:
+            continue
+        menu_type = str(
+            obj.get("menuType")
+            or obj.get("type")
+            or obj.get("menuTypeName")
+            or ""
+        ).strip().lower()
+        if menu_type in SKIP_MENU_TYPE_TOKENS:
+            continue
+        if menu_id in seen:
+            continue
+        seen.add(menu_id)
+        found.append(menu_id)
+    return found
+
+
+def menu_ids_from_html(html: str) -> list[int]:
+    found: list[int] = []
+    seen: set[int] = set()
+    for match in re.finditer(
+        r"(?:menuId|menuid|search\.menuid)=(\d+)",
+        html or "",
+        flags=re.IGNORECASE,
+    ):
+        menu_id = int(match.group(1))
+        if menu_id <= 0 or menu_id in seen:
+            continue
+        seen.add(menu_id)
+        found.append(menu_id)
+    return found
 
 
 def comments_from_payload(payload: Any) -> list[CafeComment]:

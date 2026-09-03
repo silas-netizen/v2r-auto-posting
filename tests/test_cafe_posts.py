@@ -6,6 +6,7 @@ from openpyxl import load_workbook
 
 from v2r_auto.cafe_posts import (
     EXCEL_HEADERS,
+    PAGE_LAST_KEYS,
     CafeComment,
     CafePostError,
     CafePostRow,
@@ -14,6 +15,7 @@ from v2r_auto.cafe_posts import (
     article_ids_from_html,
     article_ids_from_payload,
     article_url,
+    board_menu_ids_from_payload,
     cafe_name_from_info_payload,
     cafe_name_from_intro_html,
     decode_naver_payload,
@@ -22,9 +24,15 @@ from v2r_auto.cafe_posts import (
     excel_filename,
     format_comments,
     html_to_text,
+    last_page_from_payload,
+    list_looks_truncated,
+    list_total_from_payload,
+    menu_ids_from_html,
     newer_duplicate_rows,
+    next_list_last_page,
     parse_cafe_board_target,
     parse_cafe_datetime,
+    payload_looks_like_article_list,
     post_from_payload,
     write_cafe_posts_xlsx,
 )
@@ -182,6 +190,8 @@ def test_gui_mentions_excel_and_login() -> None:
     assert "_write_collected_excel" in source
     assert "중복 글 삭제" in source
     assert "제목·본문이 같은 최신 글 삭제" in source
+    assert "마지막 페이지까지" in source
+    assert "글이 없는 페이지는 더 보지 않습니다" in source
 
 
 def test_cp949_intro_html_decodes_to_hangul() -> None:
@@ -266,6 +276,87 @@ def test_browser_reads_intro_name_and_saves_on_stop() -> None:
     assert "중지를 눌러 여기까지 모은 글만 저장합니다" in source
     assert "row.cafe_name = self.target.slug" not in source
     assert "TextDecoder('euc-kr')" in source
+    assert "next_list_last_page" in source
+    assert "_list_board_menu_ids" in source
+    assert "글이 있는 마지막 페이지까지 모았습니다" in source
+    assert "더 이상 새 글이 없어 목록을 끝냅니다" in source
+
+
+def test_last_page_uses_total_not_navigation_ten() -> None:
+    payload = {
+        "result": {
+            "articleList": [{"articleId": 1, "subject": "글"}],
+            "pageInfo": {
+                "pageSize": 50,
+                "lastNavigationPageNumber": 10,
+                "lastPage": 10,
+                "totalCount": 1368,
+            },
+        }
+    }
+    assert "lastNavigationPageNumber" not in PAGE_LAST_KEYS
+    assert list_total_from_payload(payload) == 1368
+    assert last_page_from_payload(payload) == 28
+
+
+def test_last_page_ignores_navigation_only_payload() -> None:
+    payload = {"pageInfo": {"lastNavigationPageNumber": 10}}
+    assert last_page_from_payload(payload) is None
+    assert list_total_from_payload(payload) is None
+
+
+def test_comment_total_does_not_hide_article_total() -> None:
+    payload = {
+        "result": {
+            "articleList": [{"articleId": 1}],
+            "pageInfo": {
+                "pageSize": 50,
+                "lastNavigationPageNumber": 10,
+                "totalCount": 1368,
+            },
+            "comments": {"totalCount": 3},
+        }
+    }
+    assert last_page_from_payload(payload) == 28
+
+
+def test_full_page_keeps_checking_past_guessed_ten() -> None:
+    assert next_list_last_page(10, 50, 10) == 400
+    assert next_list_last_page(1, 50, 28) == 28
+    assert next_list_last_page(28, 18, 28) == 28
+    assert next_list_last_page(11, 0, 28) == 10
+
+
+def test_empty_after_full_page_looks_truncated() -> None:
+    assert list_looks_truncated(50, 0) is True
+    assert list_looks_truncated(18, 0) is False
+    assert list_looks_truncated(50, 12) is False
+
+
+def test_empty_article_list_is_trusted() -> None:
+    payload = {"result": {"articleList": []}}
+    assert payload_looks_like_article_list(payload) is True
+    assert article_ids_from_payload(payload) == []
+
+
+def test_board_menu_ids_skip_folder_and_all() -> None:
+    payload = {
+        "message": {
+            "result": {
+                "menus": [
+                    {"menuId": 0, "menuName": "전체글", "menuType": "A"},
+                    {"menuId": 1, "menuName": "공지", "menuType": "B"},
+                    {"menuId": 2, "menuName": "자유게시판", "menuType": "B"},
+                    {"menuId": 10, "menuName": "앨범모음", "menuType": "F"},
+                    {"menuId": 11, "menuName": "외부링크", "menuType": "L"},
+                ]
+            }
+        }
+    }
+    assert board_menu_ids_from_payload(payload) == [1, 2]
+    assert menu_ids_from_html(
+        'href="/ArticleList.nhn?search.menuid=1" menuid=2 menuid=0'
+    ) == [1, 2]
 
 
 def test_stop_still_writes_partial_excel(tmp_path: Path) -> None:
