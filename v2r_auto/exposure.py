@@ -6,7 +6,8 @@ import re
 import time
 from dataclasses import dataclass
 from html import unescape
-from typing import Protocol
+from pathlib import Path
+from typing import Iterable, Protocol
 from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 
 STATUS_EXPOSED = "노출완"
@@ -78,6 +79,50 @@ class NaverSearchClient(Protocol):
 
 def compact_text(value: str) -> str:
     return re.sub(r"\s+", "", value or "").casefold()
+
+
+def is_exposed_status(value: str) -> bool:
+    return compact_text(value) == compact_text(STATUS_EXPOSED)
+
+
+def filter_exposed_rows(rows: list[ExposureRow]) -> list[ExposureRow]:
+    return [row for row in rows if is_exposed_status(row.current_status)]
+
+
+def unique_exposed_urls(urls: Iterable[str]) -> list[str]:
+    found: list[str] = []
+    seen: set[str] = set()
+    for raw in urls:
+        href = str(raw or "").strip()
+        if not href:
+            continue
+        key = article_dedupe_key(href) or href.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(href)
+    return found
+
+
+def format_exposed_post_urls(urls: Iterable[str]) -> str:
+    items = unique_exposed_urls(urls)
+    if not items:
+        return ""
+    return "\n".join(items) + "\n"
+
+
+def write_exposed_post_urls(path: Path, urls: Iterable[str]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(format_exposed_post_urls(urls), encoding="utf-8")
+    return path
+
+
+def open_text_notepad(path: Path) -> None:
+    import subprocess
+    import sys
+
+    if sys.platform == "win32":
+        subprocess.Popen(["notepad.exe", str(path)])
 
 
 def spacing_keyword_key(keyword: str) -> str:
@@ -745,6 +790,7 @@ class ExposureChecker:
         self.delay_seconds = delay_seconds
         self._queue: list[ExposureRow] = []
         self._collapsed_keys: set[str] = set()
+        self.exposed_urls: list[str] = []
 
     def inspect_rows(self) -> list[ExposureRow]:
         return self.notion.load_rows()
@@ -757,10 +803,14 @@ class ExposureChecker:
         stop_event=None,
         pause_event=None,
         progress=None,
+        urls_only: bool = False,
     ) -> list[ExposureRow]:
+        if urls_only:
+            rows = filter_exposed_rows(rows)
         total = len(rows)
         self._queue = rows
         self._collapsed_keys = set()
+        self.exposed_urls = []
         for index, row in enumerate(rows, start=1):
             if stop_event is not None and stop_event.is_set():
                 self.logger.info("중지 요청으로 노출 검사를 멈춥니다")
@@ -786,7 +836,7 @@ class ExposureChecker:
                 continue
             if progress:
                 progress(index - 1, total)
-            self._check_one(row, dry_run=dry_run)
+            self._check_one(row, dry_run=dry_run, urls_only=urls_only)
             self._wait_while_paused(pause_event, stop_event)
             if self.delay_seconds:
                 self._interruptible_delay(
@@ -794,7 +844,7 @@ class ExposureChecker:
                 )
             if progress:
                 progress(index, total)
-        if not dry_run and hasattr(self.notion, "write_volume_totals"):
+        if not urls_only and not dry_run and hasattr(self.notion, "write_volume_totals"):
             try:
                 self.notion.write_volume_totals()
             except Exception as exc:
@@ -827,13 +877,17 @@ class ExposureChecker:
                 return
             time.sleep(0.1)
 
-    def _check_one(self, row: ExposureRow, *, dry_run: bool) -> None:
+    def _check_one(
+        self, row: ExposureRow, *, dry_run: bool, urls_only: bool = False
+    ) -> None:
         keyword = strip_parenthetical(row.keyword)
         self.logger.info("키워드 검색: %s", keyword)
         try:
             html = self.naver.search_integrated(keyword)
         except Exception as exc:
             self.logger.error("네이버 검색 실패 (%s): %s", keyword, exc)
+            if urls_only:
+                return
             self._write_result(
                 row,
                 STATUS_HIDDEN,
@@ -875,6 +929,7 @@ class ExposureChecker:
                 hidden_names,
             )
         cafe_name = ""
+        exposed_url = ""
         status = STATUS_HIDDEN
         reason = "통합검색에 우리 카페 없음"
         if not hits:
@@ -911,6 +966,7 @@ class ExposureChecker:
                 matched = brand_found(post_text, self.brands)
                 if matched:
                     cafe_name = hit.cafe_name
+                    exposed_url = hit.url
                     status = STATUS_EXPOSED
                     reason = f"{hit.cafe_name} 글에서 식별어 {matched}"
                     self.logger.info(
@@ -930,6 +986,14 @@ class ExposureChecker:
             len(visible_urls),
             reason,
         )
+        if exposed_url:
+            self.exposed_urls.append(exposed_url)
+        if urls_only:
+            if exposed_url:
+                self.logger.info("노출완 글 링크: %s", exposed_url)
+            else:
+                self.logger.info("노출완 글 링크 없음: %s / %s", keyword, reason)
+            return
         first_cafe = hits[0].cafe_name if hits else ""
         canonical = str(getattr(self.naver, "last_used_query", "") or keyword).strip()
         if not dry_run and hasattr(self.notion, "collapse_spacing_duplicates"):

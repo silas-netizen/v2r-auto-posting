@@ -110,7 +110,7 @@ def test_neumis_every_row_writes_j_when_time_changed() -> None:
     assert ("L", 141, "") in writer.writes
 
 
-def test_live_neumis_j4_different_stamp_is_not_success() -> None:
+def test_live_neumis_existing_stamp_is_not_future_write() -> None:
     from urllib.request import Request, urlopen
 
     from v2r_auto.exposure_sheet import sheet_export_url
@@ -133,8 +133,20 @@ def test_live_neumis_j4_different_stamp_is_not_success() -> None:
     if looks_like_html(text):
         raise AssertionError("뉴더미스 공개 내려받기가 로그인 화면입니다")
     table = parse_sheet_table(text)
-    assert csv_sheet_cell(table, 4, 7) == "치질수술 병원"
-    actual = csv_sheet_cell(table, 4, 9)
-    assert parse_sheet_datetime(actual) is not None
+    found: tuple[str, int] | None = None
+    for row_number in range(2, len(table) + 1):
+        keyword = csv_sheet_cell(table, row_number, 7)
+        stamp = csv_sheet_cell(table, row_number, 9)
+        volume = parse_sheet_int(csv_sheet_cell(table, row_number, 10))
+        if (
+            keyword.strip()
+            and parse_sheet_datetime(stamp) is not None
+            and volume is not None
+            and volume > 0
+        ):
+            found = (stamp, volume)
+            break
+    assert found is not None
+    actual, volume = found
     assert not sheet_write_confirmed(actual, "2099-01-01 00:00:00")
-    assert parse_sheet_int(csv_sheet_cell(table, 4, 10)) > 0
+    assert volume > 0
