@@ -1663,11 +1663,10 @@ class V2RBrowser:
 
         selected_input = inputs[-1]
         selected_input.send_keys(str(image_path.resolve()))
-        selected_value = str(selected_input.get_attribute("value") or "")
-        if not selected_value:
-            raise AutomationError(
-                f"SE-ONE 사진 입력칸에 파일 경로가 전달되지 않았습니다: {image_path.name}"
-            )
+        # SmartEditor replaces its file input immediately after accepting a
+        # file. Never read the old WebElement again; its detachment is normal.
+        # The uploaded image component below is the authoritative success
+        # signal.
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             try:

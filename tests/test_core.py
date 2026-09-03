@@ -707,6 +707,63 @@ def test_corrupt_image_is_rejected_before_opening_editor(tmp_path: Path) -> None
         V2RBrowser._validate_upload_image(image_path)
 
 
+def test_image_input_detaching_after_send_is_treated_as_normal(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "detached.jpg"
+    Image.new("RGB", (10, 10), "white").save(image_path)
+    state = {"selected": False}
+
+    class DetachingInput:
+        id = "file-input"
+
+        def send_keys(self, value):
+            state["selected"] = True
+
+        def get_attribute(self, name):
+            if state["selected"]:
+                raise StaleElementReferenceException("input replaced")
+            return ""
+
+    class ImageBrowser(V2RBrowser):
+        def _get_seone_document(self):
+            components = []
+            if state["selected"]:
+                components.append(
+                    {
+                        "@ctype": "image",
+                        "id": "uploaded",
+                        "src": "https://example.test/detached.jpg",
+                        "path": "/detached.jpg",
+                        "fileName": "detached.jpg",
+                        "fileSize": 100,
+                    }
+                )
+            return {"document": {"components": components}}
+
+        def _wait_for_seone_idle(self):
+            return None
+
+        def _focus_seone_text_paragraph(self):
+            return None
+
+        def _seone_photo_button(self):
+            return None
+
+        def _seone_image_inputs(self):
+            return [DetachingInput()]
+
+        def _seone_upload_error_text(self):
+            return ""
+
+    browser = object.__new__(ImageBrowser)
+    browser.driver = object()
+
+    uploaded = browser._upload_one_seone_image(image_path)
+
+    assert uploaded["id"] == "uploaded"
+
+
 def test_api_capture_summarizes_payload_keys_without_values() -> None:
     assert V2RBrowser._request_payload_summary('{"title":"비밀 글","body":"본문"}') == {
         "format": "json",
