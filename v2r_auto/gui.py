@@ -472,6 +472,18 @@ class AutomationApp(tk.Tk):
         else:
             os.system(f'xdg-open "{path}"')
 
+    @staticmethod
+    def _open_log_file(path: Path) -> None:
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("", encoding="utf-8")
+        if sys.platform == "win32":
+            os.startfile(path)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            os.system(f'open "{path}"')
+        else:
+            os.system(f'xdg-open "{path}"')
+
     def _on_close(self) -> None:
         self.stop_event.set()
         self.executor.submit(self.browser.close)

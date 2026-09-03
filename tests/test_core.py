@@ -3,6 +3,7 @@ from pathlib import Path
 import threading
 
 import pytest
+from PIL import Image
 from selenium.common.exceptions import StaleElementReferenceException
 
 from v2r_auto.browser import (
@@ -536,7 +537,7 @@ def test_multiple_images_share_one_prepared_se_one_editor(
         tmp_path / "532357.jpg",
     ]
     for image_path in image_paths:
-        image_path.write_bytes(b"image")
+        Image.new("RGB", (10, 10), "white").save(image_path)
     state = {
         "prepared": 0,
         "clicked": 0,
@@ -638,6 +639,72 @@ def test_multiple_images_share_one_prepared_se_one_editor(
         "uploaded-image-1",
         "uploaded-image-2",
     ]
+
+
+def test_image_upload_failure_reopens_editor_and_retries_all_images(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "retry.jpg"
+    Image.new("RGB", (10, 10), "white").save(image_path)
+    state = {"prepared": 0, "uploaded": 0}
+
+    class RetryImageBrowser(V2RBrowser):
+        def _prepare_seone_image_editor(self, job, destination):
+            state["prepared"] += 1
+
+        def _upload_one_seone_image(self, image_path, *, timeout_seconds=45):
+            state["uploaded"] += 1
+            if state["prepared"] == 1:
+                raise AutomationError("일시적인 업로드 정지")
+            return {
+                "@ctype": "image",
+                "id": "retried-image",
+                "src": "https://example.test/retry.jpg",
+                "path": "/retry.jpg",
+                "fileName": "retry.jpg",
+                "fileSize": 100,
+            }
+
+    browser = object.__new__(RetryImageBrowser)
+    browser.driver = object()
+    browser.logger = __import__("logging").getLogger("image-retry-test")
+    job = AffiliateJob(
+        row_number=137,
+        keyword="키워드",
+        article=ParsedArticle(
+            title="제목",
+            body="본문\n{키워드}",
+            keyword="키워드",
+            tag="키워드",
+            comments=[],
+        ),
+        cafe="씨씨앙",
+        account="writer",
+        article_type="질문형",
+    )
+
+    uploaded = browser.upload_affiliate_images(
+        job,
+        {
+            "cafe_id": 25016228,
+            "cafe_name": "씨씨앙",
+            "naver_login_id": "writer",
+            "menu_id": 328,
+            "menu_name": "자유 수다방",
+        },
+        [image_path],
+    )
+
+    assert state == {"prepared": 2, "uploaded": 2}
+    assert uploaded[0]["id"] == "retried-image"
+
+
+def test_corrupt_image_is_rejected_before_opening_editor(tmp_path: Path) -> None:
+    image_path = tmp_path / "corrupt.jpg"
+    image_path.write_bytes(b"not-an-image")
+
+    with pytest.raises(AutomationError, match="손상"):
+        V2RBrowser._validate_upload_image(image_path)
 
 
 def test_api_capture_summarizes_payload_keys_without_values() -> None:

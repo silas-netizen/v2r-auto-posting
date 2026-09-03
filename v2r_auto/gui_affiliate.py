@@ -114,6 +114,18 @@ class AffiliateAutomationApp(AutomationApp):
             state=tk.DISABLED,
         )
         self.pause_button.pack(side=tk.LEFT)
+        ttk.Button(
+            actions,
+            text="로그 메모장",
+            command=lambda: self._open_log_file(
+                self.log_dir / "v2r-auto.log"
+            ),
+        ).pack(side=tk.RIGHT)
+        ttk.Button(
+            actions,
+            text="저장 폴더",
+            command=lambda: self._open_folder(self.data_dir),
+        ).pack(side=tk.RIGHT, padx=6)
 
         progress_frame = ttk.Frame(outer)
         progress_frame.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 10))

@@ -28,6 +28,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from PIL import Image, UnidentifiedImageError
 
 from .content import ParsedArticle
 from .images import strip_placeholders
@@ -1431,6 +1432,74 @@ class V2RBrowser:
             for image in images
         )
 
+    @staticmethod
+    def _media_component_key(component: dict) -> str:
+        return str(
+            component.get("id")
+            or component.get("src")
+            or json.dumps(component, ensure_ascii=False, sort_keys=True)
+        )
+
+    @staticmethod
+    def _validate_upload_image(image_path: Path) -> None:
+        if not image_path.is_file():
+            raise AutomationError(f"사진 파일을 찾지 못했습니다: {image_path}")
+        if image_path.stat().st_size <= 0:
+            raise AutomationError(f"사진 파일이 비어 있습니다: {image_path.name}")
+        try:
+            with Image.open(image_path) as image:
+                image.verify()
+        except (OSError, UnidentifiedImageError) as exc:
+            raise AutomationError(
+                f"사진 파일이 손상됐거나 지원하지 않는 형식입니다: {image_path.name}"
+            ) from exc
+
+    def _seone_upload_error_text(self) -> str:
+        assert self.driver
+        selectors = (
+            "[role='alert']",
+            ".n-message--error",
+            ".n-notification--error",
+            ".n-alert--error",
+        )
+        try:
+            elements = [
+                item
+                for selector in selectors
+                for item in self.driver.find_elements(By.CSS_SELECTOR, selector)
+            ]
+        except Exception:
+            return ""
+        for element in elements:
+            try:
+                text = element.text.strip()
+                if element.is_displayed() and text:
+                    return text
+            except StaleElementReferenceException:
+                continue
+        return ""
+
+    def _save_seone_failure_screenshot(
+        self,
+        job: AffiliateJob,
+        attempt: int,
+    ) -> Path | None:
+        assert self.driver
+        config = getattr(self, "config", None)
+        if config is None:
+            return None
+        path = (
+            config.download_dir.parent
+            / "logs"
+            / f"seone-image-row{job.row_number}-attempt{attempt}.png"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.driver.save_screenshot(str(path))
+        except Exception:
+            return None
+        return path
+
     def _prepare_seone_image_editor(
         self,
         job: AffiliateJob,
@@ -1550,11 +1619,15 @@ class V2RBrowser:
     def _upload_one_seone_image(
         self,
         image_path: Path,
+        *,
+        timeout_seconds: float = 45,
     ) -> dict:
         assert self.driver
-        existing_media_count = len(
-            self._media_components(self._get_seone_document())
-        )
+        existing_media = self._media_components(self._get_seone_document())
+        existing_media_keys = {
+            self._media_component_key(component)
+            for component in existing_media
+        }
 
         self._wait_for_seone_idle()
         self._focus_seone_text_paragraph()
@@ -1588,19 +1661,41 @@ class V2RBrowser:
         elif not inputs:
             raise AutomationError("SE-ONE 사진 첨부 버튼을 찾지 못했습니다")
 
-        inputs[-1].send_keys(str(image_path.resolve()))
-        deadline = time.monotonic() + 60
+        selected_input = inputs[-1]
+        selected_input.send_keys(str(image_path.resolve()))
+        selected_value = str(selected_input.get_attribute("value") or "")
+        if not selected_value:
+            raise AutomationError(
+                f"SE-ONE 사진 입력칸에 파일 경로가 전달되지 않았습니다: {image_path.name}"
+            )
+        deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             try:
                 media = self._media_components(self._get_seone_document())
-                if (
-                    len(media) > existing_media_count
-                    and self._image_component_ready(media[-1])
-                ):
+                new_media = [
+                    component
+                    for component in media
+                    if self._media_component_key(component)
+                    not in existing_media_keys
+                ]
+                ready = next(
+                    (
+                        component
+                        for component in new_media
+                        if self._image_component_ready(component)
+                    ),
+                    None,
+                )
+                if ready is not None:
                     self._wait_for_seone_idle()
-                    return media[-1]
+                    return ready
             except AutomationError:
                 pass
+            upload_error = self._seone_upload_error_text()
+            if upload_error:
+                raise AutomationError(
+                    f"SE-ONE 사진 업로드 오류: {upload_error[:180]}"
+                )
             time.sleep(0.5)
         raise AutomationError(f"SE-ONE 이미지 업로드 완료를 확인하지 못했습니다: {image_path.name}")
 
@@ -1611,23 +1706,51 @@ class V2RBrowser:
         image_paths: list[Path],
     ) -> list[dict]:
         """Upload through V2R's SmartEditor, while article submission stays API-based."""
-        self._prepare_seone_image_editor(job, destination)
-        uploaded: list[dict] = []
-        for index, image_path in enumerate(image_paths, start=1):
-            self.logger.info(
-                "행 %s 수정 본문 이미지 업로드 (%s/%s): %s",
-                job.row_number,
-                index,
-                len(image_paths),
-                image_path.name,
-            )
+        for image_path in image_paths:
+            self._validate_upload_image(image_path)
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            uploaded: list[dict] = []
             try:
-                uploaded.append(self._upload_one_seone_image(image_path))
+                self._prepare_seone_image_editor(job, destination)
+                for index, image_path in enumerate(image_paths, start=1):
+                    self.logger.info(
+                        "행 %s 수정 본문 이미지 업로드 (%s/%s): %s",
+                        job.row_number,
+                        index,
+                        len(image_paths),
+                        image_path.name,
+                    )
+                    uploaded.append(
+                        self._upload_one_seone_image(
+                            image_path,
+                            timeout_seconds=45,
+                        )
+                    )
+                return uploaded
             except Exception as exc:
+                last_error = exc
+                screenshot = self._save_seone_failure_screenshot(job, attempt)
+                if screenshot:
+                    self.logger.warning(
+                        "행 %s 사진 실패 화면 저장: %s",
+                        job.row_number,
+                        screenshot,
+                    )
+                if attempt < 3:
+                    self.logger.warning(
+                        "행 %s 사진 첨부 전체 재시도 (%s/3): "
+                        "SE-ONE 화면을 새로 열고 모든 사진을 다시 첨부합니다 / %s",
+                        job.row_number,
+                        attempt + 1,
+                        exc,
+                    )
+                    continue
                 raise AutomationError(
-                    f"{image_path.name} 사진 첨부 실패: {exc}"
+                    "SE-ONE 화면 전체 재시도 후에도 사진 첨부 실패: "
+                    f"{exc}"
                 ) from exc
-        return uploaded
+        raise AutomationError(f"사진 첨부 실패: {last_error}")
 
     def _get_affiliate_publisher(self):
         from .affiliate_api import AffiliateApiPublisher
