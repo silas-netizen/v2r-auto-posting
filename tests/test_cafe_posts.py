@@ -9,9 +9,12 @@ from v2r_auto.cafe_posts import (
     CafeComment,
     CafePostError,
     CafePostRow,
+    apply_intro_cafe_name,
     article_ids_from_html,
     article_ids_from_payload,
     article_url,
+    cafe_name_from_info_payload,
+    cafe_name_from_intro_html,
     comments_from_payload,
     excel_filename,
     format_comments,
@@ -165,3 +168,84 @@ def test_gui_mentions_excel_and_login() -> None:
     assert "네이버 로그인" in source
     assert "게시판 주소(선택)" in source
     assert "엑셀" in source
+    assert "카페소개" in source
+    assert "중지를 눌러도" in source
+    assert "_write_collected_excel" in source
+
+
+def test_intro_html_uses_cafe_name_row() -> None:
+    html = """
+    <table class="tbl_cafe_info">
+      <tr>
+        <th scope="row">카페 이름</th>
+        <td><strong class="cafe_name">웨딩 노트</strong> <a>수정</a></td>
+      </tr>
+      <tr>
+        <th scope="row">카페 주소</th>
+        <td>https://cafe.naver.com/sharfova</td>
+      </tr>
+      <tr>
+        <th scope="row">카페 매니저</th>
+        <td>웨딩 노트M</td>
+      </tr>
+    </table>
+    """
+    assert cafe_name_from_intro_html(html) == "웨딩 노트"
+
+
+def test_intro_text_skips_address_and_manager() -> None:
+    text = """
+    카페소개
+    카페 이름
+    웨딩 노트
+    수정
+    카페 주소
+    https://cafe.naver.com/sharfova
+    카페 매니저
+    웨딩 노트M
+    """
+    assert cafe_name_from_intro_html(text) == "웨딩 노트"
+
+
+def test_intro_payload_reads_cafe_info_view() -> None:
+    payload = {
+        "message": {
+            "result": {
+                "cafeInfoView": {
+                    "cafeId": 123,
+                    "cafeName": "웨딩 노트",
+                    "cafeUrl": "sharfova",
+                }
+            }
+        }
+    }
+    assert cafe_name_from_info_payload(payload) == "웨딩 노트"
+
+
+def test_apply_intro_name_overwrites_rows() -> None:
+    rows = [
+        CafePostRow("sharfova", "자유", "닉", "제목1", "본문1"),
+        CafePostRow("웨딩노트", "공지", "닉", "제목2", "본문2"),
+    ]
+    apply_intro_cafe_name(rows, "웨딩 노트")
+    assert [row.cafe_name for row in rows] == ["웨딩 노트", "웨딩 노트"]
+
+
+def test_browser_reads_intro_name_and_saves_on_stop() -> None:
+    source = Path("v2r_auto/cafe_post_browser.py").read_text(encoding="utf-8")
+    assert "CafeProfileView.nhn" in source
+    assert "_load_intro_cafe_name" in source
+    assert "중지를 눌러 여기까지 모은 글만 저장합니다" in source
+    assert "row.cafe_name = self.target.slug" not in source
+
+
+def test_stop_still_writes_partial_excel(tmp_path: Path) -> None:
+    rows = apply_intro_cafe_name(
+        [
+            CafePostRow("임시", "자유", "닉", "제목", "본문"),
+        ],
+        "웨딩 노트",
+    )
+    path = write_cafe_posts_xlsx(tmp_path / excel_filename("웨딩 노트"), rows)
+    book = load_workbook(path)
+    assert book.active["A2"].value == "웨딩 노트"
