@@ -40,7 +40,20 @@ const url = arguments[0];
 const done = arguments[arguments.length - 1];
 fetch(url, {credentials: 'include', headers: {Accept: 'application/json,text/html,*/*'}})
   .then(async (response) => {
-    const text = await response.text();
+    const buf = await response.arrayBuffer();
+    const ctype = (response.headers.get('content-type') || '').toLowerCase();
+    const utf8 = new TextDecoder('utf-8').decode(buf);
+    let text = utf8;
+    const namedKr = /euc-kr|ks_c_5601|ksc5601|korean/.test(ctype);
+    const maybeHtml = !ctype.includes('json') && utf8.includes('\uFFFD');
+    if (namedKr || maybeHtml) {
+      try {
+        const kr = new TextDecoder('euc-kr').decode(buf);
+        const utfBroken = utf8.split('\uFFFD').length;
+        const krBroken = kr.split('\uFFFD').length;
+        if (namedKr || krBroken < utfBroken) text = kr;
+      } catch (error) {}
+    }
     done({ok: response.ok, status: response.status, text: text});
   })
   .catch((error) => done({ok: false, status: 0, text: String(error)}));
@@ -578,13 +591,6 @@ class CafePostSession:
             api_urls.append(INTRO_API_TEMPLATES[0].format(cafe_id=cafe_id, slug=slug))
         if slug:
             api_urls.append(INTRO_API_TEMPLATES[1].format(cafe_id=cafe_id or 0, slug=slug))
-        for url in page_urls:
-            result = self._fetch(url)
-            name = cafe_name_from_intro_html(str(result.get("text") or ""))
-            if name:
-                self.intro_cafe_name = name
-                self.logger.info("카페소개에서 카페 이름을 읽었습니다: %s", name)
-                return
         name = self._scrape_intro_page()
         if name:
             self.intro_cafe_name = name
@@ -593,6 +599,13 @@ class CafePostSession:
         for url in api_urls:
             result = self._fetch(url)
             name = self._name_from_intro_response(str(result.get("text") or ""))
+            if name:
+                self.intro_cafe_name = name
+                self.logger.info("카페소개에서 카페 이름을 읽었습니다: %s", name)
+                return
+        for url in page_urls:
+            result = self._fetch(url)
+            name = cafe_name_from_intro_html(str(result.get("text") or ""))
             if name:
                 self.intro_cafe_name = name
                 self.logger.info("카페소개에서 카페 이름을 읽었습니다: %s", name)

@@ -16,6 +16,7 @@ from v2r_auto.cafe_posts import (
     article_url,
     cafe_name_from_info_payload,
     cafe_name_from_intro_html,
+    decode_naver_payload,
     comments_from_payload,
     duplicate_content_key,
     excel_filename,
@@ -183,6 +184,23 @@ def test_gui_mentions_excel_and_login() -> None:
     assert "제목·본문이 같은 최신 글 삭제" in source
 
 
+def test_cp949_intro_html_decodes_to_hangul() -> None:
+    html = (
+        '<table class="tbl_cafe_info">'
+        "<tr><th scope=\"row\">카페 이름</th>"
+        '<td><strong class="cafe_name">웨딩 노트</strong></td></tr>'
+        "</table>"
+    )
+    raw = html.encode("cp949")
+    broken = raw.decode("utf-8", errors="replace")
+    assert cafe_name_from_intro_html(broken) == ""
+    assert cafe_name_from_intro_html(decode_naver_payload(raw, "text/html")) == "웨딩 노트"
+    assert apply_intro_cafe_name(
+        [CafePostRow("임시", "자유", "닉", "제목", "본문")],
+        broken,
+    )[0].cafe_name == "임시"
+
+
 def test_intro_html_uses_cafe_name_row() -> None:
     html = """
     <table class="tbl_cafe_info">
@@ -247,6 +265,7 @@ def test_browser_reads_intro_name_and_saves_on_stop() -> None:
     assert "_load_intro_cafe_name" in source
     assert "중지를 눌러 여기까지 모은 글만 저장합니다" in source
     assert "row.cafe_name = self.target.slug" not in source
+    assert "TextDecoder('euc-kr')" in source
 
 
 def test_stop_still_writes_partial_excel(tmp_path: Path) -> None:

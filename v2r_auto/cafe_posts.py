@@ -357,6 +357,29 @@ def comments_from_payload(payload: Any) -> list[CafeComment]:
     return comments
 
 
+def decode_naver_payload(data: bytes, content_type: str = "") -> str:
+    raw = bytes(data or b"")
+    ctype = (content_type or "").lower()
+    utf8 = raw.decode("utf-8", errors="replace")
+    if "json" in ctype or "utf-8" in ctype:
+        return utf8
+    korean = raw.decode("cp949", errors="replace")
+    if any(token in ctype for token in ("euc-kr", "ks_c_5601", "ksc5601", "korean")):
+        return korean
+    if utf8.count("\ufffd") > korean.count("\ufffd"):
+        return korean
+    return utf8
+
+
+def looks_broken_cafe_name(value: str) -> bool:
+    name = str(value or "")
+    if not name or "\ufffd" in name:
+        return True
+    if re.search(r"[가-힣]", name):
+        return False
+    return bool(re.search(r"[\u0100-\u024f]", name))
+
+
 def clean_intro_cafe_name(value: str) -> str:
     name = clean_text(html_to_text(value))
     name = re.sub(r"(?:\s*(?:수정|EDIT))+$", "", name, flags=re.I).strip()
@@ -365,6 +388,8 @@ def clean_intro_cafe_name(value: str) -> str:
     if not name or name.startswith("http"):
         return ""
     if re.fullmatch(r"카페\s*(이름|주소|매니저|소개|주제|창립일|설명)", name):
+        return ""
+    if looks_broken_cafe_name(name):
         return ""
     return name
 
