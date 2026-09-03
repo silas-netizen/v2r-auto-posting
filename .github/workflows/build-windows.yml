@@ -29,23 +29,30 @@ jobs:
         run: python -m pytest
 
       - name: Build EXE
-        run: python -m PyInstaller --noconfirm --clean v2r-exposure-checker.spec
+        run: |
+          python -m PyInstaller --noconfirm --clean v2r-cafe-posts.spec
+          python -c "import zipfile; zipfile.ZipFile('dist/V2R-Cafe-Posts.zip','w',zipfile.ZIP_DEFLATED).write('dist/V2R-Cafe-Posts.exe','V2R-Cafe-Posts.exe')"
 
       - name: Upload Windows programs
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: V2R-Exposure-Checker-Windows
-          path: dist/V2R-Exposure-Checker.exe
+          name: V2R-Cafe-Posts-Windows
+          path: |
+            dist/V2R-Cafe-Posts.exe
+            dist/V2R-Cafe-Posts.zip
           if-no-files-found: error
           retention-days: 1
 
-      - name: Attach programs to a GitHub Release
+      - name: Attach program to a GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: >
-          gh release create "ci-exe-${{ github.run_id }}"
-          dist/V2R-Exposure-Checker.exe
-          --title "Windows EXE ${{ github.sha }}"
-          --notes "CI build from ${{ github.ref_name }}"
-          --target "${{ github.sha }}"
+        run: |
+          $tag = "ci-exe-${{ github.run_id }}"
+          $ok = $false
+          foreach ($delay in 4, 8, 16, 32) {
+            gh release create $tag dist/V2R-Cafe-Posts.exe dist/V2R-Cafe-Posts.zip --title "Windows EXE ${{ github.sha }}" --notes "CI build from ${{ github.ref_name }}" --target "${{ github.sha }}"
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Start-Sleep -Seconds $delay
+          }
+          if (-not $ok) { exit 1 }
