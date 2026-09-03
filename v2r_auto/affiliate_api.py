@@ -1459,25 +1459,29 @@ class AffiliateApiPublisher:
             return _content_json(clean_body)
         if not self.image_resolver or not job.brand:
             if PLACEHOLDER_PATTERN.search(job.body):
-                self.logger.warning(
-                    "행 %s 브랜드를 확인하지 못해 중괄호를 지우고 이미지 없이 진행",
-                    job.row_number,
+                raise AffiliateApiError(
+                    "사진 표시가 있지만 이미지 브랜드 또는 Drive 설정을 "
+                    "확인하지 못해 발행을 중단했습니다"
                 )
             return _content_json(clean_body)
 
-        if getattr(job, "photo_wash_prepared", False):
+        if getattr(job, "prepared_images", None):
             resolved = list(getattr(job, "prepared_images", []))
         else:
             try:
                 resolved = self.image_resolver.resolve(job)
             except Exception as exc:
-                self.logger.warning(
-                    "행 %s Google Drive 이미지 확인 실패로 이미지 없이 계속 발행: %s",
-                    job.row_number,
-                    exc,
-                )
-                return _content_json(clean_body)
+                raise AffiliateApiError(
+                    "Google Drive 이미지 확인 실패로 사진 없는 글 등록을 "
+                    f"중단했습니다: {exc}"
+                ) from exc
+            job.prepared_images = list(resolved)
         if not resolved:
+            if PLACEHOLDER_PATTERN.search(job.body):
+                raise AffiliateApiError(
+                    "본문에 사진 표시가 있지만 사용할 이미지를 찾지 못해 "
+                    "발행을 중단했습니다"
+                )
             return _content_json(clean_body)
         try:
             uploaded = self.browser.upload_affiliate_images(
@@ -1711,6 +1715,30 @@ class AffiliateApiPublisher:
                 checkpoint("VERIFIED", revision_source_id=revision_source_id)
             return f"https://v2r.daboja.im/nc/articleDetail/{revision_source_id}"
 
+        revision_at: datetime | None = None
+        revision_destination: dict[str, Any] | None = None
+        revision_content_json: str | None = None
+        if not daily_only:
+            if wait_control:
+                wait_control()
+            revision_at = job.daily_scheduled_at + timedelta(
+                hours=CAFE_DELAYS[job.cafe]
+            )
+            revision_destination = dict(revision_destination_template)
+            revision_destination["start_at"] = revision_at.isoformat().replace(
+                "+00:00", "Z"
+            )
+            revision_destination["target_view_count"] = (
+                random.SystemRandom().randint(80, 100)
+            )
+            # Images must be completely prepared before creating either V2R
+            # reservation. A browser-side failure must not consume or orphan a
+            # daily reservation.
+            revision_content_json = self._prepare_revision_content(
+                job,
+                revision_destination,
+            )
+
         daily_source_id = str(resume.get("daily_source_id") or "")
         if not daily_source_id:
             daily_destination = dict(daily_destination_template)
@@ -1762,24 +1790,10 @@ class AffiliateApiPublisher:
                     "https://v2r.daboja.im/nc/articleDetail/"
                     f"{daily_source_id}"
                 )
-            if wait_control:
-                wait_control()
-            revision_at = job.daily_scheduled_at + timedelta(
-                hours=CAFE_DELAYS[job.cafe]
-            )
-
-            revision_destination = dict(revision_destination_template)
-            revision_destination["start_at"] = revision_at.isoformat().replace(
-                "+00:00", "Z"
-            )
-            revision_destination["target_view_count"] = random.SystemRandom().randint(
-                80, 100
-            )
+            assert revision_at is not None
+            assert revision_destination is not None
+            assert revision_content_json is not None
             comments = self._comments(job, revision_at, destination["cafe_id"])
-            revision_content_json = self._prepare_revision_content(
-                job,
-                revision_destination,
-            )
             revision_source_id = self._create_source(
                 job.title,
                 strip_placeholders(job.body),
@@ -1818,6 +1832,15 @@ class AffiliateApiPublisher:
             if revision_source_id:
                 self._delete_source(revision_source_id)
             self._delete_source(daily_source_id)
+            if checkpoint:
+                checkpoint(
+                    "ACCOUNT_ASSIGNED",
+                    daily_source_id="",
+                    daily_scheduled_at="",
+                    revision_source_id="",
+                )
+            job.daily_scheduled_at = None
+            job.daily_written_at = None
             raise
         self.logger.info(
             "행 %s 수정 예약 API 검증 완료: 댓글 12개 / 조회수 %s",

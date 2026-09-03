@@ -369,6 +369,52 @@ def test_affiliate_revision_uses_planned_daily_time_without_waiting(
     assert moved_publisher.created[1]["destination"]["head_id"] is None
 
 
+def test_image_failure_happens_before_any_daily_reservation(
+    tmp_path: Path,
+) -> None:
+    class ImageFailurePublisher(AffiliateApiPublisher):
+        def __init__(self):
+            super().__init__(None, logging.getLogger("image-before-daily-test"))
+            self.created = 0
+
+        def _capture_authorization(self):
+            return None
+
+        def _resolve_destination(self, job):
+            return {
+                "cafe_id": 22788814,
+                "cafe_name": "양평맘",
+                "head_id": None,
+                "head_name": None,
+                "menu_id": 14,
+                "menu_name": "이모저모 이야기💕",
+                "naver_login_id": job.account,
+                "target_view_count": 0,
+                "use_comment_ai": True,
+                "parent_id": None,
+            }
+
+        def _prepare_revision_content(self, job, destination):
+            raise AffiliateApiError("사진 첨부 실패")
+
+        def _create_source(self, *args, **kwargs):
+            self.created += 1
+            return "must-not-be-created"
+
+    job = load_affiliate_jobs(
+        write_affiliate_csv(tmp_path),
+        selected_row_number=2,
+    )[0]
+    job.daily_post = DailyPost(2, "양평맘", "일상", "내용")
+    job.daily_scheduled_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    publisher = ImageFailurePublisher()
+
+    with pytest.raises(AffiliateApiError, match="사진 첨부 실패"):
+        publisher.publish(job, dry_run=False)
+
+    assert publisher.created == 0
+
+
 def test_api_content_preserves_blank_lines_as_paragraphs() -> None:
     document = json.loads(_content_json("첫 줄\n\n둘째 줄"))
     paragraphs = document["document"]["components"][0]["value"]

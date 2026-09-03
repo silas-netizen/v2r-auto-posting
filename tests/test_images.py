@@ -370,7 +370,7 @@ def test_saved_image_resource_requires_nonempty_url_and_file_metadata() -> None:
     assert not _image_resource_ready({**complete, "fileSize": 0})
 
 
-def test_drive_failure_falls_back_to_clean_text() -> None:
+def test_drive_failure_stops_text_only_publication() -> None:
     job = make_job("첫 줄\n{키워드}\n둘째 줄")
     publisher = AffiliateApiPublisher(None, logging.getLogger("test"))
 
@@ -379,12 +379,8 @@ def test_drive_failure_falls_back_to_clean_text() -> None:
             raise OSError("Drive unavailable")
 
     publisher.image_resolver = BrokenResolver()
-    content = __import__("json").loads(
+    with pytest.raises(AffiliateApiError, match="사진 없는 글 등록을 중단"):
         publisher._prepare_revision_content(job, {"menu_name": "게시판"})
-    )
-    paragraphs = content["document"]["components"][0]["value"]
-
-    assert [item["nodes"][0]["value"] for item in paragraphs] == ["첫 줄", "", "둘째 줄"]
 
 
 def test_resolved_image_upload_failure_stops_text_only_publication(
@@ -400,7 +396,10 @@ def test_resolved_image_upload_failure_stops_text_only_publication(
             return [{}]
 
     class FakeResolver:
+        calls = 0
+
         def resolve(self, _job):
+            self.calls += 1
             return [
                 ResolvedImage(
                     occurrence=0,
@@ -412,16 +411,18 @@ def test_resolved_image_upload_failure_stops_text_only_publication(
             ]
 
     publisher = AffiliateApiPublisher(FakeBrowser(), logging.getLogger("test"))
-    publisher.image_resolver = FakeResolver()
+    resolver = FakeResolver()
+    publisher.image_resolver = resolver
 
-    with pytest.raises(AffiliateApiError, match="사진 첨부에 실패"):
-        publisher._prepare_revision_content(
-            job,
-            {
-                "cafe_id": 22788814,
-                "cafe_name": "양평 맘`s 전원 Story",
-                "naver_login_id": "writer",
-                "menu_id": 14,
-                "menu_name": "게시판",
-            },
-        )
+    destination = {
+        "cafe_id": 22788814,
+        "cafe_name": "양평 맘`s 전원 Story",
+        "naver_login_id": "writer",
+        "menu_id": 14,
+        "menu_name": "게시판",
+    }
+    for _attempt in range(2):
+        with pytest.raises(AffiliateApiError, match="사진 첨부에 실패"):
+            publisher._prepare_revision_content(job, destination)
+
+    assert resolver.calls == 1
