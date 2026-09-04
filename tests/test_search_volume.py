@@ -597,21 +597,27 @@ def test_browser_closes_sheet_clipboard_prompt() -> None:
     assert "붙여넣기 설정 창" in gui
 
 
-def test_first_cell_write_uses_name_box_and_f2() -> None:
+def test_first_cell_write_clicks_formula_bar() -> None:
     fixture = Path("tests/fixtures/sheet_first_cell.html").read_text(encoding="utf-8")
     assert sheet_clipboard_prompt_visible(fixture) is True
     assert sheet_edit_target(fixture) == "formula_bar"
     source = Path("v2r_auto/browser.py").read_text(encoding="utf-8")
+    enter = source.split("def _enter_sheet_value", 1)[1].split(
+        "def _dismiss_sheet_clipboard_prompt", 1
+    )[0]
     begin = source.split("def _begin_sheet_cell_edit", 1)[1].split(
         "def _insert_sheet_text", 1
     )[0]
+    focus = source.split("def _focus_sheet_formula_bar", 1)[1].split(
+        "def _formula_bar_text", 1
+    )[0]
     assert "_select_sheet_cell" in source
     assert "_find_sheet_formula_bar" in source
-    assert "Keys.F2" in begin
+    assert "_focus_sheet_formula_bar" in source
+    assert "_formula_bar_matches" in enter
     assert "waffle-rich-text-editor" not in begin
-    assert "수식 입력줄" in Path("v2r_auto/gui_search_volume.py").read_text(
-        encoding="utf-8"
-    )
-    assert "수식 입력줄" in Path("v2r_auto/gui_search_volume.py").read_text(
-        encoding="utf-8"
-    )
+    assert "waffle-rich-text-editor" not in focus
+    assert "bar.click()" in focus
+    gui = Path("v2r_auto/gui_search_volume.py").read_text(encoding="utf-8")
+    assert "수식 입력줄" in gui
+    assert "첫 칸 안을 누르면" in gui
