@@ -27,6 +27,7 @@ def test_job_state_resumes_source_ids(tmp_path: Path) -> None:
         record["job_key"],
         stage="DAILY_CREATED",
         daily_source_id="daily-1",
+        daily_scheduled_at="2026-08-13T09:10:00Z",
     )
     store.close()
 
@@ -37,6 +38,7 @@ def test_job_state_resumes_source_ids(tmp_path: Path) -> None:
 
     assert resumed["stage"] == "DAILY_CREATED"
     assert resumed["daily_source_id"] == "daily-1"
+    assert resumed["daily_scheduled_at"] == "2026-08-13T09:10:00Z"
     reopened.close()
 
 
@@ -46,6 +48,19 @@ def test_changed_content_creates_new_job_identity(tmp_path: Path) -> None:
     changed = sample_job()
     changed.article = parse_article("키워드", "제목 : 다른 제목\n본문 : 본문")
     second = store.load_or_create("https://sheet.example", changed)
+
+    assert first["job_key"] != second["job_key"]
+    store.close()
+
+
+def test_changed_revision_board_creates_new_job_identity(tmp_path: Path) -> None:
+    store = JobStateStore(tmp_path / "jobs.db")
+    old_board = sample_job()
+    current_board = sample_job()
+    current_board.revision_board = "자유수다방"
+
+    first = store.load_or_create("https://sheet.example", old_board)
+    second = store.load_or_create("https://sheet.example", current_board)
 
     assert first["job_key"] != second["job_key"]
     store.close()

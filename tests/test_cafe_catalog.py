@@ -19,7 +19,12 @@ def test_normalized_name_ignores_spacing_and_emoji() -> None:
 
 
 def test_live_cafe_ids_use_verified_categories() -> None:
+    assert _category(10174516, "쌍둥이맘 모여라") == "자사 카페"
     assert _category(14567700, "고요한 아침") == "자사 카페"
+    assert _category(15175096, "글로시 마이") == "자사 카페"
+    assert _category(15441090, "웨딩 노트") == "자사 카페"
+    assert _category(16149995, "송도포털") == "자사 카페"
+    assert _category(23708088, "헬씨 트리") == "자사 카페"
     assert _category(26616683, "러브 인썸") == "자사 카페"
     assert _category(26680163, "마이 웨딩 드림") == "자사 카페"
     assert _category(31670254, "태극마케팅센터") == "노출 테스트 카페"

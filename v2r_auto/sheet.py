@@ -49,6 +49,7 @@ AFFILIATE_COLUMNS = {
 AFFILIATE_PREFIX_COLUMN = "말머리"
 AFFILIATE_ACCOUNT_TYPE_COLUMN = "계정유형"
 AFFILIATE_IMAGE_DISABLED_COLUMN = "이미지 없음"
+AFFILIATE_REVISION_BOARD_COLUMN = "게시판명"
 
 
 @dataclass(slots=True)
@@ -205,6 +206,7 @@ def load_affiliate_jobs(
             cafe = _clean_cell(row.get(AFFILIATE_COLUMNS["cafe"]))
             account = _clean_cell(row.get(AFFILIATE_COLUMNS["account"]))
             article_type = _clean_cell(row.get(AFFILIATE_COLUMNS["article_type"]))
+            prefix = _clean_cell(row.get(AFFILIATE_PREFIX_COLUMN))
             missing_required = [
                 label
                 for label, value in (
@@ -221,7 +223,7 @@ def load_affiliate_jobs(
                 article = parse_article(keyword, source)
             except ContentFormatError as exc:
                 raise SheetSchemaError(
-                    f"시트 행 {selected_row_number} 원고 형식 오류: {exc}"
+                    f"시트 행 {row_number} 원고 형식 오류: {exc}"
                 ) from exc
 
             job = AffiliateJob(
@@ -231,7 +233,10 @@ def load_affiliate_jobs(
                 cafe=cafe,
                 account=account,
                 article_type=article_type,
-                prefix=_clean_cell(row.get(AFFILIATE_PREFIX_COLUMN)),
+                prefix=prefix,
+                revision_board=_clean_cell(
+                    row.get(AFFILIATE_REVISION_BOARD_COLUMN)
+                ),
                 account_type=_clean_cell(row.get(AFFILIATE_ACCOUNT_TYPE_COLUMN)),
                 image_disabled=(
                     _clean_cell(row.get(AFFILIATE_IMAGE_DISABLED_COLUMN)).casefold()
@@ -239,6 +244,12 @@ def load_affiliate_jobs(
                 ),
                 completion_url=_clean_cell(row.get(AFFILIATE_COLUMNS["completion_url"])),
             )
+            if job.completion_url and not re.match(
+                r"^https?://",
+                job.completion_url,
+                flags=re.IGNORECASE,
+            ):
+                job.completion_url = ""
             if not job.account and job.account_type not in {"실명", "비실명"}:
                 job.status = JobStatus.SKIPPED
                 job.message = "D열 작성계정과 H열 계정유형이 모두 비어 있음"

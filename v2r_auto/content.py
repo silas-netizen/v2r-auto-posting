@@ -26,8 +26,31 @@ class ParsedArticle:
     comments: list[CommentNode]
 
 
-SECTION_PATTERN = re.compile(r"^\s*(제목|본문)\s*:\s*(.*)$")
-COMMENT_PATTERN = re.compile(r"^\s*(대*)댓글\s*(\d+)\s*:\s*(.*)$")
+MARKDOWN_LABEL_DECORATION = r"(?:[*_`]{1,3})?"
+MARKDOWN_HEADING_PREFIX = r"(?:#{1,6}\s*)?"
+SECTION_PATTERN = re.compile(
+    rf"^\s*{MARKDOWN_HEADING_PREFIX}"
+    rf"{MARKDOWN_LABEL_DECORATION}\s*"
+    rf"(제목|본문)\s*{MARKDOWN_LABEL_DECORATION}\s*:\s*"
+    rf"{MARKDOWN_LABEL_DECORATION}\s*(.*)$"
+)
+HASH_SECTION_HEADING_PATTERN = re.compile(
+    rf"^\s*#{{1,6}}\s*{MARKDOWN_LABEL_DECORATION}\s*"
+    rf"(제목|본문)\s*{MARKDOWN_LABEL_DECORATION}\s*$"
+)
+DECORATED_SECTION_HEADING_PATTERN = re.compile(
+    r"^\s*([*_`]{1,3})\s*(제목|본문)\s*\1\s*$"
+)
+COMMENT_PATTERN = re.compile(
+    rf"^\s*{MARKDOWN_HEADING_PREFIX}"
+    rf"{MARKDOWN_LABEL_DECORATION}\s*"
+    rf"(대*)댓글\s*(\d*)\s*{MARKDOWN_LABEL_DECORATION}\s*:\s*"
+    rf"{MARKDOWN_LABEL_DECORATION}\s*(.*)$"
+)
+COMMENT_SET_HEADING_PATTERN = re.compile(
+    r"^\s*#{1,6}\s*.*댓글\s*세트\s*$"
+)
+MARKDOWN_SEPARATOR_PATTERN = re.compile(r"^\s*-{3,}\s*$")
 
 
 def _join(lines: list[str]) -> str:
@@ -43,6 +66,10 @@ def parse_article(keyword: str, source: str) -> ParsedArticle:
     stack: list[CommentNode] = []
 
     for raw_line in lines:
+        if COMMENT_SET_HEADING_PATTERN.match(raw_line):
+            continue
+        if MARKDOWN_SEPARATOR_PATTERN.match(raw_line):
+            continue
         section_match = SECTION_PATTERN.match(raw_line)
         if section_match:
             current = section_match.group(1)
@@ -50,13 +77,33 @@ def parse_article(keyword: str, source: str) -> ParsedArticle:
             if initial:
                 sections[current].append(initial)
             continue
+        heading_match = HASH_SECTION_HEADING_PATTERN.match(raw_line)
+        if heading_match:
+            current = heading_match.group(1)
+            continue
+        decorated_heading_match = DECORATED_SECTION_HEADING_PATTERN.match(
+            raw_line
+        )
+        if decorated_heading_match:
+            current = decorated_heading_match.group(2)
+            continue
 
         comment_match = COMMENT_PATTERN.match(raw_line)
         if comment_match:
             depth = len(comment_match.group(1))
-            index = int(comment_match.group(2))
+            raw_index = comment_match.group(2)
+            if raw_index:
+                index = int(raw_index)
+            elif depth == 0:
+                index = len(roots) + 1
+            else:
+                if len(stack) < depth:
+                    raise ContentFormatError(
+                        "'댓글'의 바로 위 부모 댓글이 없습니다"
+                    )
+                index = stack[depth - 1].index
             node = CommentNode(
-                label=raw_line.split(":", 1)[0].strip(),
+                label=f"{comment_match.group(1)}댓글{index}",
                 text=comment_match.group(3).strip(),
                 depth=depth,
                 index=index,

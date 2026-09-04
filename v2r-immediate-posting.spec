@@ -4,13 +4,22 @@ from PyInstaller.utils.hooks import collect_all
 
 selenium_datas, selenium_binaries, selenium_hiddenimports = collect_all("selenium")
 openpyxl_datas, openpyxl_binaries, openpyxl_hiddenimports = collect_all("openpyxl")
+pillow_datas, pillow_binaries, pillow_hiddenimports = collect_all("PIL")
 
 a = Analysis(
     ["main_immediate.py"],
     pathex=[],
-    binaries=selenium_binaries + openpyxl_binaries,
-    datas=selenium_datas + openpyxl_datas,
-    hiddenimports=selenium_hiddenimports + openpyxl_hiddenimports,
+    binaries=(
+        selenium_binaries
+        + openpyxl_binaries
+        + pillow_binaries
+    ),
+    datas=selenium_datas + openpyxl_datas + pillow_datas,
+    hiddenimports=(
+        selenium_hiddenimports
+        + openpyxl_hiddenimports
+        + pillow_hiddenimports
+    ),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

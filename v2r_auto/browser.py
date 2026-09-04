@@ -15,9 +15,11 @@ from urllib.request import urlopen
 
 from selenium import webdriver
 from selenium.common.exceptions import (
+    ElementClickInterceptedException,
     NoAlertPresentException,
     NoSuchElementException,
     NoSuchWindowException,
+    StaleElementReferenceException,
     TimeoutException,
     UnexpectedAlertPresentException,
 )
@@ -27,14 +29,16 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from PIL import Image, UnidentifiedImageError
 
 from .content import ParsedArticle
+from .images import strip_placeholders
 from .models import AffiliateJob, JobStatus, PostJob
 
 
 V2R_LIST_URL = "https://v2r.daboja.im/nc/board?view=list"
 V2R_SE_ONE_URL = "https://v2r.daboja.im/nc/seone"
-AFFILIATE_CAFE_DELAYS = {"씨씨앙": 4, "양평맘": 10}
+AFFILIATE_CAFE_DELAYS = {"씨씨앙": 4, "양평맘": 20}
 AFFILIATE_CAFE_BOARDS = {"씨씨앙": "자유 수다방", "양평맘": "이모저모 이야기"}
 AFFILIATE_CAFE_SEARCH_TERMS = {"씨씨앙": "씨씨앙", "양평맘": "양평"}
 SE_ONE_SELECTION_INDEX = {"카페": 0, "계정": 1, "게시판": 2, "말머리": 3}
@@ -156,7 +160,27 @@ class V2RBrowser:
             f"/export?format=csv&gid={gid}"
         )
 
-    def download_sheet(self, sheet_url: str) -> Path:
+    @staticmethod
+    def _csv_has_headers(path: Path, required_headers: set[str]) -> bool:
+        try:
+            with path.open(
+                "r",
+                encoding="utf-8-sig",
+                newline="",
+            ) as stream:
+                headers = next(csv.reader(stream), [])
+        except (OSError, UnicodeError, csv.Error):
+            return False
+        return required_headers.issubset(
+            {header.strip() for header in headers if header}
+        )
+
+    def download_sheet(
+        self,
+        sheet_url: str,
+        *,
+        required_headers: set[str] | None = None,
+    ) -> Path:
         self.start()
         assert self.driver
         self._switch_to_handle(self.google_handle)
@@ -164,6 +188,7 @@ class V2RBrowser:
         before = {path: path.stat().st_mtime for path in self.config.download_dir.glob("*.csv")}
         self.logger.info("Google Sheets 데이터를 내려받습니다")
         request_started = time.time()
+        rejected_files: set[str] = set()
         self._navigate(self._sheet_export_url(sheet_url), self.google_handle)
         deadline = time.monotonic() + self.config.timeout_seconds
         while time.monotonic() < deadline:
@@ -176,12 +201,38 @@ class V2RBrowser:
                 if candidate not in before or candidate.stat().st_mtime > before[candidate]:
                     related_download = candidate.with_suffix(candidate.suffix + ".crdownload")
                     if candidate.stat().st_mtime >= request_started and not related_download.exists():
+                        if (
+                            required_headers
+                            and not self._csv_has_headers(
+                                candidate,
+                                required_headers,
+                            )
+                        ):
+                            signature = (
+                                f"{candidate.name}:"
+                                f"{candidate.stat().st_mtime_ns}"
+                            )
+                            if signature not in rejected_files:
+                                self.logger.warning(
+                                    "다운로드 CSV 헤더가 대상 시트와 달라 "
+                                    "사용하지 않고 계속 기다립니다: %s / 필요 %s",
+                                    candidate.name,
+                                    ", ".join(sorted(required_headers)),
+                                )
+                                rejected_files.add(signature)
+                            before[candidate] = candidate.stat().st_mtime
+                            continue
                         self.logger.info("Google Sheets 다운로드 완료: %s", candidate.name)
                         return candidate
             time.sleep(0.5)
         if "accounts.google.com" in self.driver.current_url:
             raise AutomationError(
                 "Google 로그인이 필요합니다. '로그인 준비'에서 로그인한 뒤 다시 실행하세요"
+            )
+        if required_headers and rejected_files:
+            raise AutomationError(
+                "시트 CSV는 내려받았지만 필수 헤더를 확인하지 못했습니다: "
+                + ", ".join(sorted(required_headers))
             )
         raise AutomationError(
             "시트를 내려받지 못했습니다. 공유 권한 또는 Google 로그인을 확인하세요"
@@ -400,19 +451,89 @@ class V2RBrowser:
 
     def _visible_se_one_selections(self):
         assert self.driver
-        return [
-            item
-            for item in self.driver.find_elements(By.CSS_SELECTOR, ".n-base-selection")
-            if item.is_displayed()
-        ]
+        visible = []
+        for item in self.driver.find_elements(
+            By.CSS_SELECTOR,
+            ".n-base-selection",
+        ):
+            try:
+                if item.is_displayed():
+                    visible.append(item)
+            except StaleElementReferenceException:
+                continue
+        return visible
 
     def _se_one_option_matches(self, label: str, value: str, option_text: str) -> bool:
         if label == "계정":
+            wanted = self._normalize_option_text(value)
+            account_tokens = re.findall(r"[0-9A-Za-z_-]+", option_text)
             return any(
-                self._normalize_option_text(line) == self._normalize_option_text(value)
-                for line in option_text.splitlines()
+                self._normalize_option_text(token) == wanted
+                for token in account_tokens
             )
         return self._option_text_matches(label, value, option_text)
+
+    def _wait_for_unobstructed_element(self, element, label: str) -> None:
+        """Wait until no loading overlay covers the element's center point."""
+        assert self.driver
+
+        def unobstructed(_driver):
+            try:
+                result = self.driver.execute_script(
+                    """
+                    const element = arguments[0];
+                    const rect = element.getBoundingClientRect();
+                    if (!rect.width || !rect.height) return false;
+                    const x = rect.left + rect.width / 2;
+                    const y = rect.top + rect.height / 2;
+                    const top = document.elementFromPoint(x, y);
+                    return !!top && (top === element || element.contains(top));
+                    """,
+                    element,
+                )
+                # Lightweight test doubles may not return a script value.
+                return True if result is None else bool(result)
+            except StaleElementReferenceException:
+                return False
+
+        try:
+            WebDriverWait(
+                self.driver,
+                getattr(getattr(self, "config", None), "timeout_seconds", 20),
+                poll_frequency=0.2,
+            ).until(unobstructed)
+        except TimeoutException as exc:
+            raise AutomationError(
+                f"SE-ONE {label} 선택칸의 로딩 화면이 사라지지 않았습니다"
+            ) from exc
+
+    def _dismiss_known_seone_notice(self) -> bool:
+        """Dismiss only the known subscription-expiry modal blocking SE-ONE."""
+        assert self.driver
+        if "N 카페 요금제 종료" not in getattr(
+            self.driver,
+            "page_source",
+            "",
+        ):
+            return False
+        xpath = (
+            "//*[normalize-space()='오늘 하루 안보기']"
+            "/ancestor-or-self::*[self::button or @role='button'][1]"
+        )
+        candidates = self.driver.find_elements(By.XPATH, xpath)
+        for button in candidates:
+            try:
+                if not button.is_displayed() or not button.is_enabled():
+                    continue
+                self.driver.execute_script("arguments[0].click();", button)
+                self.logger.info(
+                    "SE-ONE 화면을 가린 요금제 안내를 오늘 하루 닫았습니다"
+                )
+                time.sleep(0.5)
+                return True
+            except StaleElementReferenceException:
+                continue
+        return False
 
     def _select_se_one_option(self, label: str, value: str, selection_index: int) -> None:
         assert self.driver
@@ -423,30 +544,205 @@ class V2RBrowser:
         self.driver.execute_script(
             "arguments[0].scrollIntoView({block: 'center'});", selection
         )
-        selection.click()
+
+        def visible_options():
+            visible = []
+            for item in self.driver.find_elements(
+                By.CSS_SELECTOR,
+                ".n-base-select-option",
+            ):
+                try:
+                    if item.is_displayed():
+                        visible.append(item)
+                except StaleElementReferenceException:
+                    continue
+            return visible
+
+        search_value = (
+            AFFILIATE_CAFE_SEARCH_TERMS.get(value, value)
+            if label == "카페"
+            else value
+        )
+
+        def search_inputs():
+            try:
+                selection_fields = selection.find_elements(
+                    By.CSS_SELECTOR,
+                    "input",
+                )
+            except StaleElementReferenceException:
+                selection_fields = []
+            fields = []
+            for item in selection_fields:
+                try:
+                    if item.is_displayed() and item.is_enabled():
+                        fields.append(item)
+                except StaleElementReferenceException:
+                    continue
+            if fields:
+                return fields
+            visible = []
+            for item in self.driver.find_elements(
+                By.CSS_SELECTOR,
+                ".n-base-select-menu input, .n-base-selection input",
+            ):
+                try:
+                    if item.is_displayed() and item.is_enabled():
+                        visible.append(item)
+                except StaleElementReferenceException:
+                    continue
+            return visible
+
+        def matches(option_element) -> bool:
+            try:
+                return self._se_one_option_matches(
+                    label,
+                    value,
+                    option_element.text,
+                )
+            except StaleElementReferenceException:
+                return False
+
+        option_wait = WebDriverWait(
+            self.driver,
+            min(
+                6,
+                getattr(
+                    getattr(self, "config", None),
+                    "timeout_seconds",
+                    20,
+                ),
+            ),
+            poll_frequency=0.25,
+        )
+        options = []
+        last_timeout: TimeoutException | None = None
+        for attempt in range(3):
+            if attempt:
+                ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+                time.sleep(0.25)
+            self._wait_for_unobstructed_element(selection, label)
+            try:
+                selection.click()
+            except ElementClickInterceptedException:
+                if attempt == 2:
+                    raise
+                time.sleep(0.5)
+                refreshed = self._visible_se_one_selections()
+                if len(refreshed) <= selection_index:
+                    continue
+                selection = refreshed[selection_index]
+                continue
+            try:
+                options = option_wait.until(lambda driver: visible_options())
+                break
+            except TimeoutException as exc:
+                last_timeout = exc
+        if not options:
+            fields = search_inputs()
+            if fields:
+                try:
+                    search_input = fields[-1]
+                    search_input.send_keys(Keys.CONTROL, "a")
+                    search_input.send_keys(search_value)
+                    time.sleep(0.5)
+                    search_input.send_keys(Keys.ARROW_DOWN)
+                    search_input.send_keys(Keys.ENTER)
+                    selected = WebDriverWait(
+                        self.driver,
+                        3,
+                        poll_frequency=0.25,
+                    ).until(
+                        lambda driver: self._se_one_option_matches(
+                            label,
+                            value,
+                            selection.text,
+                        )
+                    )
+                    if selected:
+                        if label in {"카페", "계정"}:
+                            time.sleep(1)
+                        return
+                except Exception:
+                    pass
+            raise AutomationError(
+                f"SE-ONE {label} 목록이 준비되지 않았습니다"
+            ) from last_timeout
+
+        def choose(option_element) -> None:
+            option_element.click()
+            try:
+                WebDriverWait(
+                    self.driver,
+                    3,
+                    poll_frequency=0.25,
+                ).until(
+                    lambda driver: self._se_one_option_matches(
+                        label,
+                        value,
+                        selection.text,
+                    )
+                )
+            except TimeoutException as exc:
+                raise AutomationError(
+                    f"SE-ONE {label} 선택 완료를 확인하지 못했습니다: {value}"
+                ) from exc
+            if label in {"카페", "계정"}:
+                time.sleep(1)
+
+        direct = next(
+            (
+                item
+                for item in options
+                if matches(item)
+            ),
+            None,
+        )
+        if direct is not None:
+            choose(direct)
+            return
+
+        fields = search_inputs()
+        if fields:
+            try:
+                search_input = fields[-1]
+                search_input.send_keys(Keys.CONTROL, "a")
+                search_input.send_keys(search_value)
+            except Exception:
+                self.logger.debug(
+                    "SE-ONE %s 검색어 입력을 사용할 수 없어 표시 목록에서 찾습니다",
+                    label,
+                )
 
         def option():
-            options = [
-                item
-                for item in self.driver.find_elements(
-                    By.CSS_SELECTOR, ".n-base-select-option"
-                )
-                if item.is_displayed()
-            ]
             return next(
                 (
                     item
-                    for item in options
-                    if self._se_one_option_matches(label, value, item.text)
+                    for item in visible_options()
+                    if matches(item)
                 ),
                 False,
             )
 
         try:
-            self.wait.until(lambda driver: option()).click()
+            selected_option = self.wait.until(lambda driver: option())
+            choose(selected_option)
         except TimeoutException as exc:
+            visible_options = [
+                item.text.strip().replace("\n", " / ")
+                for item in self.driver.find_elements(
+                    By.CSS_SELECTOR,
+                    ".n-base-select-option",
+                )
+                if item.is_displayed() and item.text.strip()
+            ]
             raise AutomationError(
                 f"SE-ONE {label} 목록에서 '{value}' 항목을 찾지 못했습니다"
+                + (
+                    f" / 표시 항목: {', '.join(visible_options[:10])}"
+                    if visible_options
+                    else " / 표시된 항목 없음"
+                )
             ) from exc
 
     def _click_text(self, texts: tuple[str, ...], exact_only: bool = False) -> None:
@@ -581,33 +877,129 @@ class V2RBrowser:
         selection_input.send_keys(value)
         self._select_first_dropdown_result(selection_input, label, value)
 
-    def _fill_editor(self, body: str) -> None:
+    def _visible_seone_text_paragraphs(self):
         assert self.driver
-        smart_editor_iframes = [
-            element
-            for element in self.driver.find_elements(
-                By.CSS_SELECTOR, "iframe[title*='스마트 에디터']"
-            )
-            if element.is_displayed()
-        ]
-        editors = smart_editor_iframes or [
+        return [
             element
             for element in self.driver.find_elements(
                 By.CSS_SELECTOR,
-                "[contenteditable='true'], .ProseMirror, .ql-editor, .tox-edit-area iframe",
+                ".se-module-text .se-text-paragraph",
             )
-            if element.is_displayed() and element.get_attribute("title") != "Channel chat"
+            if element.is_displayed()
+            and element.rect.get("width", 0) > 20
+            and element.rect.get("height", 0) > 10
         ]
-        if not editors:
-            raise AutomationError("본문 편집기를 찾지 못했습니다")
-        editor = editors[0]
-        if editor.tag_name.lower() == "iframe":
-            self.driver.switch_to.frame(editor)
-            editor = self.driver.find_element(By.CSS_SELECTOR, "body")
-        editor.click()
-        editor.send_keys(Keys.CONTROL, "a")
-        editor.send_keys(body)
-        self.driver.switch_to.default_content()
+
+    def _focus_seone_text_paragraph(self) -> None:
+        assert self.driver
+        document = self._get_seone_document()
+        paragraph_ids = [
+            str(paragraph.get("id") or "")
+            for component in document.get("document", {}).get("components", [])
+            if component.get("@ctype") == "text"
+            for paragraph in component.get("value", [])
+            if paragraph.get("id")
+        ]
+        for paragraph_id in reversed(paragraph_ids):
+            candidates = self.driver.find_elements(By.ID, paragraph_id)
+            target = next(
+                (
+                    element
+                    for element in candidates
+                    if element.is_displayed()
+                    and element.rect.get("width", 0) > 20
+                    and element.rect.get("height", 0) > 10
+                ),
+                None,
+            )
+            if target is None:
+                continue
+            self.driver.execute_script(
+                "arguments[0].scrollIntoView({block: 'center'});",
+                target,
+            )
+            ActionChains(self.driver).move_to_element(target).click().perform()
+            return
+        try:
+            paragraphs = self.wait.until(
+                lambda driver: self._visible_seone_text_paragraphs()
+            )
+        except TimeoutException as exc:
+            raise AutomationError(
+                "사진을 넣을 본문 위치가 준비되지 않았습니다"
+            ) from exc
+        ActionChains(self.driver).move_to_element(paragraphs[-1]).click().perform()
+
+    def _wait_for_seone_idle(self) -> None:
+        assert self.driver
+        try:
+            self.wait.until(
+                lambda driver: driver.execute_script(
+                    """
+                    const editor = window.SmartEditor &&
+                        window.SmartEditor.getEditor('cafepc001');
+                    return editor &&
+                        typeof editor.isDocumentProcessing === 'function' &&
+                        !editor.isDocumentProcessing();
+                    """
+                )
+            )
+        except TimeoutException as exc:
+            raise AutomationError(
+                "SmartEditor 사진 처리가 끝나지 않았습니다"
+            ) from exc
+
+    def _fill_editor(self, body: str) -> None:
+        assert self.driver
+        def visible_editor():
+            native_paragraphs = self._visible_seone_text_paragraphs()
+            if native_paragraphs:
+                return native_paragraphs[0]
+            smart_editor_iframes = [
+                element
+                for element in self.driver.find_elements(
+                    By.CSS_SELECTOR, "iframe[title*='스마트 에디터']"
+                )
+                if element.is_displayed()
+                and element.rect.get("width", 0) > 20
+                and element.rect.get("height", 0) > 10
+                and element.rect.get("x", -1) >= 0
+                and element.rect.get("y", -1) >= 0
+            ]
+            editors = smart_editor_iframes or [
+                element
+                for element in self.driver.find_elements(
+                    By.CSS_SELECTOR,
+                    (
+                        "[contenteditable='true'], .ProseMirror, .ql-editor, "
+                        ".tox-edit-area iframe"
+                    ),
+                )
+                if element.is_displayed()
+                and element.get_attribute("title") != "Channel chat"
+                and element.rect.get("width", 0) > 20
+                and element.rect.get("height", 0) > 10
+                and element.rect.get("x", -1) >= 0
+                and element.rect.get("y", -1) >= 0
+            ]
+            return editors[0] if editors else False
+
+        try:
+            editor = self.wait.until(lambda driver: visible_editor())
+        except TimeoutException as exc:
+            raise AutomationError("본문 편집기가 준비되지 않았습니다") from exc
+        try:
+            if editor.tag_name.lower() == "iframe":
+                self.driver.switch_to.frame(editor)
+                editor = self.wait.until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "body"))
+                )
+            actions = ActionChains(self.driver)
+            actions.move_to_element(editor).click()
+            actions.key_down(Keys.CONTROL).send_keys("a").key_up(Keys.CONTROL)
+            actions.send_keys(body).perform()
+        finally:
+            self.driver.switch_to.default_content()
 
     def open_se_one_writer(self) -> None:
         """Open the only supported new-post flow using V2R's direct SE-ONE URL."""
@@ -983,6 +1375,7 @@ class V2RBrowser:
         dry_run: bool,
         resume=None,
         checkpoint=None,
+        wait_control=None,
     ) -> str:
         """Run the live-verified affiliate flow through V2R's own API."""
         return self._get_affiliate_publisher().publish(
@@ -990,49 +1383,87 @@ class V2RBrowser:
             dry_run,
             resume=resume,
             checkpoint=checkpoint,
+            wait_control=wait_control,
+        )
+
+    def reserve_affiliate_daily(
+        self,
+        job: AffiliateJob,
+        resume=None,
+        checkpoint=None,
+    ) -> str:
+        """Register only the scheduled daily source before revision monitoring."""
+        return self._get_affiliate_publisher().publish(
+            job,
+            False,
+            resume=resume,
+            checkpoint=checkpoint,
+            daily_only=True,
         )
 
     def _get_seone_document(self) -> dict:
-        """Read the document through the editor state injected by the V2R page."""
+        """Read the current SmartEditor document without publishing the draft."""
         assert self.driver
         script = """
             const done = arguments[arguments.length - 1];
-            const container = document.querySelector('.seone-container');
-            let instance = container && container.__vueParentComponent;
-            const candidates = [];
-            while (instance) {
-                candidates.push(
-                    instance.setupState,
-                    instance.ctx,
-                    instance.proxy,
-                    instance.provides
-                );
-                let provided = instance.provides;
-                while (provided) {
+            (async () => {
+                try {
+                    const smartEditor = window.SmartEditor;
+                    const editor = smartEditor && (
+                        smartEditor.getEditor('cafepc001') ||
+                        Object.values(smartEditor._editors || {})[0]
+                    );
+                    if (editor && typeof editor.getDocumentData === 'function') {
+                        const value = await editor.getDocumentData();
+                        if (value) {
+                            done({ok: true, value});
+                            return;
+                        }
+                    }
+                } catch (_) {}
+
+                const container = document.querySelector('.seone-container');
+                let instance = container && container.__vueParentComponent;
+                const candidates = [];
+                while (instance) {
+                    candidates.push(
+                        instance.setupState,
+                        instance.ctx,
+                        instance.proxy,
+                        instance.provides
+                    );
+                    let provided = instance.provides;
+                    while (provided) {
+                        try {
+                            for (const key of Reflect.ownKeys(provided)) {
+                                candidates.push(provided[key]);
+                            }
+                        } catch (_) {}
+                        provided = Object.getPrototypeOf(provided);
+                    }
+                    instance = instance.parent;
+                }
+                for (const candidate of candidates) {
+                    if (!candidate) continue;
                     try {
-                        for (const key of Reflect.ownKeys(provided)) {
-                            candidates.push(provided[key]);
+                        let getter = candidate.seoneGetDocument;
+                        if (
+                            getter &&
+                            typeof getter === 'object' &&
+                            'value' in getter
+                        ) {
+                            getter = getter.value;
+                        }
+                        if (typeof getter !== 'function') continue;
+                        const value = await getter.call(candidate);
+                        if (value) {
+                            done({ok: true, value});
+                            return;
                         }
                     } catch (_) {}
-                    provided = Object.getPrototypeOf(provided);
                 }
-                instance = instance.parent;
-            }
-            for (const candidate of candidates) {
-                if (!candidate) continue;
-                try {
-                    let getter = candidate.seoneGetDocument;
-                    if (getter && typeof getter === 'object' && 'value' in getter) {
-                        getter = getter.value;
-                    }
-                    if (typeof getter !== 'function') continue;
-                    Promise.resolve(getter.call(candidate))
-                        .then(value => done({ok: true, value}))
-                        .catch(error => done({ok: false, error: String(error)}));
-                    return;
-                } catch (_) {}
-            }
-            done({ok: false, error: 'SE-ONE document getter not found'});
+                done({ok: false, error: 'SE-ONE document getter not found'});
+            })();
         """
         result = self.driver.execute_async_script(script)
         if not result or not result.get("ok") or not result.get("value"):
@@ -1049,118 +1480,351 @@ class V2RBrowser:
             if component.get("@ctype") in {"image", "imageGroup", "imageStrip"}
         ]
 
-    def _upload_one_seone_image(
-        self,
-        job: AffiliateJob,
-        menu_name: str,
-        image_path: Path,
-    ) -> dict:
-        assert self.driver
-        self.open_se_one_writer()
-        self._select_option("카페", job.cafe)
-        self._select_option("계정", job.account)
-        self._select_option("게시판", menu_name)
-        self.wait.until(
-            lambda driver: driver.find_elements(By.CSS_SELECTOR, ".seone-container")
+    @staticmethod
+    def _image_component_ready(component: dict) -> bool:
+        images: list[dict] = []
+
+        def collect(value) -> None:
+            if isinstance(value, dict):
+                if value.get("@ctype") == "image":
+                    images.append(value)
+                for child in value.values():
+                    collect(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect(child)
+
+        collect(component)
+        return bool(images) and all(
+            isinstance(image.get("src"), str)
+            and bool(image["src"].strip())
+            and isinstance(image.get("path"), str)
+            and bool(image["path"].strip())
+            and isinstance(image.get("fileName"), str)
+            and bool(image["fileName"].strip())
+            and int(image.get("fileSize") or 0) > 0
+            for image in images
         )
 
-        def editor_document_ready(_driver):
-            try:
-                return self._get_seone_document()
-            except AutomationError:
-                return False
+    @staticmethod
+    def _media_component_key(component: dict) -> str:
+        return str(
+            component.get("id")
+            or component.get("src")
+            or json.dumps(component, ensure_ascii=False, sort_keys=True)
+        )
 
-        self.wait.until(editor_document_ready)
+    @staticmethod
+    def _validate_upload_image(image_path: Path) -> None:
+        if not image_path.is_file():
+            raise AutomationError(f"사진 파일을 찾지 못했습니다: {image_path}")
+        if image_path.stat().st_size <= 0:
+            raise AutomationError(f"사진 파일이 비어 있습니다: {image_path.name}")
+        try:
+            with Image.open(image_path) as image:
+                image.verify()
+        except (OSError, UnidentifiedImageError) as exc:
+            raise AutomationError(
+                f"사진 파일이 손상됐거나 지원하지 않는 형식입니다: {image_path.name}"
+            ) from exc
 
-        def image_inputs():
-            inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
-            return [
+    def _seone_upload_error_text(self) -> str:
+        assert self.driver
+        selectors = (
+            "[role='alert']",
+            ".n-message--error",
+            ".n-notification--error",
+            ".n-alert--error",
+        )
+        try:
+            elements = [
                 item
-                for item in inputs
-                if any(
-                    token in (item.get_attribute("accept") or "").casefold()
-                    for token in ("image", ".jpg", ".jpeg", ".png", ".gif", ".webp")
-                )
+                for selector in selectors
+                for item in self.driver.find_elements(By.CSS_SELECTOR, selector)
             ]
+        except Exception:
+            return ""
+        for element in elements:
+            try:
+                text = element.text.strip()
+                if element.is_displayed() and text:
+                    return text
+            except StaleElementReferenceException:
+                continue
+        return ""
 
-        inputs = image_inputs()
-        if not inputs:
-            selectors = (
-                "button[aria-label*='사진']",
-                "button[aria-label*='이미지']",
-                "button[title*='사진']",
-                "button[title*='이미지']",
-                "button[data-name*='image' i]",
-                "[role='button'][data-name*='image' i]",
-            )
-            button = next(
-                (
-                    element
-                    for selector in selectors
-                    for element in self.driver.find_elements(By.CSS_SELECTOR, selector)
-                    if element.is_displayed() and element.is_enabled()
-                ),
-                None,
-            )
-            if button is None:
-                xpath = (
-                    "//*[self::button or @role='button']"
-                    "[contains(normalize-space(), '사진') or "
-                    "contains(normalize-space(), '이미지')]"
+    def _save_seone_failure_screenshot(
+        self,
+        job: AffiliateJob,
+        attempt: int,
+    ) -> Path | None:
+        assert self.driver
+        config = getattr(self, "config", None)
+        if config is None:
+            return None
+        path = (
+            config.download_dir.parent
+            / "logs"
+            / f"seone-image-row{job.row_number}-attempt{attempt}.png"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.driver.save_screenshot(str(path))
+        except Exception:
+            return None
+        return path
+
+    def _prepare_seone_image_editor(
+        self,
+        job: AffiliateJob,
+        destination: dict,
+    ) -> None:
+        """Prepare SE-ONE with the exact destination already resolved by the API."""
+        assert self.driver
+        cafe_name = str(destination["cafe_name"])
+        ui_cafe_name = (
+            job.cafe
+            if job.cafe in AFFILIATE_CAFE_SEARCH_TERMS
+            else cafe_name
+        )
+        account = str(destination["naver_login_id"])
+        menu_name = str(destination["menu_name"])
+        self.logger.info(
+            "행 %s API 목적지로 사진 화면 준비: 카페 %s / 게시판 %s",
+            job.row_number,
+            destination.get("cafe_id"),
+            destination.get("menu_id"),
+        )
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                self.open_se_one_writer()
+                self._dismiss_known_seone_notice()
+                self._select_option("카페", ui_cafe_name)
+                self._select_option("계정", account)
+                self._select_option("게시판", menu_name)
+                self._fill_input(
+                    "제목",
+                    job.title,
+                    "input[placeholder*='제목'], textarea[placeholder*='제목']",
                 )
-                button = next(
-                    (
-                        element
-                        for element in self.driver.find_elements(By.XPATH, xpath)
-                        if element.is_displayed() and element.is_enabled()
-                    ),
-                    None,
+                self.wait.until(
+                    lambda driver: driver.find_elements(
+                        By.CSS_SELECTOR, ".seone-container"
+                    )
                 )
-            if button is None:
-                raise AutomationError("SE-ONE 이미지 첨부 버튼을 찾지 못했습니다")
+                self._fill_editor(strip_placeholders(job.body))
+
+                def editor_document_ready(_driver):
+                    try:
+                        return self._get_seone_document()
+                    except AutomationError:
+                        return False
+
+                self.wait.until(editor_document_ready)
+                return
+            except (
+                AutomationError,
+                StaleElementReferenceException,
+                TimeoutException,
+            ) as exc:
+                last_error = exc
+                if attempt == 3:
+                    break
+                self.logger.warning(
+                    "행 %s 사진 화면 준비 재시도 (%s/3): %s",
+                    job.row_number,
+                    attempt + 1,
+                    exc,
+                )
+                time.sleep(attempt)
+        raise AutomationError(
+            f"SE-ONE 사진 화면을 준비하지 못했습니다: {last_error}"
+        ) from last_error
+
+    def _seone_image_inputs(self):
+        assert self.driver
+        return [
+            item
+            for item in self.driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+            if any(
+                token in (item.get_attribute("accept") or "").casefold()
+                for token in ("image", ".jpg", ".jpeg", ".png", ".gif", ".webp")
+            )
+        ]
+
+    def _seone_photo_button(self):
+        assert self.driver
+        selectors = (
+            ".se-toolbar-item-image button",
+            "button.se-toolbar-option-image",
+            "button[aria-label*='사진']",
+            "button[aria-label*='이미지']",
+            "button[title*='사진']",
+            "button[title*='이미지']",
+            "button[data-name*='image' i]",
+            "[role='button'][data-name*='image' i]",
+        )
+        button = next(
+            (
+                element
+                for selector in selectors
+                for element in self.driver.find_elements(By.CSS_SELECTOR, selector)
+                if element.is_displayed() and element.is_enabled()
+            ),
+            None,
+        )
+        if button is not None:
+            return button
+        xpath = (
+            "//*[contains(normalize-space(), '사진') or "
+            "contains(normalize-space(), '이미지') or "
+            "contains(@aria-label, '사진') or contains(@aria-label, '이미지')]"
+            "/ancestor-or-self::*[self::button or @role='button'][1]"
+        )
+        return next(
+            (
+                element
+                for element in self.driver.find_elements(By.XPATH, xpath)
+                if element.is_displayed() and element.is_enabled()
+            ),
+            None,
+        )
+
+    def _upload_one_seone_image(
+        self,
+        image_path: Path,
+        *,
+        timeout_seconds: float = 45,
+    ) -> dict:
+        assert self.driver
+        existing_media = self._media_components(self._get_seone_document())
+        existing_media_keys = {
+            self._media_component_key(component)
+            for component in existing_media
+        }
+
+        self._wait_for_seone_idle()
+        self._focus_seone_text_paragraph()
+        button = self._seone_photo_button()
+        inputs = self._seone_image_inputs()
+        if button is not None:
+            existing_input_ids = {item.id for item in inputs}
             self.driver.execute_script("arguments[0].click();", button)
-            inputs = self.wait.until(lambda _driver: image_inputs())
+            time.sleep(0.5)
+            current_inputs = self._seone_image_inputs()
+            new_inputs = [
+                item
+                for item in current_inputs
+                if item.id not in existing_input_ids
+            ]
+            reusable_inputs = [
+                item
+                for item in current_inputs
+                if not item.get_attribute("value")
+            ]
+            inputs = new_inputs or reusable_inputs
+            if not inputs:
+                inputs = self.wait.until(
+                    lambda _driver: [
+                        item
+                        for item in self._seone_image_inputs()
+                        if item.id not in existing_input_ids
+                        or not item.get_attribute("value")
+                    ]
+                )
+        elif not inputs:
+            raise AutomationError("SE-ONE 사진 첨부 버튼을 찾지 못했습니다")
 
-        inputs[-1].send_keys(str(image_path.resolve()))
-        deadline = time.monotonic() + 60
+        selected_input = inputs[-1]
+        selected_input.send_keys(str(image_path.resolve()))
+        # SmartEditor replaces its file input immediately after accepting a
+        # file. Never read the old WebElement again; its detachment is normal.
+        # The uploaded image component below is the authoritative success
+        # signal.
+        deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             try:
                 media = self._media_components(self._get_seone_document())
-                if media:
-                    return media[0]
+                new_media = [
+                    component
+                    for component in media
+                    if self._media_component_key(component)
+                    not in existing_media_keys
+                ]
+                ready = next(
+                    (
+                        component
+                        for component in new_media
+                        if self._image_component_ready(component)
+                    ),
+                    None,
+                )
+                if ready is not None:
+                    self._wait_for_seone_idle()
+                    return ready
             except AutomationError:
                 pass
+            upload_error = self._seone_upload_error_text()
+            if upload_error:
+                raise AutomationError(
+                    f"SE-ONE 사진 업로드 오류: {upload_error[:180]}"
+                )
             time.sleep(0.5)
         raise AutomationError(f"SE-ONE 이미지 업로드 완료를 확인하지 못했습니다: {image_path.name}")
 
     def upload_affiliate_images(
         self,
         job: AffiliateJob,
-        menu_name: str,
+        destination: dict,
         image_paths: list[Path],
     ) -> list[dict]:
         """Upload through V2R's SmartEditor, while article submission stays API-based."""
-        uploaded: list[dict] = []
-        for index, image_path in enumerate(image_paths, start=1):
-            self.logger.info(
-                "행 %s 수정 본문 이미지 업로드 (%s/%s): %s",
-                job.row_number,
-                index,
-                len(image_paths),
-                image_path.name,
-            )
+        for image_path in image_paths:
+            self._validate_upload_image(image_path)
+        last_error: Exception | None = None
+        for attempt in range(1, 4):
+            uploaded: list[dict] = []
             try:
-                uploaded.append(
-                    self._upload_one_seone_image(job, menu_name, image_path)
-                )
+                self._prepare_seone_image_editor(job, destination)
+                for index, image_path in enumerate(image_paths, start=1):
+                    self.logger.info(
+                        "행 %s 수정 본문 이미지 업로드 (%s/%s): %s",
+                        job.row_number,
+                        index,
+                        len(image_paths),
+                        image_path.name,
+                    )
+                    uploaded.append(
+                        self._upload_one_seone_image(
+                            image_path,
+                            timeout_seconds=45,
+                        )
+                    )
+                return uploaded
             except Exception as exc:
-                self.logger.warning(
-                    "행 %s 이미지 1개 업로드 실패로 생략: %s",
-                    job.row_number,
-                    exc,
-                )
-                uploaded.append({})
-        return uploaded
+                last_error = exc
+                screenshot = self._save_seone_failure_screenshot(job, attempt)
+                if screenshot:
+                    self.logger.warning(
+                        "행 %s 사진 실패 화면 저장: %s",
+                        job.row_number,
+                        screenshot,
+                    )
+                if attempt < 3:
+                    self.logger.warning(
+                        "행 %s 사진 첨부 전체 재시도 (%s/3): "
+                        "SE-ONE 화면을 새로 열고 모든 사진을 다시 첨부합니다 / %s",
+                        job.row_number,
+                        attempt + 1,
+                        exc,
+                    )
+                    continue
+                raise AutomationError(
+                    "SE-ONE 화면 전체 재시도 후에도 사진 첨부 실패: "
+                    f"{exc}"
+                ) from exc
+        raise AutomationError(f"사진 첨부 실패: {last_error}")
 
     def _get_affiliate_publisher(self):
         from .affiliate_api import AffiliateApiPublisher
@@ -1172,10 +1836,6 @@ class V2RBrowser:
     def start_affiliate_api_run(self, jobs: list[AffiliateJob] | None = None) -> None:
         publisher = self._get_affiliate_publisher()
         publisher._capture_authorization()
-        if jobs:
-            publisher.cleanup_stale_sources(
-                {job.cafe for job in jobs if job.status == JobStatus.PENDING}
-            )
 
     def load_v2r_cafe_catalog(self):
         """Fetch the current cafe/menu catalog without creating any article."""
@@ -1186,11 +1846,29 @@ class V2RBrowser:
     ) -> list[AffiliateJob]:
         return self._get_affiliate_publisher().assign_accounts(jobs)
 
+    def refresh_affiliate_account_grades(
+        self, jobs: list[AffiliateJob]
+    ) -> list[AffiliateJob]:
+        return self._get_affiliate_publisher().refresh_assigned_account_grades(
+            jobs
+        )
+
     def classify_affiliate_failure(self, error: Exception) -> tuple[str, bool]:
         return self._get_affiliate_publisher().classify_failure(error)
 
     def replace_failed_affiliate_account(self, job: AffiliateJob) -> str:
         return self._get_affiliate_publisher().replace_failed_account(job)
+
+    def reset_deleted_affiliate_sources(self, job, resume) -> None:
+        self._get_affiliate_publisher().reset_deleted_sources(job, resume)
+
+    def probe_v2r_source_urls(
+        self, urls: set[str]
+    ) -> dict[str, bool | None]:
+        return self._get_affiliate_publisher().probe_source_urls(urls)
+
+    def inspect_immediate_source_urls(self, urls: set[str]):
+        return self._get_immediate_publisher().inspect_saved_source_urls(urls)
 
     def _get_immediate_publisher(self):
         from .immediate_api import ImmediateApiPublisher
@@ -1199,8 +1877,19 @@ class V2RBrowser:
             self._immediate_publisher = ImmediateApiPublisher(self, self.logger)
         return self._immediate_publisher
 
-    def prepare_immediate_jobs(self, jobs) -> None:
-        self._get_immediate_publisher().prepare_jobs(jobs)
+    def prepare_immediate_jobs(
+        self,
+        jobs,
+        *,
+        auto_account_limit: int = 10,
+    ) -> None:
+        self._get_immediate_publisher().prepare_jobs(
+            jobs,
+            auto_account_limit=auto_account_limit,
+        )
+
+    def refresh_immediate_account_grades(self, jobs) -> None:
+        self._get_immediate_publisher().refresh_assigned_account_grades(jobs)
 
     def publish_immediate(self, job, dry_run: bool) -> str:
         return self._get_immediate_publisher().publish(job, dry_run)
@@ -1211,5 +1900,5 @@ class V2RBrowser:
     def classify_immediate_failure(self, error: Exception) -> tuple[str, bool]:
         return self._get_immediate_publisher().classify_failure(error)
 
-    def consume_failed_immediate_urls(self) -> set[str]:
-        return self._get_immediate_publisher().consume_failed_source_urls()
+    def is_deleted_immediate_url(self, url: str) -> bool:
+        return self._get_immediate_publisher().is_deleted_source_url(url)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
 from .content import CommentNode, ParsedArticle
 
@@ -56,6 +57,7 @@ class AffiliateJob:
     account: str
     article_type: str
     prefix: str = ""
+    revision_board: str = ""
     account_type: str = ""
     image_disabled: bool = False
     brand: str = ""
@@ -65,7 +67,11 @@ class AffiliateJob:
     daily_post_url: str = ""
     revision_url: str = ""
     daily_post: "DailyPost | None" = None
+    daily_scheduled_at: datetime | None = None
+    daily_written_at: datetime | None = None
     prepared_image_count: int = 0
+    photo_wash_prepared: bool = False
+    prepared_images: list[Any] = field(default_factory=list)
 
     @property
     def title(self) -> str:
@@ -97,6 +103,14 @@ class AffiliateJob:
             errors.append("카페명이 없습니다")
         elif self.cafe.strip() not in {"씨씨앙", "양평맘"}:
             errors.append("카페명은 씨씨앙 또는 양평맘만 사용할 수 있습니다")
+        if (
+            self.cafe.strip() == "씨씨앙"
+            and self.revision_board.strip()
+            and self.revision_board.replace(" ", "") != "자유수다방"
+        ):
+            errors.append(
+                "씨씨앙 J열 게시판명은 자유수다방 또는 공란만 사용할 수 있습니다"
+            )
         if not self.account.strip() and self.account_type.strip() not in {"실명", "비실명"}:
             errors.append("작성계정 또는 계정유형이 없습니다")
         if not self.article_type.strip():
@@ -129,10 +143,16 @@ class ImmediateJob:
     head_id: int | None = None
     canonical_head_name: str | None = None
     scheduled_at: datetime | None = None
+    publish_immediately: bool = False
     status: JobStatus = JobStatus.PENDING
     message: str = ""
     post_url: str = ""
     prepared_image_count: int = 0
+    photo_wash_prepared: bool = False
+    prepared_images: list[Any] = field(default_factory=list)
+    account_test_result_column: str = "H"
+    account_test_link_column: str = "I"
+    account_test_time_column: str = "J"
 
     @property
     def keyword(self) -> str:

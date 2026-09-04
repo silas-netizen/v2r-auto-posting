@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
+from .affiliate_api import AffiliateDailyPending, AffiliateRunStopped
 from .browser import V2RBrowser
 from .cafe_catalog import TEST_CAFE_IDS
 from .daily_posts import assign_daily_posts
@@ -21,6 +22,7 @@ from .models import (
     PostJob,
     RunResult,
 )
+from .photo_washer import needs_photo_wash
 from .report import write_report
 from .state import JobStateStore
 
@@ -37,6 +39,7 @@ def assign_immediate_schedules(
     *,
     now: datetime | None = None,
     rng: random.Random | None = None,
+    publish_immediately: bool = False,
 ) -> None:
     """Keep each cafe's reserved posts 5–15 minutes apart."""
     now = now or datetime.now(timezone.utc)
@@ -45,12 +48,31 @@ def assign_immediate_schedules(
     for job in jobs:
         if job.status != JobStatus.PENDING:
             continue
-        if job.cafe_id in TEST_CAFE_IDS:
+        job.publish_immediately = (
+            publish_immediately or job.cafe_id in TEST_CAFE_IDS
+        )
+        if job.publish_immediately:
             job.scheduled_at = None
             continue
         anchor = max(now, last_by_cafe.get(job.cafe_id, now))
         job.scheduled_at = anchor + timedelta(minutes=rng.randint(5, 15))
         last_by_cafe[job.cafe_id] = job.scheduled_at
+
+
+def assign_next_affiliate_daily_schedule(
+    job: AffiliateJob,
+    last_by_cafe: dict[str, datetime],
+    *,
+    now: datetime | None = None,
+    rng: random.Random | None = None,
+) -> datetime:
+    now = now or datetime.now(timezone.utc)
+    rng = rng or random.SystemRandom()
+    anchor = max(now, last_by_cafe.get(job.cafe, now))
+    scheduled_at = anchor + timedelta(minutes=rng.randint(5, 15))
+    job.daily_scheduled_at = scheduled_at
+    last_by_cafe[job.cafe] = scheduled_at
+    return scheduled_at
 
 
 class AutomationRunner:
@@ -168,22 +190,128 @@ class AffiliateRunner:
         daily_posts: list[DailyPost],
         source_sheet_url: str,
         status: Callable[[dict[str, int]], None] | None = None,
+        pause_event: threading.Event | None = None,
     ) -> tuple[RunResult, Path]:
         started_at = datetime.now()
+        pause_event = pause_event or threading.Event()
+        pause_logged = False
+
+        def wait_control() -> None:
+            nonlocal pause_logged
+            if stop_event.is_set():
+                raise AffiliateRunStopped("사용자가 중지함")
+            if pause_event.is_set() and not pause_logged:
+                self.logger.info("일시정지됨: 다시 시작을 기다립니다")
+                pause_logged = True
+            while pause_event.is_set():
+                if stop_event.wait(0.2):
+                    raise AffiliateRunStopped("사용자가 중지함")
+            if pause_logged:
+                self.logger.info("다시 시작: 중단된 제휴 작업을 이어서 처리합니다")
+                pause_logged = False
+        for job in jobs:
+            if needs_photo_wash(job) and not job.photo_wash_prepared:
+                job.status = JobStatus.FAILED
+                job.message = (
+                    "포토워셔 세탁 준비가 없습니다. "
+                    "2. 데이터 확인부터 다시 실행하세요"
+                )
         state_records: dict[int, tuple[str, dict]] = {}
+        saved_affiliate_urls: dict[int, set[str]] = {}
         if self.state and not dry_run:
             for job in jobs:
                 record = self.state.load_or_create(source_sheet_url, job)
                 state_records[id(job)] = (record["job_key"], record)
                 if record["stage"] == "COMPLETED":
-                    job.status = JobStatus.SKIPPED
-                    job.message = "작업 DB에서 이미 완료됨"
+                    source_ids = {
+                        str(record.get("daily_source_id") or ""),
+                        str(record.get("revision_source_id") or ""),
+                    } - {""}
+                    saved_affiliate_urls[id(job)] = {
+                        "https://v2r.daboja.im/nc/articleDetail/" + source_id
+                        for source_id in source_ids
+                    }
+                    if job.completion_url:
+                        saved_affiliate_urls[id(job)].add(job.completion_url)
                 elif record.get("account") and not job.account:
                     job.account = record["account"]
+                if record.get("daily_scheduled_at"):
+                    job.daily_scheduled_at = datetime.fromisoformat(
+                        str(record["daily_scheduled_at"]).replace("Z", "+00:00")
+                    )
 
         self.browser.ensure_v2r_login(email, password)
+        if not dry_run:
+            for job in jobs:
+                if job.completion_url:
+                    saved_affiliate_urls.setdefault(id(job), set()).add(
+                        job.completion_url
+                    )
+            all_saved_urls = {
+                url
+                for urls in saved_affiliate_urls.values()
+                for url in urls
+            }
+            probe_results = (
+                self.browser.probe_v2r_source_urls(
+                    all_saved_urls
+                )
+                if all_saved_urls
+                else {}
+            )
+            recovered_count = 0
+            unknown_count = 0
+            for job in jobs:
+                saved_urls = saved_affiliate_urls.get(id(job), set())
+                if not saved_urls:
+                    continue
+                states = [probe_results.get(url) for url in saved_urls]
+                record_info = state_records.get(id(job))
+                if any(state is True for state in states):
+                    if self.state and record_info:
+                        self.state.reset_sources(
+                            record_info[0],
+                            job.account,
+                            "V2R에서 삭제된 완료 글 자동 초기화",
+                        )
+                        record_info[1].update(
+                            {
+                                "stage": "ACCOUNT_ASSIGNED",
+                                "daily_source_id": "",
+                                "daily_scheduled_at": "",
+                                "revision_source_id": "",
+                            }
+                        )
+                    job.completion_url = ""
+                    job.revision_url = ""
+                    job.daily_scheduled_at = None
+                    job.daily_written_at = None
+                    job.status = JobStatus.PENDING
+                    job.message = ""
+                    recovered_count += 1
+                    continue
+                job.status = JobStatus.SKIPPED
+                if any(state is None for state in states):
+                    job.message = (
+                        "V2R 링크 확인 지연으로 기존 완료 기록 유지"
+                    )
+                    unknown_count += 1
+                else:
+                    job.message = "작업 DB에서 이미 완료됨"
+            if recovered_count:
+                self.logger.warning(
+                    "현재 jobs.db 관련 삭제 source %s건을 초기화하고 재발행합니다",
+                    recovered_count,
+                )
+            if unknown_count:
+                self.logger.warning(
+                    "현재 jobs.db 링크 %s건은 상태 확인 불가로 완료 기록을 유지합니다",
+                    unknown_count,
+                )
         self.browser.start_affiliate_api_run(jobs)
         assigned_jobs = self.browser.assign_affiliate_accounts(jobs)
+        if not dry_run:
+            self.browser.refresh_affiliate_account_grades(jobs)
         for job in assigned_jobs:
             try:
                 self.browser.update_sheet_cell(
@@ -207,6 +335,63 @@ class AffiliateRunner:
                 )
         assign_daily_posts(jobs, daily_posts)
 
+        last_daily_scheduled: dict[str, datetime] = {}
+        schedule_now = datetime.now(timezone.utc)
+        for job in jobs:
+            if job.status != JobStatus.PENDING:
+                continue
+            record_info = state_records.get(id(job))
+            has_daily_source = bool(
+                record_info
+                and record_info[1].get("daily_source_id")
+            )
+            schedule_is_usable = bool(
+                job.daily_scheduled_at
+                and (
+                    has_daily_source
+                    or job.daily_scheduled_at
+                    >= schedule_now + timedelta(minutes=2)
+                )
+            )
+            if not schedule_is_usable:
+                if job.daily_scheduled_at is not None:
+                    self.logger.warning(
+                        "행 %s source 없는 지난 일상 예약시간을 다시 계산합니다: %s",
+                        job.row_number,
+                        job.daily_scheduled_at.isoformat(),
+                    )
+                job.daily_scheduled_at = None
+                assign_next_affiliate_daily_schedule(
+                    job,
+                    last_daily_scheduled,
+                    now=schedule_now,
+                )
+                if self.state and record_info:
+                    serialized = (
+                        job.daily_scheduled_at.isoformat()
+                        .replace("+00:00", "Z")
+                    )
+                    self.state.update(
+                        record_info[0],
+                        daily_scheduled_at=serialized,
+                    )
+                    record_info[1]["daily_scheduled_at"] = serialized
+            else:
+                previous = last_daily_scheduled.get(job.cafe)
+                if (
+                    previous is None
+                    or job.daily_scheduled_at > previous
+                ):
+                    last_daily_scheduled[job.cafe] = job.daily_scheduled_at
+
+        runtime_resumes: dict[int, dict] = {
+            id(job): (
+                state_records[id(job)][1]
+                if id(job) in state_records
+                else {}
+            )
+            for job in jobs
+        }
         total = len(jobs)
         retry_count = 0
 
@@ -217,6 +402,9 @@ class AffiliateRunner:
                 {
                     "pending": sum(job.status == JobStatus.PENDING for job in jobs),
                     "success": sum(job.status == JobStatus.SUCCESS for job in jobs),
+                    "reserved": sum(
+                        job.status == JobStatus.RESERVED for job in jobs
+                    ),
                     "failed": sum(job.status == JobStatus.FAILED for job in jobs),
                     "skipped": sum(job.status == JobStatus.SKIPPED for job in jobs),
                     "retrying": retry_count,
@@ -225,14 +413,13 @@ class AffiliateRunner:
 
         emit_status()
         last_cafe_started: dict[str, float] = {}
-        last_failure_reason = ""
-        consecutive_failures = 0
-        circuit_open = False
         for index, job in enumerate(jobs, start=1):
             progress(index - 1, total)
-            if circuit_open:
+            try:
+                wait_control()
+            except AffiliateRunStopped:
                 job.status = JobStatus.SKIPPED
-                job.message = "동일 오류 5회 연속 발생으로 전체 작업 일시정지"
+                job.message = "사용자가 중지함"
                 continue
             if stop_event.is_set():
                 job.status = JobStatus.SKIPPED
@@ -253,6 +440,12 @@ class AffiliateRunner:
                 continue
 
             while True:
+                try:
+                    wait_control()
+                except AffiliateRunStopped:
+                    job.status = JobStatus.SKIPPED
+                    job.message = "사용자가 중지함"
+                    break
                 if not dry_run:
                     remaining = 20 - (
                         time.monotonic() - last_cafe_started.get(job.cafe, 0)
@@ -265,6 +458,12 @@ class AffiliateRunner:
                             job.status = JobStatus.SKIPPED
                             job.message = "사용자가 중지함"
                             break
+                    try:
+                        wait_control()
+                    except AffiliateRunStopped:
+                        job.status = JobStatus.SKIPPED
+                        job.message = "사용자가 중지함"
+                        break
                     last_cafe_started[job.cafe] = time.monotonic()
                 self.logger.info(
                     "[%s/%s] 행 %s 제휴 수정 발행 시작: %s",
@@ -276,25 +475,24 @@ class AffiliateRunner:
                 try:
                     record_info = state_records.get(id(job))
                     job_key = record_info[0] if record_info else ""
-                    resume = record_info[1] if record_info else {}
+                    resume = runtime_resumes[id(job)]
                     if self.state and job_key:
                         self.state.increment_attempt(job_key)
 
                     def checkpoint(stage: str, **values) -> None:
                         if self.state and job_key:
                             self.state.update(job_key, stage=stage, **values)
-                            resume.update(values)
-                            resume["stage"] = stage
+                        resume.update(values)
+                        resume["stage"] = stage
 
                     job.revision_url = self.browser.publish_affiliate_revision(
                         job,
                         dry_run,
                         resume=resume,
                         checkpoint=checkpoint if not dry_run else None,
+                        wait_control=wait_control if not dry_run else None,
                     )
                     job.status = JobStatus.SUCCESS
-                    last_failure_reason = ""
-                    consecutive_failures = 0
                     job.message = (
                         "전체 흐름 검증 완료" if dry_run else "수정 발행 완료"
                     )
@@ -317,17 +515,94 @@ class AffiliateRunner:
                                 job.row_number,
                             )
                     break
+                except AffiliateDailyPending as exc:
+                    job.status = JobStatus.RESERVED
+                    job.message = str(exc)
+                    self.logger.warning(
+                        "행 %s 일상 예약은 유지하고 다음 실행에서 다시 확인: %s",
+                        job.row_number,
+                        exc,
+                    )
+                    break
+                except AffiliateRunStopped:
+                    job.status = JobStatus.SKIPPED
+                    job.message = "사용자가 중지함"
+                    break
                 except Exception as exc:
+                    if "DELETED_NAVER_CAFE_ARTICLE_SOURCE" in str(exc):
+                        self.browser.reset_deleted_affiliate_sources(
+                            job,
+                            resume,
+                        )
+                        assign_next_affiliate_daily_schedule(
+                            job,
+                            last_daily_scheduled,
+                            now=datetime.now(timezone.utc),
+                        )
+                        serialized = (
+                            job.daily_scheduled_at.isoformat()
+                            .replace("+00:00", "Z")
+                        )
+                        resume["daily_scheduled_at"] = serialized
+                        if self.state and job_key:
+                            self.state.reset_sources(
+                                job_key,
+                                job.account,
+                                "V2R에서 삭제된 source 자동 초기화",
+                            )
+                            self.state.update(
+                                job_key,
+                                daily_scheduled_at=serialized,
+                            )
+                        retry_count += 1
+                        emit_status()
+                        self.logger.warning(
+                            "행 %s 삭제된 과거 source를 초기화하고 "
+                            "새 예약 쌍으로 재시도합니다",
+                            job.row_number,
+                        )
+                        continue
+                    if "NOT_START_AT_PAST_TIME" in str(exc):
+                        previous_schedule = job.daily_scheduled_at
+                        assign_next_affiliate_daily_schedule(
+                            job,
+                            last_daily_scheduled,
+                            now=datetime.now(timezone.utc),
+                        )
+                        serialized = (
+                            job.daily_scheduled_at.isoformat()
+                            .replace("+00:00", "Z")
+                        )
+                        resume.clear()
+                        resume.update(
+                            {
+                                "stage": "ACCOUNT_ASSIGNED",
+                                "account": job.account,
+                                "daily_source_id": "",
+                                "daily_scheduled_at": serialized,
+                                "revision_source_id": "",
+                            }
+                        )
+                        if self.state and job_key:
+                            self.state.reset_sources(
+                                job_key,
+                                job.account,
+                                "예약시간이 지나 미래 시간으로 다시 계산",
+                            )
+                            self.state.update(
+                                job_key,
+                                daily_scheduled_at=serialized,
+                            )
+                        retry_count += 1
+                        emit_status()
+                        self.logger.warning(
+                            "행 %s 지난 예약시간 자동 재계산 후 재시도: %s → %s",
+                            job.row_number,
+                            previous_schedule,
+                            job.daily_scheduled_at,
+                        )
+                        continue
                     reason, retryable = self.browser.classify_affiliate_failure(exc)
-                    if reason == last_failure_reason:
-                        consecutive_failures += 1
-                    else:
-                        last_failure_reason = reason
-                        consecutive_failures = 1
-                    if consecutive_failures >= 5:
-                        retryable = False
-                        circuit_open = True
-                        reason = f"{reason} (동일 오류 5회 연속, 전체 일시정지)"
                     failed_account = job.account
                     self.logger.error(
                         "행 %s 계정 %s 실패: %s",
@@ -448,20 +723,109 @@ class ImmediateRunner:
         source_sheet_url: str = "",
         status: Callable[[dict[str, int]], None] | None = None,
         pause_event: threading.Event | None = None,
+        publish_immediately: bool = False,
+        auto_account_limit: int = 10,
+        immediate_interval_minutes: int = 1,
     ) -> tuple[RunResult, Path]:
+        if not 1 <= immediate_interval_minutes <= 15:
+            raise ValueError("즉시 발행 간격은 1분부터 15분까지 선택하세요")
         started_at = datetime.now()
         pause_event = pause_event or threading.Event()
+        for job in jobs:
+            if needs_photo_wash(job) and not job.photo_wash_prepared:
+                job.status = JobStatus.FAILED
+                job.message = (
+                    "포토워셔 세탁 준비가 없습니다. "
+                    "2. 데이터 확인부터 다시 실행하세요"
+                )
         self.browser.ensure_v2r_login("", "")
-        self.browser.prepare_immediate_jobs(jobs)
-        removed_failures = self.history.remove_urls(
-            self.browser.consume_failed_immediate_urls()
-        )
-        if removed_failures:
-            self.logger.warning(
-                "실제 발행 실패 이력 %s건을 중복 완료 목록에서 제거해 재시도합니다",
-                removed_failures,
+        if not dry_run:
+            saved_urls_by_job: dict[int, str] = {}
+            for job in jobs:
+                if job.source_kind == "account_test":
+                    continue
+                history_record = self.history.get(job) or {}
+                saved_url = (
+                    job.completion_url
+                    or history_record.get("url", "")
+                )
+                if not saved_url:
+                    continue
+                saved_urls_by_job[id(job)] = saved_url
+            source_states: dict[str, dict[str, str]] = {}
+            if saved_urls_by_job:
+                if hasattr(self.browser, "inspect_immediate_source_urls"):
+                    source_states = self.browser.inspect_immediate_source_urls(
+                        set(saved_urls_by_job.values())
+                    )
+                else:
+                    probe_results = self.browser.probe_v2r_source_urls(
+                        set(saved_urls_by_job.values())
+                    )
+                    source_states = {
+                        url: {
+                            "state": (
+                                "deleted"
+                                if deleted is True
+                                else "present"
+                                if deleted is False
+                                else "unknown"
+                            )
+                        }
+                        for url, deleted in probe_results.items()
+                    }
+            recovered_urls: set[str] = set()
+            recovered_deleted = 0
+            recovered_failed = 0
+            unknown_count = 0
+            for job in jobs:
+                saved_url = saved_urls_by_job.get(id(job), "")
+                if not saved_url:
+                    continue
+                state = source_states.get(saved_url, {}).get("state", "unknown")
+                if state == "unknown":
+                    unknown_count += 1
+                    continue
+                if state == "present":
+                    continue
+                recovered_urls.add(saved_url)
+                if state == "deleted":
+                    recovered_deleted += 1
+                else:
+                    recovered_failed += 1
+                job.completion_url = ""
+                job.status = JobStatus.PENDING
+                job.message = ""
+            removed_local = self.history.remove_urls(recovered_urls)
+            if recovered_deleted or recovered_failed:
+                self.logger.warning(
+                    "현재 작업 관련 과거 source 복구: 삭제 %s건 / 실패 %s건 / "
+                    "로컬 완료 이력 제거 %s건",
+                    recovered_deleted,
+                    recovered_failed,
+                    removed_local,
+                )
+            if unknown_count:
+                self.logger.warning(
+                    "현재 작업 링크 %s건은 상태 확인 불가로 기존 중복 방지를 유지합니다",
+                    unknown_count,
+                )
+        if auto_account_limit == 10:
+            self.browser.prepare_immediate_jobs(jobs)
+        else:
+            self.browser.prepare_immediate_jobs(
+                jobs,
+                auto_account_limit=auto_account_limit,
             )
-        assign_immediate_schedules(jobs)
+        if not dry_run and hasattr(
+            self.browser,
+            "refresh_immediate_account_grades",
+        ):
+            self.browser.refresh_immediate_account_grades(jobs)
+        assign_immediate_schedules(
+            jobs,
+            publish_immediately=publish_immediately,
+        )
 
         if source_sheet_url:
             for job in jobs:
@@ -535,12 +899,14 @@ class ImmediateRunner:
                 if job.status == JobStatus.SUCCESS
                 else job.message
             )
-            values = {"H": result_text}
+            values = {
+                job.account_test_result_column: result_text
+            }
             if job.status == JobStatus.SUCCESS:
                 values.update(
                     {
-                        "I": job.post_url,
-                        "J": datetime.now().astimezone().strftime(
+                        job.account_test_link_column: job.post_url,
+                        job.account_test_time_column: datetime.now().astimezone().strftime(
                             "%Y-%m-%d %H:%M:%S"
                         ),
                     }
@@ -568,6 +934,7 @@ class ImmediateRunner:
         emit_status()
         total = len(jobs)
         last_cafe_started: dict[int, float] = {}
+        last_immediate_started = 0.0
 
         def wait_if_paused() -> float:
             if not pause_event.is_set():
@@ -634,40 +1001,49 @@ class ImmediateRunner:
                 progress(index, total)
                 emit_status()
                 continue
-            if not dry_run and self.history.contains(job):
-                if job.source_kind == "account_test":
-                    record = self.history.get(job) or {}
-                    job.status = JobStatus.SUCCESS
-                    job.message = "이전 테스트 성공 결과 복구"
-                    job.post_url = record.get("url", "")
-                    self.logger.info(
-                        "[%s/%s] 행 %s 재발행 없이 이전 성공 결과 복구: %s",
-                        index,
-                        total,
-                        job.row_number,
-                        job.account,
-                    )
-                    queue_account_test_result(job)
-                else:
-                    job.status = JobStatus.SKIPPED
-                    job.message = "이전에 발행한 동일 글"
-                    self.logger.info(
-                        "[%s/%s] 행 %s 건너뜀: %s",
-                        index,
-                        total,
-                        job.row_number,
-                        job.message,
-                    )
+            if (
+                not dry_run
+                and job.source_kind != "account_test"
+                and self.history.contains(job)
+            ):
+                job.status = JobStatus.SKIPPED
+                job.message = "이전에 발행한 동일 글"
+                self.logger.info(
+                    "[%s/%s] 행 %s 건너뜀: %s",
+                    index,
+                    total,
+                    job.row_number,
+                    job.message,
+                )
                 progress(index, total)
                 emit_status()
                 continue
 
             while True:
                 if not dry_run:
-                    remaining = 20 - (
-                        time.monotonic() - last_cafe_started.get(job.cafe_id, 0)
+                    immediate_with_interval = (
+                        job.publish_immediately
+                        and job.source_kind != "account_test"
+                    )
+                    required_gap = (
+                        immediate_interval_minutes * 60
+                        if immediate_with_interval
+                        else 20
+                    )
+                    previous_started = (
+                        last_immediate_started
+                        if immediate_with_interval
+                        else last_cafe_started.get(job.cafe_id, 0)
+                    )
+                    remaining = required_gap - (
+                        time.monotonic() - previous_started
                     )
                     if remaining > 0:
+                        if immediate_with_interval:
+                            self.logger.info(
+                                "다음 즉시 발행까지 %.0f초 대기",
+                                remaining,
+                            )
                         deadline = time.monotonic() + remaining
                         while time.monotonic() < deadline:
                             paused_seconds = wait_if_paused()
@@ -689,7 +1065,10 @@ class ImmediateRunner:
                                 job.message,
                             )
                             break
-                    last_cafe_started[job.cafe_id] = time.monotonic()
+                    if immediate_with_interval:
+                        last_immediate_started = time.monotonic()
+                    else:
+                        last_cafe_started[job.cafe_id] = time.monotonic()
                 if job.scheduled_at is not None:
                     minimum_start = datetime.now(timezone.utc) + timedelta(minutes=2)
                     if job.scheduled_at < minimum_start:
@@ -719,8 +1098,8 @@ class ImmediateRunner:
                         job.source_name,
                         job.row_number,
                         (
-                            "한 줄 즉시 발행"
-                            if job.cafe_id in TEST_CAFE_IDS
+                            "즉시 발행"
+                            if job.publish_immediately
                             else "예약 등록"
                         ),
                         job.canonical_cafe_name,
@@ -733,19 +1112,19 @@ class ImmediateRunner:
                     job.post_url = self.browser.publish_immediate(job, dry_run)
                     job.status = (
                         JobStatus.SUCCESS
-                        if job.cafe_id in TEST_CAFE_IDS
+                        if job.publish_immediately
                         else JobStatus.RESERVED
                     )
                     job.message = (
                         (
                             "즉시 발행 API 검증 완료"
-                            if job.cafe_id in TEST_CAFE_IDS
+                            if job.publish_immediately
                             else "예약 API 검증 완료"
                         )
                         if dry_run
                         else (
-                            "한 줄 즉시 발행 완료"
-                            if job.cafe_id in TEST_CAFE_IDS
+                            "즉시 발행 완료"
+                            if job.publish_immediately
                             else "예약 발행 등록 완료"
                         )
                     )

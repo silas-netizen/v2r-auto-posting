@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import csv
+import heapq
 import re
+from collections import deque
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -26,6 +28,8 @@ BRAND_OPTIONAL_COLUMNS = {
 }
 BOARD_HEADERS = {"게시판명", "게시판", "메뉴", "메뉴명"}
 DAILY_HEADERS = ("카페명", "게시판명", "각색제목", "각색본문")
+DAILY_OPTIONAL_ACCOUNT_HEADER = "작성계정"
+DAILY_OPTIONAL_BOARD_URL_HEADER = "게시판링크"
 INFORMATIONAL_SHEET_ID = "1vSON0Rej9anDQXcAOXyBrCr50B4MMqZ79FahF4cDPJw"
 INFORMATIONAL_SHEET_GID = "1193993260"
 ACCOUNT_TEST_SHEET_ID = "1UgcAvHFCpC5N9joC9T5WCATK834F3XAtRrepFv6XbEs"
@@ -98,6 +102,15 @@ def _find_header(headers: list[str], candidates: set[str]) -> str:
     return next((header for header in headers if header.strip() in candidates), "")
 
 
+def _column_letter(zero_based_index: int) -> str:
+    value = zero_based_index + 1
+    letters = ""
+    while value:
+        value, remainder = divmod(value - 1, 26)
+        letters = chr(ord("A") + remainder) + letters
+    return letters
+
+
 def is_informational_sheet(sheet_url: str) -> bool:
     return (
         f"/d/{INFORMATIONAL_SHEET_ID}/" in sheet_url
@@ -158,7 +171,8 @@ def load_brand_immediate_jobs(
     csv_path = Path(path)
     with csv_path.open("r", encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream)
-        headers = [header for header in (reader.fieldnames or []) if header]
+        raw_headers = list(reader.fieldnames or [])
+        headers = [header for header in raw_headers if header]
         missing = [
             header
             for header in BRAND_REQUIRED_COLUMNS.values()
@@ -234,6 +248,33 @@ def load_brand_immediate_jobs(
     return jobs
 
 
+def interleave_daily_jobs_by_cafe(
+    jobs: list[ImmediateJob],
+) -> list[ImmediateJob]:
+    """Alternate cafes while preserving each cafe's original row order."""
+    queues: dict[str, deque[ImmediateJob]] = {}
+    for job in jobs:
+        queues.setdefault(job.cafe, deque()).append(job)
+    result: list[ImmediateJob] = []
+    heap = [
+        (-len(queue), order, cafe)
+        for order, (cafe, queue) in enumerate(queues.items())
+    ]
+    heapq.heapify(heap)
+    held: tuple[int, int, str] | None = None
+    while heap:
+        remaining, order, cafe = heapq.heappop(heap)
+        result.append(queues[cafe].popleft())
+        remaining += 1
+        if held is not None:
+            heapq.heappush(heap, held)
+        held = (remaining, order, cafe) if remaining < 0 else None
+    if held is not None:
+        _remaining, _order, cafe = held
+        result.extend(queues[cafe])
+    return result
+
+
 def load_daily_excel_jobs(path: str | Path) -> list[ImmediateJob]:
     workbook_path = Path(path)
     workbook = load_workbook(workbook_path, read_only=True, data_only=True)
@@ -245,19 +286,44 @@ def load_daily_excel_jobs(path: str | Path) -> list[ImmediateJob]:
                 first = next(rows)
             except StopIteration:
                 continue
-            headers = tuple(_cell(value) for value in first[:4])
-            if headers != DAILY_HEADERS:
+            headers = tuple(_cell(value) for value in first)
+            missing = [header for header in DAILY_HEADERS if header not in headers]
+            if missing:
                 raise SheetSchemaError(
-                    f"Excel '{worksheet.title}' 첫 행은 "
-                    + ", ".join(DAILY_HEADERS)
-                    + " 순서여야 합니다"
+                    f"Excel '{worksheet.title}' 필수 열이 없습니다: "
+                    + ", ".join(missing)
                 )
+            duplicates = [
+                header for header in headers if header and headers.count(header) > 1
+            ]
+            if duplicates:
+                raise SheetSchemaError(
+                    f"Excel '{worksheet.title}' 열 이름이 중복됩니다: "
+                    + ", ".join(sorted(set(duplicates)))
+                )
+            column = {header: index for index, header in enumerate(headers) if header}
+
+            def value(values, header: str) -> str:
+                index = column.get(header)
+                return (
+                    _cell(values[index])
+                    if index is not None and index < len(values)
+                    else ""
+                )
+
             for row_number, values in enumerate(rows, start=2):
-                cafe, board, title, body = (_cell(value) for value in values[:4])
+                cafe, board, title, body = (
+                    value(values, header) for header in DAILY_HEADERS
+                )
                 if not any((cafe, board, title, body)):
                     continue
                 if not all((cafe, board, title, body)):
                     continue
+                board_url = value(values, DAILY_OPTIONAL_BOARD_URL_HEADER)
+                link_match = re.search(
+                    r"/cafes/(\d+)/menus/(\d+)",
+                    board_url,
+                )
                 jobs.append(
                     ImmediateJob(
                         row_number=row_number,
@@ -270,6 +336,9 @@ def load_daily_excel_jobs(path: str | Path) -> list[ImmediateJob]:
                         ),
                         cafe=cafe,
                         board=board,
+                        account=value(values, DAILY_OPTIONAL_ACCOUNT_HEADER),
+                        cafe_id=int(link_match.group(1)) if link_match else 0,
+                        menu_id=int(link_match.group(2)) if link_match else 0,
                         image_disabled=True,
                         source_kind="daily",
                         source_name=f"{workbook_path.name}:{worksheet.title}",
@@ -279,14 +348,15 @@ def load_daily_excel_jobs(path: str | Path) -> list[ImmediateJob]:
         workbook.close()
     if not jobs:
         raise SheetSchemaError("Excel에 즉시 발행할 일상 글이 없습니다")
-    return jobs
+    return interleave_daily_jobs_by_cafe(jobs)
 
 
 def load_account_test_jobs(path: str | Path) -> list[ImmediateJob]:
     csv_path = Path(path)
     with csv_path.open("r", encoding="utf-8-sig", newline="") as stream:
         reader = csv.DictReader(stream)
-        headers = [header for header in (reader.fieldnames or []) if header]
+        raw_headers = list(reader.fieldnames or [])
+        headers = [header for header in raw_headers if header]
         missing = [
             header
             for header in ACCOUNT_TEST_HEADERS.values()
@@ -296,6 +366,25 @@ def load_account_test_jobs(path: str | Path) -> list[ImmediateJob]:
             raise SheetSchemaError(
                 "한줄테스트 시트 열을 찾지 못했습니다: " + ", ".join(missing)
             )
+        duplicates = [
+            header
+            for header in ACCOUNT_TEST_HEADERS.values()
+            if raw_headers.count(header) > 1
+        ]
+        if duplicates:
+            raise SheetSchemaError(
+                "한줄테스트 시트 열 이름이 중복됩니다: "
+                + ", ".join(duplicates)
+            )
+        result_column = _column_letter(
+            raw_headers.index(ACCOUNT_TEST_HEADERS["result"])
+        )
+        link_column = _column_letter(
+            raw_headers.index(ACCOUNT_TEST_HEADERS["link"])
+        )
+        tested_at_column = _column_letter(
+            raw_headers.index(ACCOUNT_TEST_HEADERS["tested_at"])
+        )
         jobs: list[ImmediateJob] = []
         for row_number, row in enumerate(reader, start=2):
             selected = _cell(row.get(ACCOUNT_TEST_HEADERS["selected"])).casefold()
@@ -323,6 +412,9 @@ def load_account_test_jobs(path: str | Path) -> list[ImmediateJob]:
                     source_kind="account_test",
                     source_name=csv_path.name,
                     use_comment_ai=False,
+                    account_test_result_column=result_column,
+                    account_test_link_column=link_column,
+                    account_test_time_column=tested_at_column,
                 )
             )
     if not jobs:

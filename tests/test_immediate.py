@@ -6,8 +6,10 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
+from v2r_auto.affiliate_api import AffiliateApiError
 from v2r_auto.immediate_api import (
     BOARD_ALIASES,
+    KNOWN_CAFE_IDS,
     MANAGER_ACCOUNTS,
     ImmediateApiPublisher,
     SELF_COMMENT_ACCOUNTS,
@@ -82,6 +84,35 @@ def test_brand_sheet_preserves_body_unless_special_format_is_enabled(
     assert publisher._destination(informational)["use_comment_ai"] is True
 
 
+def test_normal_self_owned_job_can_use_immediate_destination(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "brand-immediate.csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,"
+        "말머리,계정유형,이미지 없음,게시판명\n"
+        '"키워드","제목 : 제목\n본문 : 본문",헬씨 트리,writer,'
+        "질문형,,,실명,Y,맛있는 건강 식단 공유\n",
+        encoding="utf-8-sig",
+    )
+    job = load_brand_immediate_jobs(path, brand="테스트")[0]
+    job.cafe_id = 23708088
+    job.menu_id = 29
+    job.canonical_cafe_name = "헬씨 트리"
+    job.canonical_board_name = "맛있는 건강 식단 공유"
+    job.publish_immediately = True
+    job.scheduled_at = None
+
+    destination = ImmediateApiPublisher(
+        None,
+        logging.getLogger("immediate-destination-test"),
+    )._destination(job)
+
+    assert destination["start_at"] is None
+    assert destination["cafe_id"] == 23708088
+    assert destination["menu_id"] == 29
+
+
 def test_one_malformed_sheet_row_does_not_abort_other_rows(tmp_path: Path) -> None:
     path = tmp_path / "brand.csv"
     path.write_text(
@@ -119,6 +150,87 @@ def test_load_daily_excel_a_to_d(tmp_path: Path) -> None:
     assert jobs[0].use_comment_ai is True
 
 
+def test_daily_excel_accepts_optional_account_column(tmp_path: Path) -> None:
+    path = tmp_path / "daily-with-account.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(
+        ["카페명", "게시판명", "각색제목", "각색본문", "작성계정"]
+    )
+    sheet.append(["헬씨 트리", "자유게시판", "지정 글", "본문", "writer-a"])
+    sheet.append(["헬씨 트리", "자유게시판", "자동 글", "본문", ""])
+    workbook.save(path)
+
+    jobs = load_daily_excel_jobs(path)
+
+    assert jobs[0].account == "writer-a"
+    assert jobs[1].account == ""
+
+
+def test_daily_excel_maps_columns_by_header_and_reads_board_link(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "daily-current-layout.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(
+        [
+            "카페명",
+            "게시판명",
+            "게시판링크",
+            "작성계정",
+            "각색제목",
+            "각색본문",
+            "등록시각",
+        ]
+    )
+    sheet.append(
+        [
+            "헬씨트리",
+            "오프라인 건강 강좌 신청",
+            "https://cafe.naver.com/f-e/cafes/23708088/menus/17?viewType=L",
+            "azqpale",
+            "9월 무릎 관절 스트레칭 강좌 신청받습니다",
+            "물리치료사 선생님과 함께하는 실제 본문입니다",
+            "2026-09-01 12:17",
+        ]
+    )
+    workbook.save(path)
+
+    job = load_daily_excel_jobs(path)[0]
+
+    assert job.cafe == "헬씨트리"
+    assert job.board == "오프라인 건강 강좌 신청"
+    assert job.cafe_id == 23708088
+    assert job.menu_id == 17
+    assert job.account == "azqpale"
+    assert job.title == "9월 무릎 관절 스트레칭 강좌 신청받습니다"
+    assert "실제 본문" in job.body
+
+
+def test_daily_excel_interleaves_cafes_without_reordering_each_cafe(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "daily-interleaved.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["카페명", "게시판명", "각색제목", "각색본문"])
+    sheet.append(["헬씨트리", "게시판", "헬씨1", "본문"])
+    sheet.append(["헬씨트리", "게시판", "헬씨2", "본문"])
+    sheet.append(["송도포털", "게시판", "송도1", "본문"])
+    sheet.append(["송도포털", "게시판", "송도2", "본문"])
+    sheet.append(["글로시 마이", "게시판", "글로시1", "본문"])
+    workbook.save(path)
+
+    jobs = load_daily_excel_jobs(path)
+
+    assert all(first.cafe != second.cafe for first, second in zip(jobs, jobs[1:]))
+    assert [job.title for job in jobs if job.cafe == "헬씨트리"] == [
+        "헬씨1",
+        "헬씨2",
+    ]
+
+
 def test_loads_only_checked_one_line_account_tests(tmp_path: Path) -> None:
     path = tmp_path / "account-tests.csv"
     path.write_text(
@@ -137,6 +249,49 @@ def test_loads_only_checked_one_line_account_tests(tmp_path: Path) -> None:
     assert jobs[0].source_kind == "account_test"
     assert jobs[0].use_comment_ai is False
     assert jobs[0].validate() == []
+
+
+def test_account_test_columns_follow_headers_beyond_z(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "account-tests-wide.csv"
+    extra_headers = [f"추가열{index}" for index in range(1, 21)]
+    headers = [
+        "번호",
+        "ID",
+        *extra_headers,
+        "작업 구분",
+        "연동",
+        "가아사 조건",
+        "실/비실",
+        "테스트 선택",
+        "테스트 결과",
+        "테스트 링크",
+        "테스트 일시",
+    ]
+    values = [
+        "12",
+        "test-id",
+        *([""] * len(extra_headers)),
+        "",
+        "",
+        "",
+        "",
+        "TRUE",
+        "",
+        "",
+        "",
+    ]
+    path.write_text(
+        ",".join(headers) + "\n" + ",".join(values) + "\n",
+        encoding="utf-8-sig",
+    )
+
+    job = load_account_test_jobs(path)[0]
+
+    assert job.account_test_result_column == "AB"
+    assert job.account_test_link_column == "AC"
+    assert job.account_test_time_column == "AD"
 
 
 def test_formats_punctuation_free_daily_body_into_two_sentence_paragraphs() -> None:
@@ -246,11 +401,26 @@ class FakeImmediatePublisher(ImmediateApiPublisher):
         if path == "/naver_cafes/naver_join_cafe":
             return {
                 "naver_join_cafe": [
-                    {"login_id": "writer-a"},
-                    {"login_id": "writer-b"},
-                    {"login_id": "writer-alias"},
-                    *[{"login_id": account} for account in MANAGER_ACCOUNTS],
-                    *[{"login_id": account} for account in SELF_COMMENT_ACCOUNTS],
+                    {"login_id": "writer-a", "member_key": "member-writer-a"},
+                    {"login_id": "writer-b", "member_key": "member-writer-b"},
+                    {
+                        "login_id": "writer-alias",
+                        "member_key": "member-writer-alias",
+                    },
+                    *[
+                        {
+                            "login_id": account,
+                            "member_key": f"member-{account}",
+                        }
+                        for account in MANAGER_ACCOUNTS
+                    ],
+                    *[
+                        {
+                            "login_id": account,
+                            "member_key": f"member-{account}",
+                        }
+                        for account in SELF_COMMENT_ACCOUNTS
+                    ],
                 ]
             }
         if path == "/naver_cafes/board_histories" or path == "/naver_cafe_articles/board_histories":
@@ -263,6 +433,19 @@ class FakeImmediatePublisher(ImmediateApiPublisher):
                 ]
             }
         raise AssertionError((method, path, query))
+
+
+def test_missing_history_endpoint_does_not_block_account_ordering() -> None:
+    class MissingHistoryPublisher(ImmediateApiPublisher):
+        def _request(self, method, path, payload=None, query=None):
+            raise AffiliateApiError(
+                "V2R 요청 실패 (404): "
+                "/naver_cafe_articles/board_histories - Not Found"
+            )
+
+    publisher = MissingHistoryPublisher(None, logging.getLogger("history-404"))
+
+    assert publisher._last_used(10174516) == {}
 
 
 def test_account_tests_resolve_registration_membership_and_alternate_cafes(
@@ -371,6 +554,46 @@ def test_prepare_jobs_matches_live_ids_and_rotates_all_writers(tmp_path: Path) -
     assert all(job.status == JobStatus.PENDING for job in jobs)
 
 
+def test_prepare_jobs_replaces_fixed_account_without_join_model(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "daily.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["카페명", "게시판명", "각색제목", "각색본문"])
+    sheet.append(["고요한아침", "가입인사", "제목", "본문"])
+    workbook.save(path)
+    job = load_daily_excel_jobs(path)[0]
+    job.account = "missing-join-account"
+    publisher = FakeImmediatePublisher(None, logging.getLogger("test"))
+
+    publisher.prepare_jobs([job])
+
+    assert job.status == JobStatus.PENDING
+    assert job.account == "writer-a"
+
+
+def test_fixed_account_ignores_sheet_account_type_when_membership_is_valid(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "brand.csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,"
+        "말머리,계정유형,이미지 없음,게시판명\n"
+        '"키워드","제목 : 제목\n본문 : 본문",고요한아침,'
+        "writer-a,후기형,,,비실명,,가입인사\n",
+        encoding="utf-8-sig",
+    )
+    job = load_brand_immediate_jobs(path, brand="브랜드")[0]
+    publisher = FakeImmediatePublisher(None, logging.getLogger("test"))
+
+    publisher.prepare_jobs([job])
+
+    assert job.status == JobStatus.PENDING
+    assert job.account == "writer-a"
+    assert job.account_type == "실명"
+
+
 def test_writer_rotation_does_not_restart_for_each_board(tmp_path: Path) -> None:
     path = tmp_path / "daily.xlsx"
     workbook = Workbook()
@@ -433,6 +656,127 @@ def test_verified_wedding_board_alias_resolves_v2r_typo() -> None:
     )
 
     assert menu.menu_id == 5
+
+
+def test_twin_mom_board_alias_resolves_decorated_v2r_name() -> None:
+    wanted = BOARD_ALIASES[
+        (10174516, normalized_name("가족업체 자유게시판"))
+    ]
+    menu = match_catalog_name(
+        wanted,
+        [CafeMenu(menu_id=664, name="ㄴ가족업체 자유게시판")],
+        label="게시판",
+    )
+
+    assert menu.menu_id == 664
+
+
+def test_new_self_owned_cafe_names_use_verified_ids() -> None:
+    assert KNOWN_CAFE_IDS[normalized_name("헬씨 트리")] == 23708088
+    assert KNOWN_CAFE_IDS[normalized_name("송도포털")] == 16149995
+    assert KNOWN_CAFE_IDS[normalized_name("글로시 마이")] == 15175096
+    assert KNOWN_CAFE_IDS[normalized_name("웨딩노트")] == 15441090
+
+
+def test_twin_mom_sheet_account_board_and_grade_refresh(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "twin-mom.csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,"
+        "말머리,계정유형,이미지 없음,게시판명\n"
+        '"임산부 치핵","제목 : 제목\n본문 : 본문",쌍둥이맘 모여라,'
+        "azqpale,질문형,,,비실명,Y,가족업체 자유게시판\n",
+        encoding="utf-8-sig",
+    )
+    job = load_brand_immediate_jobs(path, brand="테스트")[0]
+    job.cafe_id = 10174516
+    job.menu_id = 664
+    job.board = "Excel 표시명이 달라도 링크 ID 우선"
+
+    class TwinMomPublisher(ImmediateApiPublisher):
+        def __init__(self):
+            super().__init__(None, logging.getLogger("twin-mom-test"))
+            self.authorization = "token"
+            self.refreshed = False
+
+        def _capture_authorization(self):
+            return None
+
+        def _request(self, method, request_path, payload=None, query=None, **kwargs):
+            if request_path == "/naver_cafes/naver_join_cafes":
+                return {
+                    "naver_join_cafes": [
+                        {
+                            "cafe_id": 10174516,
+                            "pc_cafe_name": (
+                                "쌍둥이맘 모여라 - 쌍둥이 대표 카페"
+                            ),
+                        }
+                    ]
+                }
+            if request_path == "/navers/accounts":
+                return {
+                    "accounts": [
+                        {
+                            "naver_login_id": "azqpale",
+                            "my_info_v2": {"is_real_name": False},
+                        }
+                    ]
+                }
+            if request_path == "/naver_cafes/naver_join_cafe":
+                return {
+                    "naver_join_cafe": {
+                        "cafe_id": 10174516,
+                        "naver_accounts": [
+                            {
+                                "login_id": "azqpale",
+                                "member_key": "member-azqpale",
+                                "level_info": {
+                                    "member_level": 128 if self.refreshed else 1,
+                                    "member_level_icon_url": (
+                                        "가족회원" if self.refreshed else ""
+                                    ),
+                                },
+                            }
+                        ],
+                    }
+                }
+            if request_path == "/naver_cafes/menus":
+                return {
+                    "cafe_menus": [
+                        {
+                            "menuId": 664,
+                            "menuName": "ㄴ가족업체 자유게시판",
+                            "writable": True,
+                        }
+                    ]
+                }
+            if request_path == "/naver_cafe_articles/board_histories":
+                return {"histories": []}
+            if request_path == "/naver_cafes/naver_join_cafe/sync/account":
+                assert method == "PUT"
+                assert payload == {
+                    "cafe_id": 10174516,
+                    "naver_login_id": "azqpale",
+                }
+                self.refreshed = True
+                return {"naver_account": payload}
+            raise AssertionError((method, request_path, query))
+
+    publisher = TwinMomPublisher()
+    publisher.prepare_jobs([job])
+    failed = publisher.refresh_assigned_account_grades([job])
+
+    assert failed == []
+    assert publisher.refreshed is True
+    assert job.cafe_id == 10174516
+    assert job.menu_id == 664
+    assert job.account == "azqpale"
+    assert job.canonical_cafe_name == (
+        "쌍둥이맘 모여라 - 쌍둥이 대표 카페"
+    )
+    assert job.status == JobStatus.PENDING
 
 
 def test_one_unknown_board_does_not_abort_other_rows(tmp_path: Path) -> None:
@@ -500,6 +844,97 @@ def test_schedules_accumulate_five_to_fifteen_minutes_per_cafe(
     assert jobs[3].scheduled_at is None
 
 
+def test_immediate_option_removes_all_normal_reservation_times(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "daily-immediate.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["카페명", "게시판명", "각색제목", "각색본문"])
+    sheet.append(["헬씨 트리", "자유게시판", "제목1", "본문1"])
+    sheet.append(["송도포털", "자유게시판", "제목2", "본문2"])
+    workbook.save(path)
+    jobs = load_daily_excel_jobs(path)
+    jobs[0].cafe_id = 23708088
+    jobs[1].cafe_id = 16149995
+
+    assign_immediate_schedules(jobs, publish_immediately=True)
+
+    assert all(job.publish_immediately for job in jobs)
+    assert all(job.scheduled_at is None for job in jobs)
+
+
+def test_auto_assignment_uses_only_selected_number_of_accounts(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "daily-account-limit.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["카페명", "게시판명", "각색제목", "각색본문"])
+    sheet.append(["헬씨 트리", "자유게시판", "제목", "본문"])
+    workbook.save(path)
+    job = load_daily_excel_jobs(path)[0]
+    job.cafe_id = 23708088
+    job.menu_id = 1
+
+    publisher = ImmediateApiPublisher(None, logging.getLogger("limit-test"))
+    publisher.auto_account_limit = 2
+    publisher.cafe_pools[23708088] = ["writer-a", "writer-b", "writer-c"]
+    publisher.menu_pools[(23708088, 1)] = [
+        "writer-a",
+        "writer-b",
+        "writer-c",
+    ]
+    publisher.global_accounts = {
+        account: {"my_info_v2": {"is_real_name": True}}
+        for account in ("writer-a", "writer-b", "writer-c")
+    }
+
+    assert [publisher.pick_account(job) for _ in range(3)] == [
+        "writer-a",
+        "writer-b",
+        "writer-a",
+    ]
+
+
+def test_auto_assignment_prefers_accounts_covering_requested_boards(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "daily-board-coverage.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["카페명", "게시판명", "각색제목", "각색본문"])
+    sheet.append(["헬씨트리", "게시판1", "제목1", "본문1"])
+    sheet.append(["헬씨트리", "게시판2", "제목2", "본문2"])
+    workbook.save(path)
+    jobs = load_daily_excel_jobs(path)
+    for job, menu_id in zip(jobs, (1, 2)):
+        job.cafe_id = 23708088
+        job.menu_id = menu_id
+        job.canonical_cafe_name = "헬씨 트리"
+
+    publisher = ImmediateApiPublisher(None, logging.getLogger("coverage-test"))
+    publisher.auto_account_limit = 2
+    publisher.cafe_pools[23708088] = ["limited", "all-a", "all-b"]
+    publisher.menu_pools[(23708088, 1)] = ["limited", "all-a", "all-b"]
+    publisher.menu_pools[(23708088, 2)] = ["all-a", "all-b"]
+    publisher.global_accounts = {
+        account: {"my_info_v2": {"is_real_name": True}}
+        for account in ("limited", "all-a", "all-b")
+    }
+
+    publisher._prepare_auto_account_pools(
+        jobs,
+        ["limited", "all-a", "all-b"],
+    )
+
+    assert publisher.auto_selected_pools[(23708088, "실명")] == [
+        "all-a",
+        "all-b",
+    ]
+    assert publisher.pick_account(jobs[1]) in {"all-a", "all-b"}
+
+
 def test_duplicate_skip_reason_is_written_to_live_log(
     tmp_path: Path,
     caplog,
@@ -517,6 +952,9 @@ def test_duplicate_skip_reason_is_written_to_live_log(
     class DuplicateBrowser:
         def ensure_v2r_login(self, _email, _password):
             return None
+
+        def probe_v2r_source_urls(self, urls):
+            return {url: False for url in urls}
 
         def prepare_immediate_jobs(self, jobs):
             jobs[0].cafe_id = 14567700
@@ -659,7 +1097,7 @@ def test_sheet_write_failure_does_not_block_v2r_publish(tmp_path: Path) -> None:
     assert "F열 완료 링크 저장 실패" in result.jobs[0].message
 
 
-def test_previous_account_test_success_restores_sheet_without_republish(
+def test_previous_account_test_success_still_publishes_new_test(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "account-tests.csv"
@@ -721,15 +1159,167 @@ def test_previous_account_test_success_restores_sheet_without_republish(
         source_sheet_url="https://docs.google.com/spreadsheets/d/example/edit?gid=0",
     )
 
-    assert browser.published == 0
+    assert browser.published == 1
     assert result.jobs[0].status == JobStatus.SUCCESS
-    assert result.jobs[0].post_url == old_job.post_url
-    assert ("I", 2, old_job.post_url) in browser.sheet_updates
+    assert result.jobs[0].post_url == "https://v2r.example/new"
+    assert ("I", 2, "https://v2r.example/new") in browser.sheet_updates
     assert {column for column, _row, _value in browser.sheet_updates} == {
         "H",
         "I",
         "J",
     }
+
+
+def test_failed_local_brand_source_is_removed_and_republished(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "brand.csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,"
+        "말머리,계정유형,이미지 없음,게시판명\n"
+        '"키워드","제목 : 제목\n본문 : 본문",고요한아침,writer-a,'
+        "후기형,https://v2r.example/nc/articleDetail/failed-source,"
+        ",실명,Y,가입인사\n",
+        encoding="utf-8-sig",
+    )
+    job = load_brand_immediate_jobs(path, brand="브랜드")[0]
+    assert job.status == JobStatus.SKIPPED
+
+    class FailedBrandBrowser:
+        published = 0
+        sheet_updates = []
+
+        def ensure_v2r_login(self, _email, _password):
+            return None
+
+        def inspect_immediate_source_urls(self, urls):
+            assert next(iter(urls)).endswith("failed-source")
+            return {
+                url: {"state": "failed", "reason": "예약 발행 실패"}
+                for url in urls
+            }
+
+        def prepare_immediate_jobs(self, jobs):
+            jobs[0].cafe_id = 14567700
+            jobs[0].menu_id = 34
+            jobs[0].canonical_cafe_name = "고요한 아침"
+            jobs[0].canonical_board_name = "가입인사"
+
+        def consume_failed_immediate_urls(self):
+            return set()
+
+        def publish_immediate(self, job, dry_run):
+            self.published += 1
+            return "https://v2r.example/nc/articleDetail/new-source"
+
+        def update_sheet_cell(self, url, column, row, value, **kwargs):
+            self.sheet_updates.append((column, row, value))
+
+    browser = FailedBrandBrowser()
+    runner = ImmediateRunner(
+        browser=browser,
+        history_path=tmp_path / "history.json",
+        report_dir=tmp_path,
+        logger=logging.getLogger("failed-brand-test"),
+    )
+    result, _report = runner.run(
+        [job],
+        dry_run=False,
+        stop_event=threading.Event(),
+        progress=lambda _current, _total: None,
+        source_sheet_url="https://sheet.example",
+    )
+
+    assert browser.published == 1
+    assert result.jobs[0].status == JobStatus.RESERVED
+    assert result.jobs[0].post_url.endswith("new-source")
+    assert ("F", 2, result.jobs[0].post_url) in browser.sheet_updates
+
+
+def test_account_test_results_write_to_dynamic_header_columns(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "account-tests-wide.csv"
+    extra_headers = [f"추가열{index}" for index in range(1, 21)]
+    headers = [
+        "번호",
+        "ID",
+        *extra_headers,
+        "작업 구분",
+        "연동",
+        "가아사 조건",
+        "실/비실",
+        "테스트 선택",
+        "테스트 결과",
+        "테스트 링크",
+        "테스트 일시",
+    ]
+    values = [
+        "12",
+        "test-id",
+        *([""] * len(extra_headers)),
+        "",
+        "",
+        "",
+        "",
+        "TRUE",
+        "",
+        "",
+        "",
+    ]
+    path.write_text(
+        ",".join(headers) + "\n" + ",".join(values) + "\n",
+        encoding="utf-8-sig",
+    )
+    job = load_account_test_jobs(path)[0]
+
+    class DynamicColumnBrowser:
+        sheet_updates = []
+
+        def ensure_v2r_login(self, _email, _password):
+            return None
+
+        def prepare_immediate_jobs(self, jobs):
+            jobs[0].cafe = "태극마케팅센터"
+            jobs[0].cafe_id = 31670254
+            jobs[0].menu_id = 1
+            jobs[0].canonical_cafe_name = "태극마케팅센터"
+            jobs[0].canonical_board_name = "자유게시판"
+
+        def consume_failed_immediate_urls(self):
+            return set()
+
+        def publish_immediate(self, _job, _dry_run):
+            return "https://v2r.example/new"
+
+        def update_sheet_cell(
+            self,
+            _url,
+            column,
+            row,
+            value,
+            **_kwargs,
+        ):
+            self.sheet_updates.append((column, row, value))
+
+    browser = DynamicColumnBrowser()
+    runner = ImmediateRunner(
+        browser=browser,
+        history_path=tmp_path / "history.json",
+        report_dir=tmp_path,
+        logger=logging.getLogger("dynamic-column-test"),
+    )
+    runner.run(
+        [job],
+        dry_run=False,
+        stop_event=threading.Event(),
+        progress=lambda _current, _total: None,
+        source_sheet_url="https://docs.google.com/spreadsheets/d/example/edit?gid=0",
+    )
+
+    assert {
+        column for column, _row, _value in browser.sheet_updates
+    } == {"AB", "AC", "AD"}
 
 
 def test_failed_account_test_writes_only_result_column(tmp_path: Path) -> None:

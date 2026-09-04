@@ -5,6 +5,7 @@ import random
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
@@ -30,7 +31,10 @@ COMMENT_ACCOUNTS = (
     "chenallo",
     "colpith",
 )
-CAFE_DELAYS = {"씨씨앙": 4, "양평맘": 10}
+CAFE_DELAYS = {"씨씨앙": 4, "양평맘": 20}
+CCCANG_CURRENT_BOARD = {"menu_id": 328, "menu_name": "자유 수다방"}
+CCCANG_OLD_BOARD = {"menu_id": 2458, "menu_name": "자유수다방(구)"}
+CCCANG_DAILY_HEAD = {"head_id": 1749, "head_name": "댓글 이벤트 X"}
 CAFE_DESTINATIONS = {
     "씨씨앙": {
         "cafe_id": 25016228,
@@ -51,6 +55,14 @@ class AffiliateApiError(RuntimeError):
     pass
 
 
+class AffiliateDailyPending(AffiliateApiError):
+    pass
+
+
+class AffiliateRunStopped(AffiliateApiError):
+    pass
+
+
 def _walk_dicts(value: Any) -> Iterator[dict[str, Any]]:
     if isinstance(value, dict):
         yield value
@@ -63,6 +75,32 @@ def _walk_dicts(value: Any) -> Iterator[dict[str, Any]]:
 
 def _normalized(value: str) -> str:
     return re.sub(r"[^0-9a-z가-힣]+", "", value or "", flags=re.IGNORECASE).casefold()
+
+
+def _image_resource_ready(component: dict[str, Any]) -> bool:
+    images: list[dict[str, Any]] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            if value.get("@ctype") == "image":
+                images.append(value)
+            for child in value.values():
+                collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+
+    collect(component)
+    return bool(images) and all(
+        isinstance(image.get("src"), str)
+        and bool(image["src"].strip())
+        and isinstance(image.get("path"), str)
+        and bool(image["path"].strip())
+        and isinstance(image.get("fileName"), str)
+        and bool(image["fileName"].strip())
+        and int(image.get("fileSize") or 0) > 0
+        for image in images
+    )
 
 
 def _paragraph(line: str) -> dict[str, Any]:
@@ -203,6 +241,8 @@ class AffiliateApiPublisher:
         query: dict[str, Any] | None = None,
         *,
         retry_auth: bool = True,
+        max_attempts: int = 5,
+        request_timeout: float = 30,
     ) -> Any:
         url = API_ROOT + path
         if query:
@@ -218,9 +258,9 @@ class AffiliateApiPublisher:
             },
         )
         delays = (10, 30, 120, 300)
-        for attempt in range(5):
+        for attempt in range(max_attempts):
             try:
-                with urlopen(request, timeout=30) as response:
+                with urlopen(request, timeout=request_timeout) as response:
                     raw = response.read()
                 break
             except HTTPError as exc:
@@ -240,13 +280,17 @@ class AffiliateApiPublisher:
                         query,
                         retry_auth=False,
                     )
-                if (exc.code == 429 or exc.code >= 500) and attempt < 4:
+                if (
+                    (exc.code == 429 or exc.code >= 500)
+                    and attempt < max_attempts - 1
+                ):
                     delay = delays[attempt]
                     self.logger.warning(
-                        "V2R 일시 오류 %s: %s초 후 재시도 (%s/5)",
+                        "V2R 일시 오류 %s: %s초 후 재시도 (%s/%s)",
                         exc.code,
                         delay,
                         attempt + 2,
+                        max_attempts,
                     )
                     time.sleep(delay)
                     continue
@@ -254,12 +298,13 @@ class AffiliateApiPublisher:
                     f"V2R 요청 실패 ({exc.code}): {path} - {detail[:300]}"
                 ) from exc
             except (URLError, TimeoutError) as exc:
-                if attempt < 4:
+                if attempt < max_attempts - 1:
                     delay = delays[attempt]
                     self.logger.warning(
-                        "네트워크 오류: %s초 후 재시도 (%s/5)",
+                        "네트워크 오류: %s초 후 재시도 (%s/%s)",
                         delay,
                         attempt + 2,
+                        max_attempts,
                     )
                     time.sleep(delay)
                     continue
@@ -267,6 +312,78 @@ class AffiliateApiPublisher:
         else:
             raise AffiliateApiError(f"V2R 요청 재시도 실패: {path}")
         return json.loads(raw) if raw else None
+
+    @staticmethod
+    def _source_id_from_url(url: str) -> str:
+        match = re.search(r"/nc/articleDetail/([0-9A-Za-z_-]+)", url or "")
+        return match.group(1) if match else ""
+
+    def _probe_source_url(
+        self,
+        url: str,
+        request_timeout: float = 4,
+    ) -> bool | None:
+        """Return True for deleted, False for present, and None if uncertain."""
+        source_id = self._source_id_from_url(url)
+        if not source_id:
+            return None
+        try:
+            self._request(
+                "GET",
+                "/naver_cafe_articles/article",
+                query={"source_id": source_id},
+                retry_auth=False,
+                max_attempts=1,
+                request_timeout=request_timeout,
+            )
+        except AffiliateApiError as exc:
+            if "DELETED_NAVER_CAFE_ARTICLE_SOURCE" in str(exc):
+                return True
+            return None
+        except Exception:
+            return None
+        return False
+
+    def probe_source_urls(self, urls: set[str]) -> dict[str, bool | None]:
+        """Check saved links concurrently without delaying normal API retries."""
+        unique_urls = {url for url in urls if self._source_id_from_url(url)}
+        if not unique_urls:
+            return {}
+        self._capture_authorization()
+        worker_count = min(6, len(unique_urls))
+        pending_urls = list(unique_urls)
+        results: dict[str, bool | None] = {}
+        deadline = time.monotonic() + 8
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            for offset in range(0, len(pending_urls), worker_count):
+                batch = pending_urls[offset : offset + worker_count]
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    results.update({url: None for url in batch})
+                    results.update(
+                        {
+                            url: None
+                            for url in pending_urls[offset + worker_count :]
+                        }
+                    )
+                    break
+                timeout = min(4.0, max(0.1, remaining))
+                statuses = list(
+                    executor.map(
+                        lambda url: self._probe_source_url(url, timeout),
+                        batch,
+                    )
+                )
+                results.update(zip(batch, statuses))
+                if all(status is None for status in statuses):
+                    results.update(
+                        {
+                            url: None
+                            for url in pending_urls[offset + worker_count :]
+                        }
+                    )
+                    break
+        return results
 
     @staticmethod
     def _field(item: dict[str, Any], *names: str) -> Any:
@@ -295,7 +412,7 @@ class AffiliateApiPublisher:
 
         head_id = None
         head_name = None
-        if job.prefix:
+        if job.prefix and job.cafe != "씨씨앙":
             heads = self._request(
                 "GET",
                 "/naver_cafes/heads",
@@ -332,6 +449,58 @@ class AffiliateApiPublisher:
             "parent_id": None,
         }
 
+    def _retarget_destination(
+        self,
+        destination: dict[str, Any],
+        *,
+        menu_id: int,
+        menu_name: str,
+        head_name: str | None = None,
+        head_id: int | None = None,
+    ) -> dict[str, Any]:
+        result = dict(destination)
+        result.update(
+            {
+                "menu_id": menu_id,
+                "menu_name": menu_name,
+                "head_id": None,
+                "head_name": None,
+            }
+        )
+        if not head_name:
+            return result
+        if head_id is not None:
+            result["head_id"] = head_id
+            result["head_name"] = head_name
+            return result
+        heads = self._request(
+            "GET",
+            "/naver_cafes/heads",
+            query={
+                "cafe_id": result["cafe_id"],
+                "naver_login_id": result["naver_login_id"],
+                "menu_id": menu_id,
+            },
+        )
+        head = next(
+            (
+                item
+                for item in _walk_dicts(heads)
+                if _normalized(
+                    str(self._field(item, "head_name", "headName") or "")
+                )
+                == _normalized(head_name)
+            ),
+            None,
+        )
+        if not head:
+            raise AffiliateApiError(
+                f"V2R에서 말머리를 찾지 못했습니다: {head_name}"
+            )
+        result["head_id"] = self._field(head, "head_id", "headId")
+        result["head_name"] = self._field(head, "head_name", "headName")
+        return result
+
     def _last_used(self, cafe_id: int) -> dict[str, str]:
         rows: list[dict[str, Any]] = []
         token: str | None = None
@@ -343,9 +512,18 @@ class AffiliateApiPublisher:
             }
             if token:
                 query["next_token"] = token
-            response = self._request(
-                "GET", "/naver_cafe_articles/board_histories", query=query
-            )
+            try:
+                response = self._request(
+                    "GET", "/naver_cafe_articles/board_histories", query=query
+                )
+            except AffiliateApiError as exc:
+                if "(404)" not in str(exc):
+                    raise
+                self.logger.warning(
+                    "V2R 최근 발행 이력 API를 사용할 수 없어 "
+                    "계정 사용순서 확인을 생략합니다"
+                )
+                return {}
             rows.extend(response.get("histories", []))
             token = response.get("next_token")
             if not token:
@@ -370,7 +548,10 @@ class AffiliateApiPublisher:
             job
             for job in jobs
             if job.status == JobStatus.PENDING
-            and job.account_type in {"실명", "비실명"}
+            and (
+                bool(job.account)
+                or job.account_type in {"실명", "비실명"}
+            )
         ]
         if not target_jobs:
             return []
@@ -384,6 +565,17 @@ class AffiliateApiPublisher:
         }
         fixed = set(COMMENT_ACCOUNTS)
         pools: dict[tuple[str, str], list[str]] = {}
+        eligible_any_by_cafe: dict[str, set[str]] = {}
+        actual_type_by_account = {
+            account: (
+                "실명"
+                if ((data.get("my_info_v2") or {}).get("is_real_name") is True)
+                else "비실명"
+                if ((data.get("my_info_v2") or {}).get("is_real_name") is False)
+                else ""
+            )
+            for account, data in global_accounts.items()
+        }
 
         for cafe_name in {job.cafe for job in target_jobs}:
             cafe = next(
@@ -423,10 +615,12 @@ class AffiliateApiPublisher:
                 str(item["login_id"]): item
                 for item in _walk_dicts(status_data)
                 if item.get("login_id")
+                and self._field(item, "member_key", "memberKey")
                 and not item.get("force_drop")
                 and not item.get("stop_cafe_member")
             }
             last_used = self._last_used(cafe_id)
+            eligible_any: set[str] = set()
 
             for account_type, real_name in (("실명", True), ("비실명", False)):
                 eligible: list[str] = []
@@ -442,6 +636,7 @@ class AffiliateApiPublisher:
                     ):
                         continue
                     eligible.append(account)
+                    eligible_any.add(account)
                 pools[(cafe_name, account_type)] = sorted(
                     eligible,
                     key=lambda account: (
@@ -456,6 +651,7 @@ class AffiliateApiPublisher:
                     account_type,
                     len(eligible),
                 )
+            eligible_any_by_cafe[cafe_name] = eligible_any
 
         self.account_pools = pools
         self.account_indexes = {key: 0 for key in pools}
@@ -463,6 +659,39 @@ class AffiliateApiPublisher:
             job.account for job in jobs if job.account and job.status == JobStatus.PENDING
         )
         assigned: list[AffiliateJob] = []
+        for job in target_jobs:
+            if not job.account:
+                continue
+            previous = job.account
+            effective_type = (
+                actual_type_by_account.get(previous)
+                or job.account_type
+            )
+            if effective_type in {"실명", "비실명"}:
+                job.account_type = effective_type
+            if previous in eligible_any_by_cafe.get(job.cafe, set()):
+                continue
+            self.blocked_accounts.add(previous)
+            replacement = (
+                self._pick_account(job.cafe, effective_type)
+                if effective_type in {"실명", "비실명"}
+                else ""
+            )
+            if not replacement:
+                job.status = JobStatus.SKIPPED
+                job.message = (
+                    f"{job.cafe}에 가입 연결정보가 있는 "
+                    f"{effective_type or '동일 유형'} 작성계정이 없음"
+                )
+                continue
+            job.account = replacement
+            assigned.append(job)
+            self.logger.warning(
+                "행 %s 가입 연결정보가 없는 지정계정 자동 교체: %s → %s",
+                job.row_number,
+                previous,
+                replacement,
+            )
         for job in pending:
             pool = pools.get((job.cafe, job.account_type), [])
             if not pool:
@@ -487,6 +716,162 @@ class AffiliateApiPublisher:
                 job.account_type,
             )
         return assigned
+
+    @classmethod
+    def _account_rows(cls, payload: Any) -> dict[str, dict[str, Any]]:
+        rows: dict[str, dict[str, Any]] = {}
+        for item in _walk_dicts(payload):
+            account = str(
+                cls._field(item, "login_id", "naver_login_id", "loginId") or ""
+            )
+            if account and (
+                "level_info" in item
+                or "levelInfo" in item
+                or cls._field(item, "member_key", "memberKey")
+            ):
+                rows[account] = item
+        return rows
+
+    @staticmethod
+    def _member_grade_ready(item: dict[str, Any] | None) -> bool:
+        if not item:
+            return False
+        level = item.get("level_info") or item.get("levelInfo")
+        if not isinstance(level, dict):
+            return False
+        label = str(
+            level.get("member_level_name")
+            or level.get("memberLevelName")
+            or level.get("member_level_icon_url")
+            or level.get("memberLevelIconUrl")
+            or ""
+        ).strip()
+        member_level = level.get("member_level") or level.get("memberLevel")
+        return bool(
+            label
+            or (
+                isinstance(member_level, int)
+                and member_level > 1
+            )
+        )
+
+    def refresh_assigned_account_grades(
+        self,
+        jobs: list[Any],
+    ) -> list[Any]:
+        """Refresh missing member grades once per cafe/account before writing."""
+        self._capture_authorization()
+        pending_by_cafe: dict[tuple[str, int], list[Any]] = {}
+        for job in jobs:
+            if (
+                job.status != JobStatus.PENDING
+                or not job.account
+                or getattr(job, "source_kind", "") == "account_test"
+            ):
+                continue
+            config = CAFE_DESTINATIONS.get(job.cafe) or {}
+            cafe_id = int(
+                getattr(job, "cafe_id", 0)
+                or config.get("cafe_id")
+                or 0
+            )
+            if cafe_id:
+                pending_by_cafe.setdefault((job.cafe, cafe_id), []).append(job)
+
+        failed_jobs: list[Any] = []
+        for (cafe_name, cafe_id), cafe_jobs in pending_by_cafe.items():
+            assigned_accounts = {job.account for job in cafe_jobs}
+            status = self._request(
+                "GET",
+                "/naver_cafes/naver_join_cafe",
+                query={"cafe_id": cafe_id},
+            )
+            rows = self._account_rows(status)
+            missing = sorted(
+                account
+                for account in assigned_accounts
+                if not self._member_grade_ready(rows.get(account))
+            )
+            if not missing:
+                self.logger.info(
+                    "%s 발행계정 멤버등급 확인 완료: %s개",
+                    cafe_name,
+                    len(assigned_accounts),
+                )
+                continue
+
+            self.logger.info(
+                "%s 멤버등급 미확인 계정 API 갱신 시작: %s개",
+                cafe_name,
+                len(missing),
+            )
+            refresh_errors: dict[str, str] = {}
+            for account in missing:
+                try:
+                    self._request(
+                        "PUT",
+                        "/naver_cafes/naver_join_cafe/sync/account",
+                        {
+                            "cafe_id": cafe_id,
+                            "naver_login_id": account,
+                        },
+                    )
+                    self.logger.info(
+                        "%s 계정 멤버등급 API 갱신 요청 완료: %s",
+                        cafe_name,
+                        account,
+                    )
+                except Exception as exc:
+                    refresh_errors[account] = str(exc)
+                    self.logger.warning(
+                        "%s 계정 멤버등급 API 갱신 실패: %s / %s",
+                        cafe_name,
+                        account,
+                        exc,
+                    )
+
+            unresolved = set(missing) - set(refresh_errors)
+            for attempt in range(3):
+                if not unresolved:
+                    break
+                refreshed = self._request(
+                    "GET",
+                    "/naver_cafes/naver_join_cafe",
+                    query={"cafe_id": cafe_id},
+                )
+                refreshed_rows = self._account_rows(refreshed)
+                unresolved = {
+                    account
+                    for account in unresolved
+                    if not self._member_grade_ready(refreshed_rows.get(account))
+                }
+                if unresolved and attempt < 2:
+                    time.sleep(1)
+
+            for account in unresolved:
+                refresh_errors[account] = "갱신 후에도 멤버등급 정보가 표시되지 않음"
+
+            for job in cafe_jobs:
+                error = refresh_errors.get(job.account)
+                if not error:
+                    continue
+                job.status = JobStatus.FAILED
+                job.message = f"계정 멤버등급 갱신 실패: {job.account} / {error[:150]}"
+                failed_jobs.append(job)
+                self.logger.error(
+                    "행 %s 발행 전 계정 멤버등급 확인 실패: %s",
+                    job.row_number,
+                    job.message,
+                )
+
+            refreshed_count = len(missing) - len(refresh_errors)
+            self.logger.info(
+                "%s 멤버등급 사전 갱신 완료: 성공 %s / 실패 %s",
+                cafe_name,
+                refreshed_count,
+                len(refresh_errors),
+            )
+        return failed_jobs
 
     def _pick_account(self, cafe: str, account_type: str) -> str:
         key = (cafe, account_type)
@@ -514,9 +899,35 @@ class AffiliateApiPublisher:
             job.account = replacement
         return replacement
 
+    def reset_deleted_sources(
+        self,
+        job: AffiliateJob,
+        resume: dict[str, Any],
+    ) -> None:
+        source_ids = {
+            str(resume.get("daily_source_id") or ""),
+            str(resume.get("revision_source_id") or ""),
+        }
+        for source_id in source_ids - {""}:
+            self._delete_source(source_id)
+        resume.clear()
+        resume.update(
+            {
+                "stage": "ACCOUNT_ASSIGNED",
+                "account": job.account,
+                "daily_source_id": "",
+                "daily_scheduled_at": "",
+                "revision_source_id": "",
+            }
+        )
+        job.daily_scheduled_at = None
+        job.daily_written_at = None
+
     @staticmethod
     def classify_failure(error: Exception) -> tuple[str, bool]:
         text = str(error)
+        if "NOT_FOUND_MODEL" in text and "NaverJoinCafeAccoun" in text:
+            return "실패: 카페 가입 연결정보 없음", True
         if "33007" in text or "등급" in text:
             return "실패: 등급 미달", True
         if "NOT_LOGIN" in text or "session not found" in text:
@@ -533,15 +944,25 @@ class AffiliateApiPublisher:
             config = CAFE_DESTINATIONS.get(cafe_name)
             if not config:
                 continue
-            history = self._request(
-                "GET",
-                "/naver_cafe_articles/board_histories",
-                query={
-                    "cafe_id": config["cafe_id"],
-                    "days_ago": 1,
-                    "include_reserve": "true",
-                },
-            )
+            try:
+                history = self._request(
+                    "GET",
+                    "/naver_cafe_articles/board_histories",
+                    query={
+                        "cafe_id": config["cafe_id"],
+                        "days_ago": 1,
+                        "include_reserve": "true",
+                    },
+                )
+            except AffiliateApiError as exc:
+                if "(404)" not in str(exc):
+                    raise
+                self.logger.warning(
+                    "%s V2R 이력 API를 사용할 수 없어 "
+                    "실패 찌꺼기 사전 정리를 생략합니다",
+                    cafe_name,
+                )
+                continue
             for item in history.get("histories", []):
                 status = item.get("status")
                 created_raw = item.get("created_at")
@@ -585,9 +1006,9 @@ class AffiliateApiPublisher:
         }
 
     @staticmethod
-    def _write_options() -> dict[str, Any]:
+    def _write_options(*, enable_comment: bool = True) -> dict[str, Any]:
         return {
-            "enableComment": True,
+            "enableComment": enable_comment,
             "externalOpen": True,
             "enableScrap": True,
             "enableCopy": False,
@@ -608,12 +1029,15 @@ class AffiliateApiPublisher:
         parent_source_id: str | None = None,
         content_json: str | None = None,
         recovery_statuses: tuple[str, ...] = ("DONE",),
+        enable_comment: bool = True,
     ) -> str:
         payload: dict[str, Any] = {
             "tag_list": tags,
             "title": title,
             "content_json": content_json or _content_json(body),
-            "cafe_write_options": self._write_options(),
+            "cafe_write_options": self._write_options(
+                enable_comment=enable_comment
+            ),
             "comments": comments,
             "destination": destination,
             "likes": [],
@@ -654,11 +1078,20 @@ class AffiliateApiPublisher:
     ) -> dict[str, Any] | None:
         threshold = requested_at - timedelta(seconds=15)
         for _ in range(8):
-            history = self._request(
-                "GET",
-                "/naver_cafe_articles/board_histories",
-                query={"cafe_id": cafe_id, "days_ago": 1, "include_reserve": "true"},
-            )
+            try:
+                history = self._request(
+                    "GET",
+                    "/naver_cafe_articles/board_histories",
+                    query={
+                        "cafe_id": cafe_id,
+                        "days_ago": 1,
+                        "include_reserve": "true",
+                    },
+                )
+            except AffiliateApiError as exc:
+                if "(404)" in str(exc):
+                    return None
+                raise
             item = next(
                 (
                     row
@@ -689,29 +1122,143 @@ class AffiliateApiPublisher:
         except Exception:
             self.logger.exception("실패 찌꺼기 글 삭제 실패: %s", source_id)
 
-    def _wait_for_written_at(self, source_id: str, cafe_id: int) -> datetime:
-        deadline = time.monotonic() + 90
+    def _wait_for_written_at(
+        self,
+        source_id: str,
+        cafe_id: int,
+        expected_start_at: datetime | None = None,
+        wait_control=None,
+    ) -> datetime:
+        wait_seconds = 90.0
+        if expected_start_at is not None:
+            remaining = (
+                expected_start_at - datetime.now(timezone.utc)
+            ).total_seconds()
+            wait_seconds = max(wait_seconds, remaining + 30 * 60)
+        deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline:
-            history = self._request(
-                "GET",
-                "/naver_cafe_articles/board_histories",
-                query={"cafe_id": cafe_id, "days_ago": 1, "include_reserve": "true"},
+            if wait_control:
+                wait_control()
+            try:
+                detail = self._request(
+                    "GET",
+                    "/naver_cafe_articles/article",
+                    query={"source_id": source_id},
+                )
+            except AffiliateApiError as exc:
+                if "(404)" in str(exc):
+                    time.sleep(2)
+                    continue
+                raise
+            source = detail.get("naver_cafe_article_source") or {}
+            destination = detail.get("naver_cafe_article_destination") or {}
+            article_history = detail.get("naver_cafe_article_history") or {}
+            history_status = article_history.get("status")
+            status = destination.get("status") or source.get("status")
+            written_raw = (
+                article_history.get("written_at")
+                or source.get("written_at")
+                or destination.get("written_at")
+                or source.get("created_at")
             )
-            item = next(
-                (
-                    row
-                    for row in history.get("histories", [])
-                    if row.get("source_id") == source_id
-                ),
-                None,
-            )
-            if item and item.get("status") == "DONE" and item.get("written_at"):
-                return datetime.fromisoformat(str(item["written_at"]).replace("Z", "+00:00"))
-            if item and item.get("status") == "FAIL":
-                reason = str(item.get("fail_reason") or "원인 불명")
+            if history_status in {"DONE", "SUCCESS"}:
+                if written_raw:
+                    return datetime.fromisoformat(
+                        str(written_raw).replace("Z", "+00:00")
+                    )
+                return datetime.now(timezone.utc)
+            if history_status == "FAIL" or status == "FAIL":
+                reason = str(
+                    article_history.get("fail_reason")
+                    or article_history.get("reason")
+                    or destination.get("fail_reason")
+                    or source.get("fail_reason")
+                    or "원인 불명"
+                )
                 raise AffiliateApiError(f"일상 글 발행 실패: {reason}")
+            if not article_history and status == "DONE":
+                return datetime.now(timezone.utc)
             time.sleep(2)
-        raise AffiliateApiError("일상 글 등록 완료 시간을 확인하지 못했습니다")
+        raise AffiliateDailyPending(
+            "일상 글이 예약시간 이후 30분 동안 예약대기 상태입니다. "
+            "예약은 유지하며 다음 실행에서 다시 확인합니다"
+        )
+
+    @staticmethod
+    def _comment_permission(detail: dict[str, Any]) -> bool | None:
+        destination = detail.get("naver_cafe_article_destination") or {}
+        source = detail.get("naver_cafe_article_source") or {}
+        options = (
+            destination.get("write_options")
+            or destination.get("cafe_write_options")
+            or source.get("write_options")
+            or source.get("cafe_write_options")
+            or {}
+        )
+        if isinstance(options, str):
+            try:
+                options = json.loads(options)
+            except json.JSONDecodeError:
+                return None
+        if not isinstance(options, dict):
+            return None
+        value = options.get("enableComment")
+        if value is None:
+            value = options.get("enable_comment")
+        return value if isinstance(value, bool) else None
+
+    def _verify_comment_permission(
+        self,
+        source_id: str,
+        expected: bool,
+    ) -> None:
+        detail = self._request(
+            "GET",
+            "/naver_cafe_articles/article",
+            query={"source_id": source_id},
+        )
+        actual = self._comment_permission(detail)
+        if actual is not expected:
+            raise AffiliateApiError(
+                "등록 후 댓글 허용 설정 검증에 실패했습니다: "
+                f"기대 {expected} / 실제 {actual}"
+            )
+
+    def _verify_destination_settings(
+        self,
+        source_id: str,
+        *,
+        expected_menu_id: int,
+        expected_head_id: int | None,
+        expected_comment: bool,
+    ) -> None:
+        detail = self._request(
+            "GET",
+            "/naver_cafe_articles/article",
+            query={"source_id": source_id},
+        )
+        destination = detail.get("naver_cafe_article_destination") or {}
+        actual_menu_id = destination.get("menu_id")
+        actual_head_id = destination.get("head_id")
+        if int(actual_menu_id or 0) != expected_menu_id:
+            raise AffiliateApiError(
+                "등록 후 게시판 검증에 실패했습니다: "
+                f"기대 {expected_menu_id} / 실제 {actual_menu_id}"
+            )
+        if (
+            int(actual_head_id or 0)
+            != int(expected_head_id or 0)
+        ):
+            raise AffiliateApiError(
+                "등록 후 말머리 검증에 실패했습니다: "
+                f"기대 {expected_head_id} / 실제 {actual_head_id}"
+            )
+        actual_comment = self._comment_permission(detail)
+        if actual_comment is not expected_comment:
+            raise AffiliateApiError(
+                "등록 후 댓글 허용 설정 검증에 실패했습니다: "
+                f"기대 {expected_comment} / 실제 {actual_comment}"
+            )
 
     def _comment(
         self,
@@ -912,36 +1459,53 @@ class AffiliateApiPublisher:
             return _content_json(clean_body)
         if not self.image_resolver or not job.brand:
             if PLACEHOLDER_PATTERN.search(job.body):
-                self.logger.warning(
-                    "행 %s 브랜드를 확인하지 못해 중괄호를 지우고 이미지 없이 진행",
-                    job.row_number,
+                raise AffiliateApiError(
+                    "사진 표시가 있지만 이미지 브랜드 또는 Drive 설정을 "
+                    "확인하지 못해 발행을 중단했습니다"
                 )
             return _content_json(clean_body)
 
-        try:
-            resolved = self.image_resolver.resolve(job)
-        except Exception as exc:
-            self.logger.warning(
-                "행 %s Google Drive 이미지 확인 실패로 이미지 없이 계속 발행: %s",
-                job.row_number,
-                exc,
-            )
-            return _content_json(clean_body)
+        if getattr(job, "prepared_images", None):
+            resolved = list(getattr(job, "prepared_images", []))
+        else:
+            try:
+                resolved = self.image_resolver.resolve(job)
+            except Exception as exc:
+                raise AffiliateApiError(
+                    "Google Drive 이미지 확인 실패로 사진 없는 글 등록을 "
+                    f"중단했습니다: {exc}"
+                ) from exc
+            job.prepared_images = list(resolved)
         if not resolved:
+            if PLACEHOLDER_PATTERN.search(job.body):
+                raise AffiliateApiError(
+                    "본문에 사진 표시가 있지만 사용할 이미지를 찾지 못해 "
+                    "발행을 중단했습니다"
+                )
             return _content_json(clean_body)
         try:
             uploaded = self.browser.upload_affiliate_images(
                 job,
-                str(destination["menu_name"]),
+                destination,
                 [item.local_path for item in resolved],
             )
         except Exception as exc:
-            self.logger.warning(
-                "행 %s 이미지 업로드 실패로 이미지 없이 계속 발행: %s",
-                job.row_number,
-                exc,
+            raise AffiliateApiError(
+                f"사진 첨부에 실패하여 사진 없는 글 등록을 중단했습니다: {exc}"
+            ) from exc
+
+        failed = [
+            item.file_name
+            for item, component in zip(resolved, uploaded)
+            if not component
+        ]
+        if len(uploaded) < len(resolved):
+            failed.extend(item.file_name for item in resolved[len(uploaded) :])
+        if failed:
+            raise AffiliateApiError(
+                "사진 첨부에 실패하여 사진 없는 글 등록을 중단했습니다: "
+                + ", ".join(failed)
             )
-            return _content_json(clean_body)
 
         components = {
             item.occurrence: component
@@ -956,12 +1520,28 @@ class AffiliateApiPublisher:
         )
         return _content_json(job.body, components)
 
-    def _verify(self, source_id: str, job: AffiliateJob, start_at: datetime) -> None:
+    def _verify(
+        self,
+        source_id: str,
+        job: AffiliateJob,
+        start_at: datetime,
+        *,
+        expected_menu_id: int,
+        expected_head_id: int | None,
+    ) -> None:
         detail = self._request(
             "GET", "/naver_cafe_articles/article", query={"source_id": source_id}
         )
         source = detail["naver_cafe_article_source"]
         destination = detail["naver_cafe_article_destination"]
+        if self._comment_permission(detail) is not True:
+            raise AffiliateApiError(
+                "등록 후 수정 글 댓글 허용 설정 검증에 실패했습니다"
+            )
+        if int(destination.get("menu_id") or 0) != expected_menu_id:
+            raise AffiliateApiError("등록 후 수정 글 게시판 검증에 실패했습니다")
+        if int(destination.get("head_id") or 0) != int(expected_head_id or 0):
+            raise AffiliateApiError("등록 후 수정 글 말머리 검증에 실패했습니다")
         comments = detail["naver_cafe_article_source_comments"]
         document = json.loads(detail["naver_cafe_article_source_detail"]["body"])
         body_lines = [
@@ -976,12 +1556,21 @@ class AffiliateApiPublisher:
             raise AffiliateApiError("등록 후 본문 문단 검증에 실패했습니다")
         if any(PLACEHOLDER_PATTERN.search(line) for line in body_lines):
             raise AffiliateApiError("등록 후 본문에 중괄호 표시가 남아 있습니다")
-        media_count = sum(
-            component.get("@ctype") in {"image", "imageGroup", "imageStrip"}
+        media_components = [
+            component
             for component in document["document"]["components"]
-        )
+            if component.get("@ctype") in {"image", "imageGroup", "imageStrip"}
+        ]
+        media_count = len(media_components)
         if job.prepared_image_count and media_count < job.prepared_image_count:
             raise AffiliateApiError("등록 후 본문 이미지 개수 검증에 실패했습니다")
+        if job.prepared_image_count and not all(
+            _image_resource_ready(component)
+            for component in media_components
+        ):
+            raise AffiliateApiError(
+                "등록 후 본문 사진 주소 또는 파일 정보 검증에 실패했습니다"
+            )
         if datetime.fromisoformat(destination["start_at"].replace("Z", "+00:00")) != start_at:
             raise AffiliateApiError("등록 후 수정 예약 시간 검증에 실패했습니다")
         if not 80 <= int(destination["target_view_count"]) <= 100:
@@ -1051,21 +1640,54 @@ class AffiliateApiPublisher:
         dry_run: bool,
         resume: dict[str, Any] | None = None,
         checkpoint=None,
+        daily_only: bool = False,
+        wait_control=None,
     ) -> str:
         if job.daily_post is None:
             raise AffiliateApiError("배정된 일상 글이 없습니다")
         self._capture_authorization()
         destination = self._resolve_destination(job)
+        daily_destination_template = dict(destination)
+        revision_destination_template = dict(destination)
+        if job.cafe == "씨씨앙":
+            daily_destination_template = self._retarget_destination(
+                destination,
+                menu_id=int(CCCANG_OLD_BOARD["menu_id"]),
+                menu_name=str(CCCANG_OLD_BOARD["menu_name"]),
+                head_name=str(CCCANG_DAILY_HEAD["head_name"]),
+                head_id=int(CCCANG_DAILY_HEAD["head_id"]),
+            )
+            revision_board = (
+                CCCANG_CURRENT_BOARD
+                if job.revision_board.replace(" ", "") == "자유수다방"
+                else CCCANG_OLD_BOARD
+            )
+            revision_destination_template = self._retarget_destination(
+                destination,
+                menu_id=int(revision_board["menu_id"]),
+                menu_name=str(revision_board["menu_name"]),
+                head_name=None,
+            )
         if dry_run:
             self.logger.info(
-                "행 %s API 검증 완료: %s / %s",
+                "행 %s API 검증 완료: %s / 일상 %s (%s) / 수정 %s (말머리 없음)",
                 job.row_number,
                 destination["cafe_name"],
-                destination["menu_name"],
+                daily_destination_template["menu_name"],
+                daily_destination_template["head_name"] or "말머리 없음",
+                revision_destination_template["menu_name"],
             )
             return ""
 
         resume = resume or {}
+        if job.daily_scheduled_at is None and resume.get("daily_scheduled_at"):
+            job.daily_scheduled_at = datetime.fromisoformat(
+                str(resume["daily_scheduled_at"]).replace("Z", "+00:00")
+            )
+        if job.daily_scheduled_at is None:
+            job.daily_scheduled_at = datetime.now(timezone.utc) + timedelta(
+                minutes=random.SystemRandom().randint(5, 15)
+            )
         revision_source_id = str(resume.get("revision_source_id") or "")
         if revision_source_id:
             detail = self._request(
@@ -1078,47 +1700,100 @@ class AffiliateApiPublisher:
                     "Z", "+00:00"
                 )
             )
-            self._verify(revision_source_id, job, revision_at)
+            self._verify(
+                revision_source_id,
+                job,
+                revision_at,
+                expected_menu_id=int(revision_destination_template["menu_id"]),
+                expected_head_id=(
+                    int(revision_destination_template["head_id"])
+                    if revision_destination_template.get("head_id") is not None
+                    else None
+                ),
+            )
             if checkpoint:
                 checkpoint("VERIFIED", revision_source_id=revision_source_id)
             return f"https://v2r.daboja.im/nc/articleDetail/{revision_source_id}"
 
+        revision_at: datetime | None = None
+        revision_destination: dict[str, Any] | None = None
+        revision_content_json: str | None = None
+        if not daily_only:
+            if wait_control:
+                wait_control()
+            revision_at = job.daily_scheduled_at + timedelta(
+                hours=CAFE_DELAYS[job.cafe]
+            )
+            revision_destination = dict(revision_destination_template)
+            revision_destination["start_at"] = revision_at.isoformat().replace(
+                "+00:00", "Z"
+            )
+            revision_destination["target_view_count"] = (
+                random.SystemRandom().randint(80, 100)
+            )
+            # Images must be completely prepared before creating either V2R
+            # reservation. A browser-side failure must not consume or orphan a
+            # daily reservation.
+            revision_content_json = self._prepare_revision_content(
+                job,
+                revision_destination,
+            )
+
         daily_source_id = str(resume.get("daily_source_id") or "")
         if not daily_source_id:
-            daily_destination = dict(destination)
-            daily_destination["start_at"] = None
+            daily_destination = dict(daily_destination_template)
+            daily_destination["start_at"] = (
+                job.daily_scheduled_at.isoformat().replace("+00:00", "Z")
+            )
             daily_source_id = self._create_source(
                 job.daily_post.title,
                 job.daily_post.body,
                 [],
                 daily_destination,
                 [],
+                recovery_statuses=("RESERVED", "DONE"),
+                enable_comment=True,
             )
             if checkpoint:
-                checkpoint("DAILY_CREATED", daily_source_id=daily_source_id)
+                checkpoint(
+                    "DAILY_CREATED",
+                    daily_source_id=daily_source_id,
+                    daily_scheduled_at=(
+                        job.daily_scheduled_at.isoformat()
+                        .replace("+00:00", "Z")
+                    ),
+                )
+            self.logger.info(
+                "행 %s 제휴 일상 글 예약: %s / 댓글 허용 %s",
+                job.row_number,
+                job.daily_scheduled_at.astimezone().strftime(
+                    "%Y-%m-%d %H:%M"
+                ),
+                True,
+            )
         job.daily_post_url = (
             f"https://v2r.daboja.im/nc/articleDetail/{daily_source_id}"
         )
         try:
-            written_at = self._wait_for_written_at(
-                daily_source_id, destination["cafe_id"]
+            self._verify_destination_settings(
+                daily_source_id,
+                expected_menu_id=int(daily_destination_template["menu_id"]),
+                expected_head_id=(
+                    int(daily_destination_template["head_id"])
+                    if daily_destination_template.get("head_id") is not None
+                    else None
+                ),
+                expected_comment=True,
             )
-            if checkpoint:
-                checkpoint("DAILY_DONE", daily_source_id=daily_source_id)
-            revision_at = written_at + timedelta(hours=CAFE_DELAYS[job.cafe])
-
-            revision_destination = dict(destination)
-            revision_destination["start_at"] = revision_at.isoformat().replace(
-                "+00:00", "Z"
-            )
-            revision_destination["target_view_count"] = random.SystemRandom().randint(
-                80, 100
-            )
+            if daily_only:
+                return (
+                    "https://v2r.daboja.im/nc/articleDetail/"
+                    f"{daily_source_id}"
+                )
+            assert revision_at is not None
+            assert revision_destination is not None
+            assert revision_content_json is not None
             comments = self._comments(job, revision_at, destination["cafe_id"])
-            revision_content_json = self._prepare_revision_content(
-                job,
-                revision_destination,
-            )
             revision_source_id = self._create_source(
                 job.title,
                 strip_placeholders(job.body),
@@ -1134,17 +1809,38 @@ class AffiliateApiPublisher:
                     daily_source_id=daily_source_id,
                     revision_source_id=revision_source_id,
                 )
-            self._verify(revision_source_id, job, revision_at)
+            self._verify(
+                revision_source_id,
+                job,
+                revision_at,
+                expected_menu_id=int(revision_destination["menu_id"]),
+                expected_head_id=(
+                    int(revision_destination["head_id"])
+                    if revision_destination.get("head_id") is not None
+                    else None
+                ),
+            )
             if checkpoint:
                 checkpoint(
                     "VERIFIED",
                     daily_source_id=daily_source_id,
                     revision_source_id=revision_source_id,
                 )
+        except (AffiliateDailyPending, AffiliateRunStopped):
+            raise
         except Exception:
             if revision_source_id:
                 self._delete_source(revision_source_id)
             self._delete_source(daily_source_id)
+            if checkpoint:
+                checkpoint(
+                    "ACCOUNT_ASSIGNED",
+                    daily_source_id="",
+                    daily_scheduled_at="",
+                    revision_source_id="",
+                )
+            job.daily_scheduled_at = None
+            job.daily_written_at = None
             raise
         self.logger.info(
             "행 %s 수정 예약 API 검증 완료: 댓글 12개 / 조회수 %s",
