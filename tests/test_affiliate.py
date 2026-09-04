@@ -21,7 +21,7 @@ from v2r_auto.content import parse_article
 from v2r_auto.daily_posts import assign_daily_posts, load_daily_posts
 from v2r_auto.models import DailyPost, JobStatus
 from v2r_auto.runner import AffiliateRunner, assign_next_affiliate_daily_schedule
-from v2r_auto.sheet import load_affiliate_jobs
+from v2r_auto.sheet import SheetSchemaError, load_affiliate_jobs
 from v2r_auto.state import JobStateStore
 
 
@@ -73,7 +73,7 @@ def test_cccang_revision_board_comes_from_optional_j_column(
     assert job.validate() == []
 
 
-def test_cccang_uses_legacy_g_column_when_keyword_is_blank(
+def test_cccang_never_uses_g_column_when_keyword_is_blank(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "cccang-keyword-fallback.csv"
@@ -85,11 +85,8 @@ def test_cccang_uses_legacy_g_column_when_keyword_is_blank(
         encoding="utf-8-sig",
     )
 
-    job = load_affiliate_jobs(path, selected_row_number=2)[0]
-
-    assert job.keyword == "팍시 다이어트"
-    assert job.prefix == "팍시 다이어트"
-    assert job.validate() == []
+    with pytest.raises(SheetSchemaError, match="처리 대상 원고가 없습니다"):
+        load_affiliate_jobs(path, selected_row_number=2)
 
 
 def test_cccang_rejects_unknown_revision_board(tmp_path: Path) -> None:
