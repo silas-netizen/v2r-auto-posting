@@ -611,44 +611,42 @@ def test_sheet_write_skips_same_value_and_does_not_escape_while_editing() -> Non
     update = source.split("def update_sheet_cell", 1)[1].split(
         "def _visible_sheet_editor", 1
     )[0]
-    enter = source.split("def _enter_sheet_value", 1)[1].split(
-        "def _dismiss_sheet_clipboard_prompt", 1
-    )[0]
     dismiss = source.split("def _dismiss_sheet_clipboard_prompt", 1)[1].split(
         "def _find_sheet_name_box", 1
     )[0]
     assert "_sheet_cell_matches" in update
     assert "이미 들어 있어 그대로 둡니다" in update
     assert "시트 %s 저장 재시도" not in update
-    assert "_dismiss_sheet_clipboard_prompt" not in enter.split(
-        "self._begin_sheet_cell_edit()", 1
-    )[1]
-    assert "send_keys(Keys.ESCAPE)" not in dismiss.split("if closed and result", 1)[0]
+    assert "send_keys(Keys.ESCAPE)" not in dismiss
+    assert "수식 입력줄에 값이 들어가지 않았습니다" not in source
     gui = Path("v2r_auto/gui_search_volume.py").read_text(encoding="utf-8")
     assert "이미 같은 값이면 그대로 두고 오류를 내지 않습니다" in gui
 
 
-def test_first_cell_write_clicks_formula_bar() -> None:
+def test_first_cell_write_overwrites_selected_grid_cell() -> None:
     fixture = Path("tests/fixtures/sheet_first_cell.html").read_text(encoding="utf-8")
     assert sheet_clipboard_prompt_visible(fixture) is True
-    assert sheet_edit_target(fixture) == "formula_bar"
+    assert sheet_edit_target(fixture) == "grid"
     source = Path("v2r_auto/browser.py").read_text(encoding="utf-8")
-    enter = source.split("def _enter_sheet_value", 1)[1].split(
-        "def _dismiss_sheet_clipboard_prompt", 1
+    write = source.split("def _write_sheet_cell", 1)[1].split(
+        "def _type_into_selected_grid_cell", 1
     )[0]
-    begin = source.split("def _begin_sheet_cell_edit", 1)[1].split(
-        "def _insert_sheet_text", 1
+    grid = source.split("def _type_into_selected_grid_cell", 1)[1].split(
+        "def _type_into_formula_bar_only", 1
     )[0]
-    focus = source.split("def _focus_sheet_formula_bar", 1)[1].split(
-        "def _formula_bar_text", 1
+    find = source.split("def _find_sheet_formula_bar", 1)[1].split(
+        "def _select_sheet_cell", 1
     )[0]
+    assert "_write_sheet_cell" in source
+    assert "_type_into_selected_grid_cell" in source
     assert "_select_sheet_cell" in source
-    assert "_find_sheet_formula_bar" in source
-    assert "_focus_sheet_formula_bar" in source
-    assert "_formula_bar_matches" in enter
-    assert "waffle-rich-text-editor" not in begin
-    assert "waffle-rich-text-editor" not in focus
-    assert "bar.click()" in focus
+    assert "_formula_bar_matches" not in write
+    assert "수식 입력줄에 값이 들어가지 않았습니다" not in source
+    assert ".click()" not in grid
+    assert "Input.insertText" in grid
+    assert "Keys.TAB" in grid
+    assert "textarea.cell-input" not in find
+    assert ".formula-content" not in find
     gui = Path("v2r_auto/gui_search_volume.py").read_text(encoding="utf-8")
-    assert "수식 입력줄" in gui
-    assert "첫 칸 안을 누르면" in gui
+    assert "그 칸에 바로 덮어씁니다" in gui
+    assert "시트보내기에 값이 남으면" in gui
