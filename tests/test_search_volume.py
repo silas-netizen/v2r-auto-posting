@@ -3,8 +3,7 @@ import logging
 from pathlib import Path
 from urllib.error import HTTPError
 
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone
 
 from v2r_auto.exposure import ExposureRow, naver_search_url
 from v2r_auto.exposure_notion import NotionExposureStore
@@ -551,7 +550,7 @@ def test_filler_continues_after_one_row_write_fails() -> None:
 def test_now_stamp_uses_korea_time() -> None:
     assert now_stamp(datetime(2026, 9, 4, 23, 19, 43)) == "2026-09-04 23:19:43"
     assert (
-        now_stamp(datetime(2026, 9, 4, 14, 19, 43, tzinfo=ZoneInfo("UTC")))
+        now_stamp(datetime(2026, 9, 4, 14, 19, 43, tzinfo=timezone.utc))
         == "2026-09-04 23:19:43"
     )
 

@@ -5,8 +5,7 @@ import io
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
@@ -97,7 +96,9 @@ def column_letter(index: int) -> str:
     return "".join(reversed(letters))
 
 
-KOREA_TZ = ZoneInfo("Asia/Seoul")
+# Korea does not use DST. A fixed UTC+9 offset works on Windows EXEs
+# that ship without the IANA tzdata pack.
+KOREA_TZ = timezone(timedelta(hours=9), name="KST")
 
 
 def now_stamp(now: datetime | None = None) -> str:
