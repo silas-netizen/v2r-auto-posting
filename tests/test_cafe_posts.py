@@ -12,6 +12,7 @@ from v2r_auto.cafe_posts import (
     CafePostRow,
     apply_intro_cafe_name,
     article_checkbox_ids_from_html,
+    article_page_looks_deleted,
     article_ids_from_html,
     article_ids_from_payload,
     article_url,
@@ -523,3 +524,22 @@ def test_browser_deletes_with_checkbox() -> None:
     assert "board.removeArticles" in source
     assert "delete_newer_duplicates" in source
     assert "관리자 계정" in source
+    assert "window.confirm = accept" in source
+    assert "_override_confirms" in source
+    assert "_article_looks_gone" in source
+    assert "전체 글 목록은 넘기지 않고" in source
+    assert "text === '예'" in source
+
+
+def test_article_page_looks_deleted() -> None:
+    assert article_page_looks_deleted(
+        "삭제되었거나 존재하지 않는 게시글입니다."
+    )
+    assert article_page_looks_deleted("삭제된 게시글입니다")
+    assert not article_page_looks_deleted("안녕하세요 본문입니다")
+
+
+def test_gui_mentions_delete_confirm() -> None:
+    source = Path("v2r_auto/gui_cafe_posts.py").read_text(encoding="utf-8")
+    assert "삭제 확인 창까지" in source
+    assert "그 글 화면으로 갑니다" in source

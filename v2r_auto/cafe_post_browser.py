@@ -18,6 +18,7 @@ from .cafe_posts import (
     apply_intro_cafe_name,
     article_checkbox_ids_from_html,
     article_dates_from_payload,
+    article_page_looks_deleted,
     article_ids_from_html,
     article_ids_from_payload,
     article_url,
@@ -182,7 +183,30 @@ document.querySelectorAll('input[type="checkbox"]').forEach((box) => {
 });
 return checked;
 """
+ACCEPT_DIALOGS_JS = r"""
+const accept = function() { return true; };
+window.confirm = accept;
+window.alert = function() {};
+window.prompt = function() { return ''; };
+try {
+  if (window.top && window.top !== window) {
+    window.top.confirm = accept;
+    window.top.alert = function() {};
+    window.top.prompt = function() { return ''; };
+  }
+} catch (error) {}
+return true;
+"""
 CLICK_LIST_DELETE_JS = r"""
+const accept = function() { return true; };
+window.confirm = accept;
+window.alert = function() {};
+try {
+  if (window.top && window.top !== window) {
+    window.top.confirm = accept;
+    window.top.alert = function() {};
+  }
+} catch (error) {}
 if (window.board && typeof board.removeArticles === 'function') {
   board.removeArticles();
   return 'board.removeArticles';
@@ -199,9 +223,18 @@ if (btn) {
 return '';
 """
 CLICK_ARTICLE_DELETE_JS = r"""
-const buttons = Array.from(document.querySelectorAll('a, button, span'));
+const accept = function() { return true; };
+window.confirm = accept;
+window.alert = function() {};
+try {
+  if (window.top && window.top !== window) {
+    window.top.confirm = accept;
+    window.top.alert = function() {};
+  }
+} catch (error) {}
+const buttons = Array.from(document.querySelectorAll('a, button, span, input[type="button"]'));
 const btn = buttons.find((el) => {
-  const text = ((el.innerText || '') + '').replace(/\s+/g, '');
+  const text = ((el.innerText || el.value || '') + '').replace(/\s+/g, '');
   return (text === '삭제' || text === '삭제하기') && el.offsetParent !== null;
 });
 if (btn) {
@@ -211,10 +244,10 @@ if (btn) {
 return false;
 """
 CLICK_CONFIRM_JS = r"""
-const buttons = Array.from(document.querySelectorAll('a, button, span'));
+const buttons = Array.from(document.querySelectorAll('a, button, span, input[type="button"], input[type="submit"]'));
 const btn = buttons.find((el) => {
-  const text = ((el.innerText || '') + '').replace(/\s+/g, '');
-  return (text === '확인' || text === '삭제') && el.offsetParent !== null;
+  const text = ((el.innerText || el.value || '') + '').replace(/\s+/g, '');
+  return (text === '확인' || text === '예' || text === '삭제' || text === '삭제하기') && el.offsetParent !== null;
 });
 if (btn) {
   btn.click();
@@ -343,7 +376,39 @@ class CafePostSession:
         self._open_cafe_home()
         remaining = set(wanted)
         deleted: list[int] = []
-        saw_checkbox = False
+        menu_id = int(self.target.menu_id or 0)
+        if menu_id != 0:
+            deleted.extend(self._delete_from_article_list(remaining, should_stop))
+            remaining.difference_update(deleted)
+        else:
+            self.logger.info(
+                "전체 글 목록은 넘기지 않고, 삭제할 글 %s개 화면에서 확인 창까지 누릅니다",
+                len(remaining),
+            )
+        if remaining:
+            leftover = self._delete_opened_articles(sorted(remaining), should_stop)
+            deleted.extend(item for item in leftover if item not in deleted)
+            remaining.difference_update(leftover)
+        if remaining:
+            self.logger.warning(
+                "삭제하지 못한 글 %s개: %s",
+                len(remaining),
+                ", ".join(str(item) for item in sorted(remaining)[:20]),
+            )
+        if not deleted:
+            raise CafePostError(
+                "글을 삭제하지 못했습니다. "
+                "카페 관리자 계정으로 로그인한 뒤, "
+                "확인 창이 뜨면 프로그램이 확인을 누를 때까지 창을 닫지 마세요"
+            )
+        return deleted
+
+    def _delete_from_article_list(
+        self,
+        remaining: set[int],
+        should_stop: Callable[[], bool] | None,
+    ) -> list[int]:
+        deleted: list[int] = []
         for _round in range(80):
             if should_stop and should_stop():
                 self.logger.info("중지를 눌러 삭제를 멈춥니다")
@@ -356,8 +421,6 @@ class CafePostSession:
                     break
                 self._open_article_list(page)
                 boxes = self._list_article_boxes()
-                if boxes:
-                    saw_checkbox = True
                 page_ids = {int(item.get("id") or 0) for item in boxes}
                 if not page_ids and page > 1:
                     break
@@ -369,6 +432,7 @@ class CafePostSession:
                 checked = self._check_article_boxes(hit)
                 if not checked:
                     continue
+                self._override_confirms()
                 if not self._click_list_delete():
                     self.logger.error("삭제 버튼을 찾지 못했습니다")
                     continue
@@ -383,21 +447,6 @@ class CafePostSession:
                 break
             if not found_on_pass:
                 break
-        if remaining:
-            leftover = self._delete_opened_articles(sorted(remaining), should_stop)
-            deleted.extend(item for item in leftover if item not in deleted)
-            remaining.difference_update(leftover)
-        if not saw_checkbox and not deleted:
-            raise CafePostError(
-                "목록에 삭제 체크박스가 없습니다. "
-                "카페 관리자 계정으로 로그인한 뒤 다시 시도해 주세요"
-            )
-        if remaining:
-            self.logger.warning(
-                "삭제하지 못한 글 %s개: %s",
-                len(remaining),
-                ", ".join(str(item) for item in sorted(remaining)[:20]),
-            )
         return deleted
 
     def _delete_opened_articles(
@@ -411,18 +460,31 @@ class CafePostSession:
                 break
             self._switch()
             self.browser._navigate(article_url(self.target, article_id), self.handle)
-            time.sleep(1.0)
+            time.sleep(1.2)
+            self._accept_confirms()
+            self._override_confirms()
             clicked = False
             try:
                 clicked = bool(self._run_in_cafe_main(CLICK_ARTICLE_DELETE_JS))
             except Exception:
                 clicked = False
             if not clicked:
+                self.logger.warning(
+                    "글 %s에서 삭제 버튼을 찾지 못했습니다", article_id
+                )
                 continue
             self._accept_confirms()
-            time.sleep(0.8)
-            deleted.append(article_id)
-            self.logger.info("글 화면에서 %s을 삭제했습니다", article_id)
+            time.sleep(1.0)
+            if not self._article_looks_gone():
+                self._accept_confirms()
+                time.sleep(0.8)
+            if self._article_looks_gone():
+                deleted.append(article_id)
+                self.logger.info("글 화면에서 %s을 삭제했습니다", article_id)
+            else:
+                self.logger.warning(
+                    "글 %s는 확인 창이 남았거나 글이 그대로입니다", article_id
+                )
         return deleted
 
     def _open_article_list(self, page: int) -> None:
@@ -459,26 +521,63 @@ class CafePostSession:
         raw = self._run_in_cafe_main(CLICK_LIST_DELETE_JS)
         return bool(raw)
 
-    def _accept_confirms(self) -> None:
+    def _override_confirms(self) -> None:
         assert self.browser.driver
-        for _ in range(3):
+        self._switch()
+        try:
+            self.browser.driver.execute_script(ACCEPT_DIALOGS_JS)
+        except Exception:
+            pass
+        try:
+            self._run_in_cafe_main(ACCEPT_DIALOGS_JS)
+        except Exception:
+            pass
+
+    def _article_looks_gone(self) -> bool:
+        try:
+            html = self._cafe_main_html()
+        except Exception:
+            html = ""
+        try:
+            html += self._page_html()
+        except Exception:
+            pass
+        return article_page_looks_deleted(html)
+
+    def _accept_confirms(self) -> int:
+        assert self.browser.driver
+        driver = self.browser.driver
+        accepted = 0
+        self._switch()
+        for _ in range(8):
             try:
-                alert = self.browser.driver.switch_to.alert
+                alert = driver.switch_to.alert
                 self.logger.info("확인 창: %s", alert.text)
                 alert.accept()
+                accepted += 1
                 time.sleep(0.3)
                 continue
             except NoAlertPresentException:
                 pass
             except Exception:
                 pass
+            clicked = False
             try:
-                if self._run_in_cafe_main(CLICK_CONFIRM_JS):
-                    time.sleep(0.3)
-                    continue
+                clicked = bool(self._run_in_cafe_main(CLICK_CONFIRM_JS))
             except Exception:
-                pass
+                clicked = False
+            if not clicked:
+                try:
+                    self._switch()
+                    clicked = bool(driver.execute_script(CLICK_CONFIRM_JS))
+                except Exception:
+                    clicked = False
+            if clicked:
+                accepted += 1
+                time.sleep(0.3)
+                continue
             break
+        return accepted
 
     def _run_in_cafe_main(self, script: str, *args: Any) -> Any:
         assert self.browser.driver
