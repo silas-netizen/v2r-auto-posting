@@ -234,6 +234,36 @@ def test_se_one_selection_waits_for_loading_overlay_to_clear() -> None:
     assert state["clicked"] is True
 
 
+def test_known_subscription_notice_is_dismissed_before_seone_work() -> None:
+    state = {"clicked": False}
+
+    class FakeButton:
+        def is_displayed(self):
+            return True
+
+        def is_enabled(self):
+            return True
+
+    class FakeDriver:
+        page_source = (
+            "N 카페 요금제 종료 1일전 안내 "
+            "오늘 하루 안보기 닫기"
+        )
+
+        def find_elements(self, by, selector):
+            return [FakeButton()]
+
+        def execute_script(self, script, element):
+            state["clicked"] = True
+
+    browser = object.__new__(V2RBrowser)
+    browser.driver = FakeDriver()
+    browser.logger = __import__("logging").getLogger("notice-test")
+
+    assert browser._dismiss_known_seone_notice() is True
+    assert state["clicked"] is True
+
+
 def test_image_editor_is_prepared_in_visible_form_order() -> None:
     calls: list[tuple[str, str]] = []
 

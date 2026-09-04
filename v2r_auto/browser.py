@@ -507,6 +507,30 @@ class V2RBrowser:
                 f"SE-ONE {label} 선택칸의 로딩 화면이 사라지지 않았습니다"
             ) from exc
 
+    def _dismiss_known_seone_notice(self) -> bool:
+        """Dismiss only the known subscription-expiry modal blocking SE-ONE."""
+        assert self.driver
+        if "N 카페 요금제 종료" not in self.driver.page_source:
+            return False
+        xpath = (
+            "//*[normalize-space()='오늘 하루 안보기']"
+            "/ancestor-or-self::*[self::button or @role='button'][1]"
+        )
+        candidates = self.driver.find_elements(By.XPATH, xpath)
+        for button in candidates:
+            try:
+                if not button.is_displayed() or not button.is_enabled():
+                    continue
+                self.driver.execute_script("arguments[0].click();", button)
+                self.logger.info(
+                    "SE-ONE 화면을 가린 요금제 안내를 오늘 하루 닫았습니다"
+                )
+                time.sleep(0.5)
+                return True
+            except StaleElementReferenceException:
+                continue
+        return False
+
     def _select_se_one_option(self, label: str, value: str, selection_index: int) -> None:
         assert self.driver
         selections = self._visible_se_one_selections()
@@ -1571,6 +1595,7 @@ class V2RBrowser:
         for attempt in range(1, 4):
             try:
                 self.open_se_one_writer()
+                self._dismiss_known_seone_notice()
                 self._select_option("카페", ui_cafe_name)
                 self._select_option("계정", account)
                 self._select_option("게시판", menu_name)
