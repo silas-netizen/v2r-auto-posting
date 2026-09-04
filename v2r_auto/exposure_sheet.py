@@ -45,22 +45,18 @@ def sheet_clipboard_prompt_visible(html: str) -> bool:
 
 
 def sheet_edit_target(html: str) -> str:
-    """Where to type so the first-cell clipboard dialog does not eat the value.
+    """Where to type after the name box selects the cell.
 
-    After the name box selects I2, Sheets focuses the in-cell waffle editor.
-    Clicking that waffle (or typing there with F2) pops the 설치 dialog and
-    leaves I2 empty. Click the formula bar instead.
+    Clicking the waffle editor opens the clipboard dialog and leaves the cell
+    empty. Type into the already-selected grid cell. The formula bar is only
+    a fallback, and its visible text is not a success check.
     """
     text = html or ""
+    if 'id="t-name-box"' in text or "waffle-rich-text-editor" in text:
+        return "grid"
     if 'id="t-formula-bar-input"' in text or "t-formula-bar-input" in text:
         return "formula_bar"
-    if 'id="t-name-box"' in text or 'aria-label="이름 상자"' in text:
-        return "name_box"
-    if sheet_clipboard_prompt_visible(text):
-        return "keyboard"
-    if "waffle-rich-text-editor" in text:
-        return "keyboard"
-    return "keyboard"
+    return "grid"
 
 
 _SHEET_ID_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9_-]+)")
