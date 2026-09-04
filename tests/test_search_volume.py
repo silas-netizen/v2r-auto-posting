@@ -4,12 +4,14 @@ from pathlib import Path
 from urllib.error import HTTPError
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from v2r_auto.exposure import ExposureRow, naver_search_url
 from v2r_auto.exposure_notion import NotionExposureStore
 from v2r_auto.exposure_sheet import (
     GoogleSheetExposureStore,
     SheetWrite,
+    now_stamp,
     plan_volume_writes,
     sheet_clipboard_prompt_visible,
     sheet_edit_target,
@@ -544,6 +546,14 @@ def test_filler_continues_after_one_row_write_fails() -> None:
     assert filler.failed_rows == 1
     assert [item["page_id"] for item in store.writes] == ["7"]
     assert store.writes[0]["keyword"] == "부종 원인"
+
+
+def test_now_stamp_uses_korea_time() -> None:
+    assert now_stamp(datetime(2026, 9, 4, 23, 19, 43)) == "2026-09-04 23:19:43"
+    assert (
+        now_stamp(datetime(2026, 9, 4, 14, 19, 43, tzinfo=ZoneInfo("UTC")))
+        == "2026-09-04 23:19:43"
+    )
 
 
 def test_sheet_store_skips_volume_when_not_found_but_writes_search() -> None:
