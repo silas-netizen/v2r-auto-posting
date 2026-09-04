@@ -426,19 +426,25 @@ class V2RBrowser:
     def _enter_sheet_value(self, value: str) -> None:
         """Type into the formula bar, not the in-cell editor.
 
-        Clicking waffle-rich-text-editor on the first cell opens Sheets'
-        copy/paste 설치 dialog and leaves I2 empty. Name box + F2 / formula
-        bar matches how a person types and does not need the clipboard.
+        After the name box jumps to I2, focus sits on waffle-rich-text-editor.
+        F2 / insertText then type into that waffle. On the first cell that
+        opens the copy/paste 설치 dialog and leaves I2 empty. Click the
+        formula bar, confirm the text is there, then Enter.
         """
         self._dismiss_sheet_clipboard_prompt()
         self._begin_sheet_cell_edit()
         self._dismiss_sheet_clipboard_prompt()
-        if self._insert_sheet_text(value):
+        if self._insert_sheet_text(value) and self._formula_bar_matches(value):
             self._dismiss_sheet_clipboard_prompt()
             self._finish_sheet_cell_edit()
             return
+        self._focus_sheet_formula_bar()
+        self._dismiss_sheet_clipboard_prompt()
         self._type_sheet_text(value)
-        ActionChains(self.driver).send_keys("|").send_keys(Keys.BACKSPACE).perform()
+        if not self._formula_bar_matches(value):
+            raise AutomationError(
+                "수식 입력줄에 값이 들어가지 않았습니다. 칸 안을 누르지 않고 다시 시도합니다"
+            )
         self._dismiss_sheet_clipboard_prompt()
         self._finish_sheet_cell_edit()
 
@@ -522,15 +528,52 @@ class V2RBrowser:
         except Exception:
             return
 
+    def _focus_sheet_formula_bar(self) -> bool:
+        """Click the formula bar. Do not click the in-cell waffle editor."""
+        assert self.driver
+        bar = self._find_sheet_formula_bar()
+        if bar is None:
+            return False
+        try:
+            bar.click()
+            time.sleep(0.15)
+            return True
+        except Exception:
+            pass
+        try:
+            self.driver.execute_script("arguments[0].focus();", bar)
+            time.sleep(0.1)
+            return True
+        except Exception:
+            return False
+
+    def _formula_bar_text(self) -> str:
+        assert self.driver
+        try:
+            text = self.driver.execute_script(
+                """
+                const bar = document.querySelector('#t-formula-bar-input .cell-input')
+                  || document.querySelector('#t-formula-bar-input')
+                  || document.querySelector('.formula-content');
+                if (!bar) return '';
+                return bar.innerText || bar.textContent || bar.value || '';
+                """
+            )
+        except Exception:
+            return ""
+        return str(text or "")
+
+    def _formula_bar_matches(self, expected: str) -> bool:
+        return sheet_values_match(expected, self._formula_bar_text())
+
     def _begin_sheet_cell_edit(self) -> None:
         assert self.driver
-        ActionChains(self.driver).send_keys(Keys.F2).perform()
-        time.sleep(0.15)
-        self._dismiss_sheet_clipboard_prompt()
+        if not self._focus_sheet_formula_bar():
+            ActionChains(self.driver).send_keys(Keys.F2).perform()
+            time.sleep(0.15)
+            self._dismiss_sheet_clipboard_prompt()
+            self._focus_sheet_formula_bar()
         target = self._find_sheet_formula_bar()
-        if target is None:
-            editors = self._visible_sheet_editor()
-            target = editors[0] if editors else None
         if target is not None:
             try:
                 target.send_keys(Keys.CONTROL, "a")

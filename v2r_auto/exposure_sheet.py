@@ -47,8 +47,9 @@ def sheet_clipboard_prompt_visible(html: str) -> bool:
 def sheet_edit_target(html: str) -> str:
     """Where to type so the first-cell clipboard dialog does not eat the value.
 
-    Clicking the in-cell waffle editor is what pops the 설치 dialog on I2.
-    Prefer the formula bar or name box, then F2.
+    After the name box selects I2, Sheets focuses the in-cell waffle editor.
+    Clicking that waffle (or typing there with F2) pops the 설치 dialog and
+    leaves I2 empty. Click the formula bar instead.
     """
     text = html or ""
     if 'id="t-formula-bar-input"' in text or "t-formula-bar-input" in text:
