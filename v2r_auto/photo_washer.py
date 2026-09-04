@@ -68,6 +68,45 @@ def camera_metadata_changed(
     return before != after and bool(after)
 
 
+def file_content_hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def prepare_photo_washer_file(source: Path, destination: Path) -> Path:
+    """Move JPEG files and convert other supported images to washer-safe JPEG."""
+    if source.suffix.casefold() in {".jpg", ".jpeg"}:
+        shutil.move(str(source), destination)
+        return destination
+    converted = destination.with_suffix(".jpg")
+    if converted.exists():
+        raise PhotoWashError(
+            f"포토워셔 변환 파일명이 중복됩니다: {converted.name}"
+        )
+    try:
+        with Image.open(source) as image:
+            image.seek(0)
+            if image.mode in {"RGBA", "LA"} or (
+                image.mode == "P" and "transparency" in image.info
+            ):
+                rgba = image.convert("RGBA")
+                background = Image.new("RGBA", rgba.size, "white")
+                background.alpha_composite(rgba)
+                output = background.convert("RGB")
+            else:
+                output = image.convert("RGB")
+            output.save(converted, format="JPEG", quality=95)
+    except Exception as exc:
+        raise PhotoWashError(
+            f"포토워셔용 JPG 변환 실패: {source.name} - {exc}"
+        ) from exc
+    source.unlink(missing_ok=True)
+    return converted
+
+
 def photo_job_key(job: Any) -> str:
     payload = "\n".join(
         (
@@ -549,6 +588,7 @@ class PhotoWashPlan:
     prepared_images: dict[str, list[ResolvedImage]] = field(default_factory=dict)
     pending_images: dict[str, list[ResolvedImage]] = field(default_factory=dict)
     metadata_before: dict[str, dict[str, str]] = field(default_factory=dict)
+    content_hash_before: dict[str, str] = field(default_factory=dict)
     failures: dict[str, str] = field(default_factory=dict)
     selected_count: int = 0
     washed_count: int = 0
@@ -567,9 +607,14 @@ class PhotoWashPlan:
                     successful = False
                     break
                 before = self.metadata_before.get(image.file_id, {})
-                if not camera_metadata_changed(before, after):
+                before_hash = self.content_hash_before.get(image.file_id, "")
+                after_hash = file_content_hash(image.local_path)
+                if (
+                    not camera_metadata_changed(before, after)
+                    and (not before_hash or before_hash == after_hash)
+                ):
                     self.failures[key] = (
-                        "카메라 정보가 변경되지 않아 세탁하지 않은 사진으로 "
+                        "카메라 정보와 파일 내용이 변경되지 않아 세탁하지 않은 사진으로 "
                         f"판단합니다: {image.local_path.name}"
                     )
                     successful = False
@@ -668,21 +713,34 @@ def prepare_photo_wash_plan(
     batch_dir.mkdir(parents=True, exist_ok=False)
     moved: dict[str, ResolvedImage] = {}
     before: dict[str, dict[str, str]] = {}
+    content_hash_before: dict[str, str] = {}
     for item in all_selected:
         destination = batch_dir / item.local_path.name
         if destination.exists():
             raise PhotoWashError(
                 f"포토워셔 배치 파일명이 중복됩니다: {destination.name}"
             )
-        shutil.move(str(item.local_path), destination)
+        destination = prepare_photo_washer_file(
+            item.local_path,
+            destination,
+        )
+        if destination.suffix.casefold() == ".jpg" and (
+            item.local_path.suffix.casefold() not in {".jpg", ".jpeg"}
+        ):
+            logger.info(
+                "포토워셔 호환을 위해 JPG로 변환했습니다: %s → %s",
+                item.local_path.name,
+                destination.name,
+            )
         moved[item.file_id] = ResolvedImage(
             occurrence=item.occurrence,
             marker=item.marker,
             file_id=item.file_id,
-            file_name=item.file_name,
+            file_name=destination.name,
             local_path=destination,
         )
         before[item.file_id] = camera_metadata(destination)
+        content_hash_before[item.file_id] = file_content_hash(destination)
 
     controller = controller or PhotoWasherController(executable, logger)
     logger.info(
@@ -708,6 +766,7 @@ def prepare_photo_wash_plan(
         washed_items = [moved[item.file_id] for item in items]
         plan.pending_images[key] = washed_items
     plan.metadata_before = before
+    plan.content_hash_before = content_hash_before
     logger.info(
         "포토워셔와 사진 폴더가 열렸습니다. 수동 세탁 후 발행 시작을 누르세요"
     )

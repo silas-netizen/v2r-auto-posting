@@ -12,6 +12,7 @@ from v2r_auto.models import ImmediateJob, JobStatus
 from v2r_auto.photo_washer import (
     camera_metadata,
     camera_metadata_changed,
+    file_content_hash,
     load_saved_photo_washer_executable,
     photo_job_key,
     preferred_photo_washer_executable,
@@ -214,4 +215,49 @@ def test_unchanged_camera_metadata_blocks_article(tmp_path: Path) -> None:
     plan.apply([reloaded])
     assert photo_job_key(job) in plan.failures
     assert reloaded.status == JobStatus.FAILED
-    assert "카메라 정보가 변경되지 않아" in reloaded.message
+    assert "카메라 정보와 파일 내용이 변경되지 않아" in reloaded.message
+
+
+def test_png_is_converted_to_jpeg_and_hash_change_confirms_wash(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "듀얼플랜 유산균.png"
+    Image.new("RGBA", (20, 20), color=(255, 0, 0, 128)).save(path, "PNG")
+    job = make_job(101)
+    resolver = FakeResolver(
+        {
+            101: [
+                ResolvedImage(
+                    0,
+                    "키워드",
+                    "png-id",
+                    path.name,
+                    path,
+                )
+            ]
+        }
+    )
+    controller = OpeningController()
+
+    plan = prepare_photo_wash_plan(
+        [job],
+        download_dir=tmp_path / "downloads",
+        executable=tmp_path / "main.exe",
+        logger=logging.getLogger("png-wash-test"),
+        resolver=resolver,
+        controller=controller,
+    )
+
+    washed_path = controller.paths[0]
+    assert washed_path.suffix == ".jpg"
+    assert not path.exists()
+    before_hash = file_content_hash(washed_path)
+    Image.new("RGB", (20, 20), color="blue").save(washed_path, "JPEG")
+    assert file_content_hash(washed_path) != before_hash
+
+    reloaded = copy.deepcopy(job)
+    plan.apply([reloaded])
+
+    assert reloaded.status == JobStatus.PENDING
+    assert reloaded.photo_wash_prepared is True
+    assert reloaded.prepared_images[0].local_path.suffix == ".jpg"
