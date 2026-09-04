@@ -597,6 +597,28 @@ def test_browser_closes_sheet_clipboard_prompt() -> None:
     assert "붙여넣기 설정 창" in gui
 
 
+def test_sheet_write_skips_same_value_and_does_not_escape_while_editing() -> None:
+    source = Path("v2r_auto/browser.py").read_text(encoding="utf-8")
+    update = source.split("def update_sheet_cell", 1)[1].split(
+        "def _visible_sheet_editor", 1
+    )[0]
+    enter = source.split("def _enter_sheet_value", 1)[1].split(
+        "def _dismiss_sheet_clipboard_prompt", 1
+    )[0]
+    dismiss = source.split("def _dismiss_sheet_clipboard_prompt", 1)[1].split(
+        "def _find_sheet_name_box", 1
+    )[0]
+    assert "_sheet_cell_matches" in update
+    assert "이미 들어 있어 그대로 둡니다" in update
+    assert "시트 %s 저장 재시도" not in update
+    assert "_dismiss_sheet_clipboard_prompt" not in enter.split(
+        "self._begin_sheet_cell_edit()", 1
+    )[1]
+    assert "send_keys(Keys.ESCAPE)" not in dismiss.split("if closed and result", 1)[0]
+    gui = Path("v2r_auto/gui_search_volume.py").read_text(encoding="utf-8")
+    assert "이미 같은 값이면 그대로 두고 오류를 내지 않습니다" in gui
+
+
 def test_first_cell_write_clicks_formula_bar() -> None:
     fixture = Path("tests/fixtures/sheet_first_cell.html").read_text(encoding="utf-8")
     assert sheet_clipboard_prompt_visible(fixture) is True
