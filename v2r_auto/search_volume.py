@@ -419,6 +419,6 @@ class SearchVolumeFiller:
         if volume_found:
             self.logger.info("%s 검색량 반영: %s = %s", label, row.keyword, volume)
         elif not written_keyword:
-            self.logger.warning(
+            self.logger.info(
                 "검색량을 못 읽어 검색량 칸은 그대로 둡니다: %s", row.keyword
             )
