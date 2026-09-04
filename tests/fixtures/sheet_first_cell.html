@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>시트 첫 칸 입력 시뮬</title>
+</head>
+<body>
+  <input id="t-name-box" aria-label="이름 상자" value="I2">
+  <div id="t-formula-bar-input"><div class="cell-input" contenteditable="true"></div></div>
+  <div id="waffle-rich-text-editor" contenteditable="true"></div>
+  <div id="cell-i2" data-value=""></div>
+  <div id="clipboard-dialog" hidden>
+    <p>복사, 잘라내기, 붙여넣기를 사용 설정하시겠습니까?</p>
+    <button id="cancel">취소</button>
+    <button id="install">설치</button>
+  </div>
+  <script>
+    const cell = document.getElementById("cell-i2");
+    const waffle = document.getElementById("waffle-rich-text-editor");
+    const bar = document.querySelector("#t-formula-bar-input .cell-input");
+    const dialog = document.getElementById("clipboard-dialog");
+    waffle.addEventListener("click", () => {
+      dialog.hidden = false;
+    });
+    document.getElementById("cancel").addEventListener("click", () => {
+      dialog.hidden = true;
+    });
+    window.writeLikeOld = (text) => {
+      waffle.click();
+      if (!dialog.hidden) return cell.dataset.value;
+      waffle.textContent = text;
+      cell.dataset.value = text;
+      return cell.dataset.value;
+    };
+    window.writeLikeNew = (text) => {
+      bar.textContent = text;
+      cell.dataset.value = text;
+      return cell.dataset.value;
+    };
+  </script>
+</body>
+</html>

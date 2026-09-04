@@ -32,6 +32,36 @@ class SheetError(RuntimeError):
     pass
 
 
+SHEET_CLIPBOARD_PROMPT_MARKERS = (
+    "복사, 잘라내기, 붙여넣기를 사용 설정하시겠습니까",
+    "복사, 잘라내기, 붙여넣기를 사용 설정",
+)
+
+
+def sheet_clipboard_prompt_visible(html: str) -> bool:
+    """True when Sheets asks to install the copy/paste extension."""
+    text = html or ""
+    return any(marker in text for marker in SHEET_CLIPBOARD_PROMPT_MARKERS)
+
+
+def sheet_edit_target(html: str) -> str:
+    """Where to type so the first-cell clipboard dialog does not eat the value.
+
+    Clicking the in-cell waffle editor is what pops the 설치 dialog on I2.
+    Prefer the formula bar or name box, then F2.
+    """
+    text = html or ""
+    if 'id="t-formula-bar-input"' in text or "t-formula-bar-input" in text:
+        return "formula_bar"
+    if 'id="t-name-box"' in text or 'aria-label="이름 상자"' in text:
+        return "name_box"
+    if sheet_clipboard_prompt_visible(text):
+        return "keyboard"
+    if "waffle-rich-text-editor" in text:
+        return "keyboard"
+    return "keyboard"
+
+
 _SHEET_ID_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9_-]+)")
 
 

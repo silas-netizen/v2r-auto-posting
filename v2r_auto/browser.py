@@ -30,7 +30,39 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from .content import ParsedArticle
+from .exposure_sheet import sheet_clipboard_prompt_visible
 from .models import AffiliateJob, JobStatus, PostJob
+
+DISMISS_SHEET_CLIPBOARD_PROMPT_JS = r"""
+const clickCancel = (doc) => {
+  const hay = ((doc.body && doc.body.innerText) || '') + (doc.documentElement ? doc.documentElement.innerText : '');
+  if (!/복사,\s*잘라내기,\s*붙여넣기/.test(hay)) return '';
+  const nodes = Array.from(doc.querySelectorAll('button, [role="button"], span, div, input'));
+  const cancel = nodes.find((el) => {
+    const text = ((el.innerText || el.textContent || el.value || '') + '').replace(/\s+/g, '');
+    return text === '취소';
+  });
+  if (cancel) {
+    cancel.click();
+    return 'cancel';
+  }
+  return 'seen';
+};
+const walk = (win) => {
+  let result = '';
+  try { result = clickCancel(win.document) || result; } catch (error) {}
+  let frames = [];
+  try { frames = Array.from(win.frames || []); } catch (error) {}
+  for (const frame of frames) {
+    try {
+      const nested = walk(frame);
+      if (nested) result = nested;
+    } catch (error) {}
+  }
+  return result;
+};
+return walk(window);
+"""
 
 
 V2R_LIST_URL = "https://v2r.daboja.im/nc/board?view=list"
@@ -349,10 +381,15 @@ class V2RBrowser:
                     == "complete"
                 )
                 self.wait.until(
-                    EC.presence_of_element_located((By.ID, "waffle-rich-text-editor"))
+                    lambda driver: self._find_sheet_name_box() is not None
+                    or self._visible_sheet_editor()
+                    or driver.find_elements(By.ID, "waffle-rich-text-editor")
                 )
                 self.driver.execute_script("window.focus();")
-                time.sleep(0.25)
+                time.sleep(0.8 if attempt == 1 else 0.25)
+                self._dismiss_sheet_clipboard_prompt()
+                self._select_sheet_cell(column, row_number)
+                self._dismiss_sheet_clipboard_prompt()
                 self._enter_sheet_value(value)
                 self._verify_sheet_cell(
                     sheet_url,
@@ -387,27 +424,122 @@ class V2RBrowser:
         ]
 
     def _enter_sheet_value(self, value: str) -> None:
-        """Put the whole value in at once so column autocomplete cannot steal it.
+        """Type into the formula bar, not the in-cell editor.
 
-        Clipboard paste is unreliable in Sheets and a failed copy can clear the
-        cell, then leave it empty. Insert the text in one shot instead.
+        Clicking waffle-rich-text-editor on the first cell opens Sheets'
+        copy/paste 설치 dialog and leaves I2 empty. Name box + F2 / formula
+        bar matches how a person types and does not need the clipboard.
         """
+        self._dismiss_sheet_clipboard_prompt()
         self._begin_sheet_cell_edit()
+        self._dismiss_sheet_clipboard_prompt()
         if self._insert_sheet_text(value):
+            self._dismiss_sheet_clipboard_prompt()
             self._finish_sheet_cell_edit()
             return
         self._type_sheet_text(value)
         ActionChains(self.driver).send_keys("|").send_keys(Keys.BACKSPACE).perform()
+        self._dismiss_sheet_clipboard_prompt()
         self._finish_sheet_cell_edit()
+
+    def _dismiss_sheet_clipboard_prompt(self) -> bool:
+        """Close the first-visit Sheets copy/paste extension dialog.
+
+        That dialog sits on I2 and blocks the first write. We never need the
+        extension; Cancel or Escape is enough.
+        """
+        assert self.driver
+        closed = False
+        try:
+            html = self.driver.page_source or ""
+        except Exception:
+            html = ""
+        try:
+            result = self.driver.execute_script(DISMISS_SHEET_CLIPBOARD_PROMPT_JS)
+        except Exception:
+            result = ""
+        if result == "cancel" or sheet_clipboard_prompt_visible(html):
+            if result == "cancel":
+                self.logger.info(
+                    "시트 붙여넣기 설정 창을 닫았습니다. 설치는 필요 없습니다"
+                )
+            closed = True
+        try:
+            ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+        except Exception:
+            pass
+        if closed:
+            time.sleep(0.3)
+        return closed
+
+    def _find_sheet_name_box(self):
+        assert self.driver
+        selectors = (
+            (By.ID, "t-name-box"),
+            (By.CSS_SELECTOR, 'input[aria-label="Name box"]'),
+            (By.CSS_SELECTOR, 'input[aria-label="이름 상자"]'),
+        )
+        for by, selector in selectors:
+            for element in self.driver.find_elements(by, selector):
+                try:
+                    if element.is_displayed():
+                        return element
+                except Exception:
+                    continue
+        return None
+
+    def _find_sheet_formula_bar(self):
+        assert self.driver
+        selectors = (
+            (By.CSS_SELECTOR, "#t-formula-bar-input .cell-input"),
+            (By.ID, "t-formula-bar-input"),
+            (By.CSS_SELECTOR, ".formula-content"),
+            (By.CSS_SELECTOR, "textarea.cell-input"),
+            (By.CSS_SELECTOR, '[aria-label="수식 입력줄"]'),
+            (By.CSS_SELECTOR, '[aria-label="Formula bar"]'),
+        )
+        for by, selector in selectors:
+            for element in self.driver.find_elements(by, selector):
+                try:
+                    if element.is_displayed() and element.is_enabled():
+                        return element
+                except Exception:
+                    continue
+        return None
+
+    def _select_sheet_cell(self, column: str, row_number: int) -> None:
+        assert self.driver
+        wanted = f"{column}{int(row_number)}"
+        box = self._find_sheet_name_box()
+        if box is None:
+            return
+        try:
+            box.click()
+            box.send_keys(Keys.CONTROL, "a")
+            box.send_keys(wanted)
+            box.send_keys(Keys.ENTER)
+            time.sleep(0.2)
+        except Exception:
+            return
 
     def _begin_sheet_cell_edit(self) -> None:
         assert self.driver
-        editors = self._visible_sheet_editor()
-        if not editors:
-            return
-        editor = editors[0]
-        editor.click()
-        editor.send_keys(Keys.CONTROL, "a")
+        ActionChains(self.driver).send_keys(Keys.F2).perform()
+        time.sleep(0.15)
+        self._dismiss_sheet_clipboard_prompt()
+        target = self._find_sheet_formula_bar()
+        if target is None:
+            editors = self._visible_sheet_editor()
+            target = editors[0] if editors else None
+        if target is not None:
+            try:
+                target.send_keys(Keys.CONTROL, "a")
+                return
+            except Exception:
+                pass
+        ActionChains(self.driver).key_down(Keys.CONTROL).send_keys("a").key_up(
+            Keys.CONTROL
+        ).perform()
 
     def _insert_sheet_text(self, value: str) -> bool:
         assert self.driver
@@ -419,9 +551,9 @@ class V2RBrowser:
 
     def _type_sheet_text(self, value: str) -> None:
         assert self.driver
-        editors = self._visible_sheet_editor()
-        if editors:
-            editors[0].send_keys(value)
+        bar = self._find_sheet_formula_bar()
+        if bar is not None:
+            bar.send_keys(value)
             return
         ActionChains(self.driver).send_keys(value).perform()
 

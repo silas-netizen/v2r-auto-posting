@@ -1,5 +1,6 @@
 import json
 import logging
+from pathlib import Path
 from urllib.error import HTTPError
 
 from datetime import datetime
@@ -10,6 +11,8 @@ from v2r_auto.exposure_sheet import (
     GoogleSheetExposureStore,
     SheetWrite,
     plan_volume_writes,
+    sheet_clipboard_prompt_visible,
+    sheet_edit_target,
 )
 from v2r_auto.search_volume import (
     rows_to_process,
@@ -574,3 +577,41 @@ def test_sheet_store_skips_volume_when_not_found_but_writes_search() -> None:
     )
     columns = [item[1] for item in writer.writes]
     assert columns == ["I", "J"]
+
+
+def test_sheet_clipboard_prompt_is_detected() -> None:
+    html = (
+        "<div>복사, 잘라내기, 붙여넣기를 사용 설정하시겠습니까?</div>"
+        "<button>취소</button><button>설치</button>"
+    )
+    assert sheet_clipboard_prompt_visible(html) is True
+    assert sheet_clipboard_prompt_visible("코골이수술 실비") is False
+
+
+def test_browser_closes_sheet_clipboard_prompt() -> None:
+    source = Path("v2r_auto/browser.py").read_text(encoding="utf-8")
+    assert "_dismiss_sheet_clipboard_prompt" in source
+    assert "붙여넣기 설정 창을 닫았습니다" in source
+    assert "text === '취소'" in source
+    gui = Path("v2r_auto/gui_search_volume.py").read_text(encoding="utf-8")
+    assert "붙여넣기 설정 창" in gui
+
+
+def test_first_cell_write_uses_name_box_and_f2() -> None:
+    fixture = Path("tests/fixtures/sheet_first_cell.html").read_text(encoding="utf-8")
+    assert sheet_clipboard_prompt_visible(fixture) is True
+    assert sheet_edit_target(fixture) == "formula_bar"
+    source = Path("v2r_auto/browser.py").read_text(encoding="utf-8")
+    begin = source.split("def _begin_sheet_cell_edit", 1)[1].split(
+        "def _insert_sheet_text", 1
+    )[0]
+    assert "_select_sheet_cell" in source
+    assert "_find_sheet_formula_bar" in source
+    assert "Keys.F2" in begin
+    assert "waffle-rich-text-editor" not in begin
+    assert "수식 입력줄" in Path("v2r_auto/gui_search_volume.py").read_text(
+        encoding="utf-8"
+    )
+    assert "수식 입력줄" in Path("v2r_auto/gui_search_volume.py").read_text(
+        encoding="utf-8"
+    )
