@@ -746,6 +746,23 @@ def newer_duplicate_rows(rows: Iterable[CafePostRow]) -> list[CafePostRow]:
     return to_delete
 
 
+ARTICLE_GONE_MARKERS = (
+    "삭제되었거나 존재하지 않는",
+    "존재하지 않는 게시물",
+    "존재하지 않는 게시글",
+    "삭제된 게시글",
+    "삭제된 게시물",
+    "없는 게시글",
+    "게시글이 없습니다",
+    "게시물이 없습니다",
+)
+
+
+def article_page_looks_deleted(html: str) -> bool:
+    text = html or ""
+    return any(marker in text for marker in ARTICLE_GONE_MARKERS)
+
+
 def article_checkbox_ids_from_html(html: str) -> list[int]:
     found: list[int] = []
     seen: set[int] = set()
