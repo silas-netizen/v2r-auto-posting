@@ -371,6 +371,9 @@ class V2RBrowser:
             f"?{parsed.query}#gid={gid}&range={column}{row_number}"
         )
         cell_label = f"{column}{row_number}"
+        if self._sheet_cell_matches(sheet_url, column, row_number, value):
+            self.logger.info("시트 %s는 이미 들어 있어 그대로 둡니다", cell_label)
+            return
         last_error: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
@@ -388,6 +391,11 @@ class V2RBrowser:
                 self.driver.execute_script("window.focus();")
                 time.sleep(0.8 if attempt == 1 else 0.25)
                 self._dismiss_sheet_clipboard_prompt()
+                if self._sheet_cell_matches(sheet_url, column, row_number, value):
+                    self.logger.info(
+                        "시트 %s는 이미 들어 있어 그대로 둡니다", cell_label
+                    )
+                    return
                 self._select_sheet_cell(column, row_number)
                 self._dismiss_sheet_clipboard_prompt()
                 self._enter_sheet_value(value)
@@ -401,15 +409,15 @@ class V2RBrowser:
                 self.logger.info("시트 %s에 값을 입력했습니다", cell_label)
                 return
             except Exception as exc:
+                if self._sheet_cell_matches(sheet_url, column, row_number, value):
+                    self.logger.info(
+                        "시트 %s는 이미 들어 있어 그대로 둡니다", cell_label
+                    )
+                    return
                 last_error = exc
-                self.logger.warning(
-                    "시트 %s 저장 재시도 (%s/%s): %s",
-                    cell_label,
-                    attempt,
-                    max_attempts,
-                    exc,
-                )
-                time.sleep(attempt)
+                if attempt < max_attempts:
+                    time.sleep(attempt)
+                    continue
         raise AutomationError(
             f"시트 {cell_label} 저장에 {max_attempts}회 실패했습니다: "
             f"{last_error}"
@@ -427,25 +435,21 @@ class V2RBrowser:
         """Type into the formula bar, not the in-cell editor.
 
         After the name box jumps to I2, focus sits on waffle-rich-text-editor.
-        F2 / insertText then type into that waffle. On the first cell that
-        opens the copy/paste 설치 dialog and leaves I2 empty. Click the
+        Escape while the formula bar is focused cancels the edit, so the
+        clipboard dialog is closed only before typing starts. Click the
         formula bar, confirm the text is there, then Enter.
         """
         self._dismiss_sheet_clipboard_prompt()
         self._begin_sheet_cell_edit()
-        self._dismiss_sheet_clipboard_prompt()
         if self._insert_sheet_text(value) and self._formula_bar_matches(value):
-            self._dismiss_sheet_clipboard_prompt()
             self._finish_sheet_cell_edit()
             return
         self._focus_sheet_formula_bar()
-        self._dismiss_sheet_clipboard_prompt()
         self._type_sheet_text(value)
         if not self._formula_bar_matches(value):
             raise AutomationError(
                 "수식 입력줄에 값이 들어가지 않았습니다. 칸 안을 누르지 않고 다시 시도합니다"
             )
-        self._dismiss_sheet_clipboard_prompt()
         self._finish_sheet_cell_edit()
 
     def _dismiss_sheet_clipboard_prompt(self) -> bool:
@@ -464,16 +468,17 @@ class V2RBrowser:
             result = self.driver.execute_script(DISMISS_SHEET_CLIPBOARD_PROMPT_JS)
         except Exception:
             result = ""
-        if result == "cancel" or sheet_clipboard_prompt_visible(html):
+        if result == "cancel" or sheet_clipboard_prompt_visible(html) or result == "seen":
             if result == "cancel":
                 self.logger.info(
                     "시트 붙여넣기 설정 창을 닫았습니다. 설치는 필요 없습니다"
                 )
             closed = True
-        try:
-            ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
-        except Exception:
-            pass
+        if closed and result != "cancel":
+            try:
+                ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+            except Exception:
+                pass
         if closed:
             time.sleep(0.3)
         return closed
@@ -603,6 +608,33 @@ class V2RBrowser:
     def _finish_sheet_cell_edit(self) -> None:
         assert self.driver
         ActionChains(self.driver).send_keys(Keys.ENTER).perform()
+        time.sleep(0.6)
+
+    def _exported_sheet_cell(
+        self, sheet_url: str, column: str, row_number: int
+    ) -> str:
+        column_index = 0
+        for letter in column.upper():
+            column_index = column_index * 26 + (ord(letter) - ord("A") + 1)
+        column_index -= 1
+        export_url = self._sheet_export_url(sheet_url)
+        separator = "&" if "?" in export_url else "?"
+        with urlopen(
+            f"{export_url}{separator}cache={time.time_ns()}", timeout=20
+        ) as response:
+            rows = list(csv.reader(io.StringIO(response.read().decode("utf-8-sig"))))
+        if len(rows) >= row_number and len(rows[row_number - 1]) > column_index:
+            return rows[row_number - 1][column_index]
+        return ""
+
+    def _sheet_cell_matches(
+        self, sheet_url: str, column: str, row_number: int, expected: str
+    ) -> bool:
+        try:
+            actual = self._exported_sheet_cell(sheet_url, column, row_number)
+        except Exception:
+            return False
+        return sheet_values_match(expected, actual)
 
     def _verify_sheet_cell(
         self,
@@ -613,26 +645,14 @@ class V2RBrowser:
         *,
         checks: int = 10,
     ) -> None:
-        column_index = 0
-        for letter in column:
-            column_index = column_index * 26 + (ord(letter) - ord("A") + 1)
-        column_index -= 1
-        export_url = self._sheet_export_url(sheet_url)
         actual = ""
         for _ in range(checks):
-            separator = "&" if "?" in export_url else "?"
-            with urlopen(
-                f"{export_url}{separator}cache={time.time_ns()}", timeout=20
-            ) as response:
-                rows = list(
-                    csv.reader(
-                        io.StringIO(response.read().decode("utf-8-sig"))
-                    )
-                )
-            if len(rows) >= row_number and len(rows[row_number - 1]) > column_index:
-                actual = rows[row_number - 1][column_index]
-                if sheet_values_match(expected, actual):
-                    return
+            try:
+                actual = self._exported_sheet_cell(sheet_url, column, row_number)
+            except Exception:
+                actual = ""
+            if sheet_values_match(expected, actual):
+                return
             time.sleep(0.5)
         raise AutomationError(
             f"시트 {column}{row_number} 저장값을 다시 확인하지 못했습니다 "

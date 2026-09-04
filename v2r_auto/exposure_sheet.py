@@ -5,7 +5,7 @@ import io
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
@@ -96,8 +96,18 @@ def column_letter(index: int) -> str:
     return "".join(reversed(letters))
 
 
+# Korea does not use DST. A fixed UTC+9 offset works on Windows EXEs
+# that ship without the IANA tzdata pack.
+KOREA_TZ = timezone(timedelta(hours=9), name="KST")
+
+
 def now_stamp(now: datetime | None = None) -> str:
-    return (now or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+    """Sheet edit time is always Korea time, not the PC's UTC clock."""
+    if now is None:
+        now = datetime.now(KOREA_TZ)
+    elif now.tzinfo is not None:
+        now = now.astimezone(KOREA_TZ)
+    return now.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _norm_header(name: str) -> str:

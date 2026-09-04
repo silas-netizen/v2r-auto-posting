@@ -3,13 +3,14 @@ import logging
 from pathlib import Path
 from urllib.error import HTTPError
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from v2r_auto.exposure import ExposureRow, naver_search_url
 from v2r_auto.exposure_notion import NotionExposureStore
 from v2r_auto.exposure_sheet import (
     GoogleSheetExposureStore,
     SheetWrite,
+    now_stamp,
     plan_volume_writes,
     sheet_clipboard_prompt_visible,
     sheet_edit_target,
@@ -546,6 +547,14 @@ def test_filler_continues_after_one_row_write_fails() -> None:
     assert store.writes[0]["keyword"] == "부종 원인"
 
 
+def test_now_stamp_uses_korea_time() -> None:
+    assert now_stamp(datetime(2026, 9, 4, 23, 19, 43)) == "2026-09-04 23:19:43"
+    assert (
+        now_stamp(datetime(2026, 9, 4, 14, 19, 43, tzinfo=timezone.utc))
+        == "2026-09-04 23:19:43"
+    )
+
+
 def test_sheet_store_skips_volume_when_not_found_but_writes_search() -> None:
     writer = RecordingWriter()
     store = GoogleSheetExposureStore(
@@ -595,6 +604,28 @@ def test_browser_closes_sheet_clipboard_prompt() -> None:
     assert "text === '취소'" in source
     gui = Path("v2r_auto/gui_search_volume.py").read_text(encoding="utf-8")
     assert "붙여넣기 설정 창" in gui
+
+
+def test_sheet_write_skips_same_value_and_does_not_escape_while_editing() -> None:
+    source = Path("v2r_auto/browser.py").read_text(encoding="utf-8")
+    update = source.split("def update_sheet_cell", 1)[1].split(
+        "def _visible_sheet_editor", 1
+    )[0]
+    enter = source.split("def _enter_sheet_value", 1)[1].split(
+        "def _dismiss_sheet_clipboard_prompt", 1
+    )[0]
+    dismiss = source.split("def _dismiss_sheet_clipboard_prompt", 1)[1].split(
+        "def _find_sheet_name_box", 1
+    )[0]
+    assert "_sheet_cell_matches" in update
+    assert "이미 들어 있어 그대로 둡니다" in update
+    assert "시트 %s 저장 재시도" not in update
+    assert "_dismiss_sheet_clipboard_prompt" not in enter.split(
+        "self._begin_sheet_cell_edit()", 1
+    )[1]
+    assert "send_keys(Keys.ESCAPE)" not in dismiss.split("if closed and result", 1)[0]
+    gui = Path("v2r_auto/gui_search_volume.py").read_text(encoding="utf-8")
+    assert "이미 같은 값이면 그대로 두고 오류를 내지 않습니다" in gui
 
 
 def test_first_cell_write_clicks_formula_bar() -> None:
