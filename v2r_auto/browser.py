@@ -30,7 +30,24 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from .content import ParsedArticle
+from .exposure_sheet import sheet_clipboard_prompt_visible
 from .models import AffiliateJob, JobStatus, PostJob
+
+DISMISS_SHEET_CLIPBOARD_PROMPT_JS = r"""
+const hay = ((document.body && document.body.innerText) || '')
+  + (document.documentElement ? document.documentElement.innerText : '');
+if (!/복사,\s*잘라내기,\s*붙여넣기/.test(hay)) return '';
+const nodes = Array.from(document.querySelectorAll('button, [role="button"], span, div'));
+const cancel = nodes.find((el) => {
+  const text = ((el.innerText || el.textContent || '') + '').replace(/\s+/g, '');
+  return text === '취소' && el.offsetParent !== null;
+});
+if (cancel) {
+  cancel.click();
+  return 'cancel';
+}
+return 'seen';
+"""
 
 
 V2R_LIST_URL = "https://v2r.daboja.im/nc/board?view=list"
@@ -353,6 +370,7 @@ class V2RBrowser:
                 )
                 self.driver.execute_script("window.focus();")
                 time.sleep(0.25)
+                self._dismiss_sheet_clipboard_prompt()
                 self._enter_sheet_value(value)
                 self._verify_sheet_cell(
                     sheet_url,
@@ -392,6 +410,7 @@ class V2RBrowser:
         Clipboard paste is unreliable in Sheets and a failed copy can clear the
         cell, then leave it empty. Insert the text in one shot instead.
         """
+        self._dismiss_sheet_clipboard_prompt()
         self._begin_sheet_cell_edit()
         if self._insert_sheet_text(value):
             self._finish_sheet_cell_edit()
@@ -399,6 +418,36 @@ class V2RBrowser:
         self._type_sheet_text(value)
         ActionChains(self.driver).send_keys("|").send_keys(Keys.BACKSPACE).perform()
         self._finish_sheet_cell_edit()
+
+    def _dismiss_sheet_clipboard_prompt(self) -> bool:
+        """Close the first-visit Sheets copy/paste extension dialog.
+
+        That dialog sits on I2 and blocks the first write. We never need the
+        extension; Cancel or Escape is enough.
+        """
+        assert self.driver
+        closed = False
+        try:
+            html = self.driver.page_source or ""
+        except Exception:
+            html = ""
+        try:
+            result = self.driver.execute_script(DISMISS_SHEET_CLIPBOARD_PROMPT_JS)
+        except Exception:
+            result = ""
+        if result == "cancel" or sheet_clipboard_prompt_visible(html):
+            if result == "cancel":
+                self.logger.info(
+                    "시트 붙여넣기 설정 창을 닫았습니다. 설치는 필요 없습니다"
+                )
+            closed = True
+        try:
+            ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
+        except Exception:
+            pass
+        if closed:
+            time.sleep(0.3)
+        return closed
 
     def _begin_sheet_cell_edit(self) -> None:
         assert self.driver
