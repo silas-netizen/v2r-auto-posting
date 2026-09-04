@@ -186,6 +186,54 @@ def test_se_one_selection_ignores_stale_dropdown_options() -> None:
     assert state["selected"] is True
 
 
+def test_se_one_selection_waits_for_loading_overlay_to_clear() -> None:
+    state = {"overlay_checks": 0, "clicked": False}
+
+    class FakeSelection:
+        text = ""
+
+        def click(self):
+            state["clicked"] = True
+            self.text = "자유 수다방"
+
+        def find_elements(self, by, selector):
+            return []
+
+    class FakeOption:
+        text = "자유 수다방"
+
+        def is_displayed(self):
+            return True
+
+        def click(self):
+            selection.text = self.text
+
+    selection = FakeSelection()
+
+    class FakeDriver:
+        def execute_script(self, script, element):
+            if "elementFromPoint" not in script:
+                return None
+            state["overlay_checks"] += 1
+            return state["overlay_checks"] >= 3
+
+        def find_elements(self, by, selector):
+            return [FakeOption()]
+
+    class BoardBrowser(V2RBrowser):
+        def _visible_se_one_selections(self):
+            return [selection]
+
+    browser = object.__new__(BoardBrowser)
+    browser.driver = FakeDriver()
+    browser.logger = __import__("logging").getLogger("overlay-wait-test")
+
+    browser._select_se_one_option("게시판", "자유 수다방", 0)
+
+    assert state["overlay_checks"] == 3
+    assert state["clicked"] is True
+
+
 def test_image_editor_is_prepared_in_visible_form_order() -> None:
     calls: list[tuple[str, str]] = []
 

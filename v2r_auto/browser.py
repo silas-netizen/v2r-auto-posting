@@ -15,6 +15,7 @@ from urllib.request import urlopen
 
 from selenium import webdriver
 from selenium.common.exceptions import (
+    ElementClickInterceptedException,
     NoAlertPresentException,
     NoSuchElementException,
     NoSuchWindowException,
@@ -472,6 +473,40 @@ class V2RBrowser:
             )
         return self._option_text_matches(label, value, option_text)
 
+    def _wait_for_unobstructed_element(self, element, label: str) -> None:
+        """Wait until no loading overlay covers the element's center point."""
+        assert self.driver
+
+        def unobstructed(_driver):
+            try:
+                result = self.driver.execute_script(
+                    """
+                    const element = arguments[0];
+                    const rect = element.getBoundingClientRect();
+                    if (!rect.width || !rect.height) return false;
+                    const x = rect.left + rect.width / 2;
+                    const y = rect.top + rect.height / 2;
+                    const top = document.elementFromPoint(x, y);
+                    return !!top && (top === element || element.contains(top));
+                    """,
+                    element,
+                )
+                # Lightweight test doubles may not return a script value.
+                return True if result is None else bool(result)
+            except StaleElementReferenceException:
+                return False
+
+        try:
+            WebDriverWait(
+                self.driver,
+                getattr(getattr(self, "config", None), "timeout_seconds", 20),
+                poll_frequency=0.2,
+            ).until(unobstructed)
+        except TimeoutException as exc:
+            raise AutomationError(
+                f"SE-ONE {label} 선택칸의 로딩 화면이 사라지지 않았습니다"
+            ) from exc
+
     def _select_se_one_option(self, label: str, value: str, selection_index: int) -> None:
         assert self.driver
         selections = self._visible_se_one_selections()
@@ -558,7 +593,18 @@ class V2RBrowser:
             if attempt:
                 ActionChains(self.driver).send_keys(Keys.ESCAPE).perform()
                 time.sleep(0.25)
-            selection.click()
+            self._wait_for_unobstructed_element(selection, label)
+            try:
+                selection.click()
+            except ElementClickInterceptedException:
+                if attempt == 2:
+                    raise
+                time.sleep(0.5)
+                refreshed = self._visible_se_one_selections()
+                if len(refreshed) <= selection_index:
+                    continue
+                selection = refreshed[selection_index]
+                continue
             try:
                 options = option_wait.until(lambda driver: visible_options())
                 break
