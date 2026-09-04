@@ -510,7 +510,11 @@ class V2RBrowser:
     def _dismiss_known_seone_notice(self) -> bool:
         """Dismiss only the known subscription-expiry modal blocking SE-ONE."""
         assert self.driver
-        if "N 카페 요금제 종료" not in self.driver.page_source:
+        if "N 카페 요금제 종료" not in getattr(
+            self.driver,
+            "page_source",
+            "",
+        ):
             return False
         xpath = (
             "//*[normalize-space()='오늘 하루 안보기']"
