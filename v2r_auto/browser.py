@@ -421,13 +421,13 @@ class V2RBrowser:
                 self.driver.switch_to.default_content()
         return "\n".join(parts)
 
-    def check_cafe_article_comments(self, cafe_id: int, article_id: int) -> int:
+    def check_cafe_article_comments(self, cafe_id: int, article_id: int):
         from .comment_watch import (
             CommentWatchError,
             cafe_article_fallback_url,
             cafe_article_ready,
             cafe_article_url,
-            other_member_comment_count,
+            cafe_comment_view,
             page_requires_cafe_login,
         )
 
@@ -451,14 +451,15 @@ class V2RBrowser:
                         "카페 창을 따로 열어둘 필요는 없습니다"
                     )
                 if cafe_article_ready(last_html):
-                    count = other_member_comment_count(last_html, current_url)
+                    view = cafe_comment_view(last_html, current_url)
                     self.logger.info(
-                        "카페 글 %s 확인: 다른 회원 댓글 %s개",
+                        "카페 글 %s 확인: 댓글 %s개, 다른 회원 %s개",
                         article_id,
-                        count,
+                        view.total_count,
+                        view.other_count,
                     )
                     time.sleep(1)
-                    return count
+                    return view
                 time.sleep(0.8)
         raise CommentWatchError(
             f"카페 글 {article_id}을 열지 못했습니다. 네이버 로그인과 카페 가입을 확인해 주세요"

@@ -18,6 +18,7 @@ COMPLETION_HEADERS = ("완료 링크", "완료링크")
 CAFE_HEADERS = ("카페명", "카페")
 MARK_HEADERS = ("일상 글에 댓글", "일상글에댓글")
 PUBLISHED_STATUSES = {"SUCCESS", "DONE"}
+PUBLISHED_COMMENT_MARK_AT = 13
 DEFAULT_SHEET_URL = (
     "https://docs.google.com/spreadsheets/d/"
     "1OwR_LSjO1ofOojldtSIqoxv0gieNSMx_t35_5G1VTCc/"
@@ -181,16 +182,44 @@ def _v2r_comments_in_list(html: str) -> int:
     return found
 
 
-def other_member_comment_count(html: str, url: str = "") -> int:
-    """Count cafe comments from other members. Ignore V2R-written comments."""
+@dataclass(frozen=True, slots=True)
+class CafeCommentView:
+    other_count: int
+    total_count: int
+    our_count: int = 0
+
+
+def cafe_comment_view(html: str, url: str = "") -> CafeCommentView:
+    """Read the cafe article comment counts from one page."""
     if page_requires_cafe_login(html, url):
         raise CommentWatchError(
             "네이버 로그인 화면이 열렸습니다. "
             "이 프로그램 크롬에서 네이버에 로그인한 뒤 다시 확인해 주세요. "
             "카페 창을 따로 열어둘 필요는 없습니다"
         )
-    visible = _article_comment_count(html)
-    return max(0, visible - _v2r_comments_in_list(html))
+    total = _article_comment_count(html)
+    our = _v2r_comments_in_list(html)
+    return CafeCommentView(
+        other_count=max(0, total - our),
+        total_count=total,
+        our_count=our,
+    )
+
+
+def other_member_comment_count(html: str, url: str = "") -> int:
+    """Count cafe comments from other members. Ignore V2R-written comments."""
+    return cafe_comment_view(html, url).other_count
+
+
+def is_published_dest(status: str) -> bool:
+    return str(status or "").upper() in PUBLISHED_STATUSES
+
+
+def _as_comment_view(value: CafeCommentView | int) -> CafeCommentView:
+    if isinstance(value, CafeCommentView):
+        return value
+    count = int(value)
+    return CafeCommentView(other_count=count, total_count=count)
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,37 +258,75 @@ class WatchDecision:
     reason: str
     cafe_id: int | None = None
     article_id: int | None = None
+    published: bool = False
 
 
 def decide_row(revision: ArticleView, parent: ArticleView | None = None) -> WatchDecision:
-    """Decide whether this revision's daily cafe post should be opened."""
+    """Decide whether this row's cafe post should be opened.
+
+    일상 글: 수정 글이 아직 예약. 다른 회원 댓글이 있으면 링크.
+    발행 글: 수정 글이 SUCCESS/DONE. 같은 카페 글을 다시 열고,
+    댓글이 13개 이상이거나 우리 닉네임이 아닌 댓글이 있으면 링크.
+    """
     if not revision.parent_source_id:
         return WatchDecision("skip", "", "이전 원본글 없음")
-    if revision.dest_status in PUBLISHED_STATUSES:
-        return WatchDecision("skip", "", "수정 발행이 이미 끝남")
     if parent is None:
         return WatchDecision("need_parent", "", "원본글을 더 확인해야 함")
     article_id = parent.article_id or revision.article_id
     cafe_id = parent.cafe_id or revision.cafe_id
     if not article_id or not cafe_id:
         return WatchDecision("skip", "", "카페 글 번호를 찾지 못함")
+    published = is_published_dest(revision.dest_status)
     return WatchDecision(
         "open_cafe",
         cafe_article_url(cafe_id, article_id),
-        "카페에서 다른 회원 댓글을 확인해야 함",
+        (
+            "발행된 글의 댓글을 확인해야 함"
+            if published
+            else "카페에서 다른 회원 댓글을 확인해야 함"
+        ),
         cafe_id=cafe_id,
         article_id=article_id,
+        published=published,
     )
 
 
-def apply_cafe_result(decision: WatchDecision, other_count: int) -> WatchDecision:
+def apply_cafe_result(
+    decision: WatchDecision, comments: CafeCommentView | int
+) -> WatchDecision:
     if decision.action != "open_cafe":
         return decision
-    if other_count > 0:
+    view = _as_comment_view(comments)
+    if decision.published:
+        if view.total_count >= PUBLISHED_COMMENT_MARK_AT or (
+            view.our_count > 0 and view.other_count > 0
+        ):
+            reason = (
+                f"발행 후 댓글 {view.total_count}개"
+                if view.total_count >= PUBLISHED_COMMENT_MARK_AT
+                else f"발행 후 다른 회원 댓글 {view.other_count}개"
+            )
+            return WatchDecision(
+                "mark",
+                decision.cafe_url,
+                reason,
+                cafe_id=decision.cafe_id,
+                article_id=decision.article_id,
+                published=True,
+            )
+        return WatchDecision(
+            "clear",
+            "",
+            "발행 후 다른 회원 댓글 없음",
+            cafe_id=decision.cafe_id,
+            article_id=decision.article_id,
+            published=True,
+        )
+    if view.other_count > 0:
         return WatchDecision(
             "mark",
             decision.cafe_url,
-            f"카페에서 다른 회원 댓글 {other_count}개",
+            f"카페에서 다른 회원 댓글 {view.other_count}개",
             cafe_id=decision.cafe_id,
             article_id=decision.article_id,
         )
@@ -275,7 +342,7 @@ def apply_cafe_result(decision: WatchDecision, other_count: int) -> WatchDecisio
 def inspect_rows(
     rows: list[dict[str, str]],
     fetch_article: Callable[[str], dict[str, Any]],
-    check_cafe_comments: Callable[[int, int], int],
+    check_cafe_comments: Callable[[int, int], CafeCommentView | int],
     should_stop: Callable[[], bool] | None = None,
 ) -> list[dict[str, str]]:
     """Fill K-column values by opening the daily cafe post."""
@@ -446,7 +513,7 @@ def build_plan(
     headers: list[str],
     rows: list[dict[str, str]],
     fetch_article: Callable[[str], dict[str, Any]],
-    check_cafe_comments: Callable[[int, int], int],
+    check_cafe_comments: Callable[[int, int], CafeCommentView | int],
     should_stop: Callable[[], bool] | None = None,
 ) -> CommentWatchPlan:
     mark_header = _find_header(headers, MARK_HEADERS)
