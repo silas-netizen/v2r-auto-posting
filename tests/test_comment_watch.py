@@ -4,6 +4,7 @@ import pytest
 
 from v2r_auto.comment_watch import (
     DEFAULT_SHEET_URL,
+    CafeCommentView,
     CommentWatchError,
     apply_cafe_result,
     build_plan,
@@ -189,11 +190,41 @@ def test_skip_when_previous_original_is_missing() -> None:
     assert "원본글" in decision.reason
 
 
-def test_skip_when_revision_already_published() -> None:
+def test_published_revision_still_opens_the_same_cafe_post() -> None:
     revision = parse_article_view(revision_payload(status="SUCCESS"))
-    decision = decide_row(revision)
-    assert decision.action == "skip"
-    assert "이미" in decision.reason
+    assert decide_row(revision).action == "need_parent"
+    parent = parse_article_view(daily_payload())
+    decision = decide_row(revision, parent)
+    assert decision.action == "open_cafe"
+    assert decision.published is True
+    assert decision.cafe_url == cafe_article_url(22788814, 730069)
+    assert (
+        apply_cafe_result(decision, CafeCommentView(0, 12, 12)).action == "clear"
+    )
+    marked = apply_cafe_result(decision, CafeCommentView(1, 13, 12))
+    assert marked.action == "mark"
+    assert marked.cafe_url == decision.cafe_url
+    assert "13" in marked.reason
+    nickname = apply_cafe_result(decision, CafeCommentView(1, 12, 11))
+    assert nickname.action == "mark"
+    assert "다른 회원" in nickname.reason
+    # 우리 댓글이 화면에 안 보이면 12개만으로는 링크를 남기지 않는다.
+    assert (
+        apply_cafe_result(decision, CafeCommentView(12, 12, 0)).action == "clear"
+    )
+
+
+def test_published_ssiang_row_uses_the_same_rule() -> None:
+    revision = parse_article_view(
+        revision_payload(status="DONE", cafe_id=25016228, history={"article_id": 88})
+    )
+    parent = parse_article_view(
+        daily_payload(article_id=88, cafe_id=25016228)
+    )
+    decision = decide_row(revision, parent)
+    assert decision.published is True
+    assert decision.cafe_url == cafe_article_url(25016228, 88)
+    assert apply_cafe_result(decision, CafeCommentView(0, 13, 12)).action == "mark"
 
 
 def test_open_cafe_even_when_v2r_comment_count_is_zero() -> None:
@@ -249,6 +280,29 @@ def test_load_and_build_plan_uses_cafe_page_not_v2r_count(tmp_path: Path) -> Non
     chunks = plan.paste_chunks()
     assert chunks[0][0] == 2
     assert chunks[0][1] == cafe_article_url(22788814, 730069) + "\n\n\n"
+
+
+def test_plan_marks_published_row_when_comments_reach_thirteen(
+    tmp_path: Path,
+) -> None:
+    path = write_sheet(tmp_path)
+    headers, rows = load_watch_rows(path)
+    payloads = {
+        "REV1": revision_payload(status="SUCCESS"),
+        "DAILY1": daily_payload(),
+        "REV2": revision_payload(source_id="REV2", parent_source_id=None),
+    }
+    opened: list[tuple[int, int]] = []
+
+    def check_cafe(cafe_id: int, article_id: int) -> CafeCommentView:
+        opened.append((cafe_id, article_id))
+        return CafeCommentView(1, 13, 12)
+
+    plan = build_plan(headers, rows, payloads.__getitem__, check_cafe)
+    assert opened == [(22788814, 730069)]
+    assert plan.rows[0]["일상 글에 댓글"] == cafe_article_url(22788814, 730069)
+    assert plan.rows[0]["__reason"] == "발행 후 댓글 13개"
+    assert plan.rows[0]["__action"] == "mark"
 
 
 def test_plan_clears_when_cafe_has_no_other_member(tmp_path: Path) -> None:
