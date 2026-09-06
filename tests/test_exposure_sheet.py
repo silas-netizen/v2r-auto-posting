@@ -205,7 +205,7 @@ def test_store_deletes_spacing_duplicate_and_keeps_autocomplete_row() -> None:
     assert other.page_id == "2"
 
 
-def test_store_keeps_identical_keyword_rows() -> None:
+def test_store_deletes_identical_keyword_rows_but_keeps_different_words() -> None:
     csv_text = (
         "카페명,url,발행시간,작성자 아이디,작성자 비밀번호,발행 URL,"
         "노출 상태,키워드,통합검색,최종 편집 일시,키워드 검색량,노출된 검색량\n"
@@ -226,13 +226,17 @@ def test_store_keeps_identical_keyword_rows() -> None:
     store.load_rows()
     itch = _sheet_row(keyword="항문가려움피", page_id="2")
     boil = _sheet_row(keyword="엉덩이 종기 치료", page_id="5")
+    short = _sheet_row(keyword="엉덩이 종기", page_id="6")
     assert store.collapse_spacing_duplicates(
         itch, canonical_keyword="항문가려움피", queue=[itch]
     ).page_id == "2"
     assert store.collapse_spacing_duplicates(
         boil, canonical_keyword="엉덩이 종기 치료", queue=[boil]
     ).page_id == "5"
-    assert writer.deletes == []
+    assert store.collapse_spacing_duplicates(
+        short, canonical_keyword="엉덩이 종기", queue=[short]
+    ).page_id == "6"
+    assert writer.deletes == [4, 7]
     assert writer.writes == []
     assert store.last_duplicate_removed is False
 

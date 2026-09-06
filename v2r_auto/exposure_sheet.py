@@ -34,7 +34,6 @@ from .exposure import (
     STATUS_HEADERS,
     VOLUME_HEADERS,
     cafe_name_option,
-    has_spacing_variants,
     pick_kept_duplicate,
     shift_row_page_ids,
     spacing_keyword_key,
@@ -442,15 +441,13 @@ class GoogleSheetExposureStore:
                 else ""
             )
             candidates.append((number, keyword, cafe))
-        if not has_spacing_variants([keyword for _number, keyword, _cafe in candidates]):
-            return row
         keep_number, keep_keyword, _keep_cafe = pick_kept_duplicate(
             candidates,
             canonical_keyword=canonical_keyword,
             first_cafe=first_cafe,
         )
         self.logger.info(
-            "띄어쓰기만 다른 키워드 중복 %s행 → %s 남기고 나머지 삭제",
+            "같은 키워드 중복 %s행 → %s 남기고 나머지 삭제",
             numbers,
             keep_number,
         )

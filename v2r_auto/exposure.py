@@ -843,7 +843,7 @@ class ExposureChecker:
             key = spacing_keyword_key(row.keyword)
             if key and key in self._collapsed_keys:
                 self.logger.info(
-                    "띄어쓰기만 다른 중복이라 이미 정리했습니다: %s",
+                    "같은 키워드라 이미 정리했습니다: %s",
                     row.keyword,
                 )
                 if progress:
