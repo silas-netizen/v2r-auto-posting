@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import csv
-import heapq
 import re
-from collections import deque
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -248,33 +246,6 @@ def load_brand_immediate_jobs(
     return jobs
 
 
-def interleave_daily_jobs_by_cafe(
-    jobs: list[ImmediateJob],
-) -> list[ImmediateJob]:
-    """Alternate cafes while preserving each cafe's original row order."""
-    queues: dict[str, deque[ImmediateJob]] = {}
-    for job in jobs:
-        queues.setdefault(job.cafe, deque()).append(job)
-    result: list[ImmediateJob] = []
-    heap = [
-        (-len(queue), order, cafe)
-        for order, (cafe, queue) in enumerate(queues.items())
-    ]
-    heapq.heapify(heap)
-    held: tuple[int, int, str] | None = None
-    while heap:
-        remaining, order, cafe = heapq.heappop(heap)
-        result.append(queues[cafe].popleft())
-        remaining += 1
-        if held is not None:
-            heapq.heappush(heap, held)
-        held = (remaining, order, cafe) if remaining < 0 else None
-    if held is not None:
-        _remaining, _order, cafe = held
-        result.extend(queues[cafe])
-    return result
-
-
 def load_daily_excel_jobs(path: str | Path) -> list[ImmediateJob]:
     workbook_path = Path(path)
     workbook = load_workbook(workbook_path, read_only=True, data_only=True)
@@ -348,7 +319,7 @@ def load_daily_excel_jobs(path: str | Path) -> list[ImmediateJob]:
         workbook.close()
     if not jobs:
         raise SheetSchemaError("Excel에 즉시 발행할 일상 글이 없습니다")
-    return interleave_daily_jobs_by_cafe(jobs)
+    return jobs
 
 
 def load_account_test_jobs(path: str | Path) -> list[ImmediateJob]:
