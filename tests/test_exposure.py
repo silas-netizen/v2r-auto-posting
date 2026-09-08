@@ -28,8 +28,11 @@ from v2r_auto.exposure import (
     keywordstool_volume,
     match_selected_rows,
     matching_cafe_name,
+    apply_start_row,
     parse_brands,
+    parse_start_row,
     pick_kept_duplicate,
+    row_page_number,
     shift_row_page_ids,
     spacing_keyword_key,
     has_spacing_variants,
@@ -94,8 +97,8 @@ class FakeNaver:
         return self.post_texts.get(url, "")
 
 
-def _row(keyword: str, status: str = "밀려남") -> ExposureRow:
-    return ExposureRow("1", keyword, "", "", status, "노출상태", "status")
+def _row(keyword: str, status: str = "밀려남", page_id: str = "1") -> ExposureRow:
+    return ExposureRow(page_id, keyword, "", "", status, "노출상태", "status")
 
 
 def test_parse_brands_keeps_default_order() -> None:
@@ -2018,3 +2021,92 @@ def test_exposure_gui_has_url_extract_controls() -> None:
     assert "노출완 URL만 추출" in source
     assert "urls_only" in source
     assert "노출완글링크.txt" in source
+    assert "시작 위치" in source
+    assert "parse_start_row" in source
+
+
+def test_parse_start_row_empty_means_top() -> None:
+    assert parse_start_row("") is None
+    assert parse_start_row("   ") is None
+
+
+def test_parse_start_row_reads_sheet_row() -> None:
+    assert parse_start_row("201") == 201
+    assert parse_start_row(" 2 ") == 2
+
+
+def test_parse_start_row_rejects_invalid() -> None:
+    for value, needle in (
+        ("코숨핏", "행 번호"),
+        ("201행", "행 번호"),
+        ("1", "2행부터"),
+        ("0", "2행부터"),
+        ("-3", "행 번호"),
+    ):
+        try:
+            parse_start_row(value)
+        except ValueError as exc:
+            assert needle in str(exc)
+        else:
+            raise AssertionError(f"expected ValueError for {value!r}")
+
+
+def test_apply_start_row_skips_earlier_sheet_rows() -> None:
+    rows = [
+        _row("앞키워드", page_id="2"),
+        _row("중간키워드", page_id="200"),
+        _row("코숨핏", page_id="201"),
+        _row("다음키워드", page_id="202"),
+    ]
+    kept, skipped = apply_start_row(rows, 201)
+    assert [row.keyword for row in kept] == ["코숨핏", "다음키워드"]
+    assert skipped == 2
+    assert apply_start_row(rows, None) == (rows, 0)
+
+
+def test_apply_start_row_past_sheet_keeps_nothing() -> None:
+    rows = [_row("코숨핏", page_id="200")]
+    kept, skipped = apply_start_row(rows, 201)
+    assert kept == []
+    assert skipped == 1
+
+
+def test_row_page_number_ignores_notion_ids() -> None:
+    assert row_page_number(_row("코숨핏", page_id="201")) == 201
+    assert row_page_number(_row("코숨핏", page_id="abc-uuid")) is None
+
+
+def test_checker_skips_rows_before_start_row(caplog) -> None:
+    naver = FakeNaver("<div id='main_pack'></div>")
+    rows = [
+        _row("앞키워드", page_id="2"),
+        _row("중간키워드", page_id="200"),
+        _row("코숨핏", page_id="201"),
+        _row("다음키워드", page_id="202"),
+    ]
+    with caplog.at_level("INFO"):
+        ExposureChecker(
+            type("N", (), {"update_status": staticmethod(lambda *_a: None)})(),
+            naver,
+            __import__("logging").getLogger("test"),
+            delay_seconds=0,
+        ).run(rows, dry_run=True, start_row=201)
+    assert naver.searched == ["코숨핏", "다음키워드"]
+    assert any(
+        "201행 코숨핏부터 확인합니다. 앞 2건은 건너뜁니다" in message
+        for message in caplog.messages
+    )
+
+
+def test_checker_without_start_row_checks_from_top() -> None:
+    naver = FakeNaver("<div id='main_pack'></div>")
+    ExposureChecker(
+        type("N", (), {"update_status": staticmethod(lambda *_a: None)})(),
+        naver,
+        __import__("logging").getLogger("test"),
+        delay_seconds=0,
+    ).run(
+        [_row("앞키워드", page_id="2"), _row("코숨핏", page_id="201")],
+        dry_run=True,
+    )
+    assert naver.searched == ["앞키워드", "코숨핏"]
