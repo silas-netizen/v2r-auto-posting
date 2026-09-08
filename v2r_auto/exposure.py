@@ -196,6 +196,42 @@ def strip_parenthetical(keyword: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def row_page_number(row: ExposureRow) -> int | None:
+    try:
+        number = int(str(row.page_id).strip())
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def parse_start_row(value: str) -> int | None:
+    text = (value or "").strip()
+    if not text:
+        return None
+    if not text.isdigit():
+        raise ValueError("시작 위치는 행 번호만 넣어 주세요. 예: 201")
+    number = int(text)
+    if number <= 1:
+        raise ValueError("시작 위치는 2행부터 넣어 주세요. 1행은 제목입니다")
+    return number
+
+
+def apply_start_row(
+    rows: list[ExposureRow], start_row: int | None
+) -> tuple[list[ExposureRow], int]:
+    if start_row is None:
+        return list(rows), 0
+    skipped = 0
+    kept: list[ExposureRow] = []
+    for row in rows:
+        number = row_page_number(row)
+        if number is None or number < start_row:
+            skipped += 1
+            continue
+        kept.append(row)
+    return kept, skipped
+
+
 def parse_keyword_lines(text: str) -> list[str]:
     keywords: list[str] = []
     seen: set[str] = set()
@@ -825,9 +861,19 @@ class ExposureChecker:
         pause_event=None,
         progress=None,
         urls_only: bool = False,
+        start_row: int | None = None,
     ) -> list[ExposureRow]:
         if urls_only:
             rows = filter_exposed_rows(rows)
+        if start_row is not None:
+            rows, skipped = apply_start_row(rows, start_row)
+            if rows:
+                self.logger.info(
+                    "%s행 %s부터 확인합니다. 앞 %s건은 건너뜁니다",
+                    start_row,
+                    rows[0].keyword,
+                    skipped,
+                )
         total = len(rows)
         self._queue = rows
         self._collapsed_keys = set()
