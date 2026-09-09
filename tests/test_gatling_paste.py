@@ -16,8 +16,15 @@ from v2r_auto.gatling_paste import (
     SELF_OWNED_BOARD_LINKS,
     SELF_OWNED_CAFE_IDS,
     AFFILIATE_EXACT_BOARDS,
+    EXPORT_BOTH,
+    EXPORT_EXCEL,
+    EXPORT_TXT,
     MASTER_HEADER_ROW,
     MASTER_HEADERS,
+    TXT_COMMENTS_123,
+    TXT_COMMENTS_45,
+    TXT_REPLIES,
+    TXT_TITLE_BODY,
     TYPE_COMMENT,
     TYPE_EDIT_POST,
     TYPE_NEW_POST,
@@ -30,17 +37,23 @@ from v2r_auto.gatling_paste import (
     build_master_rows,
     collect_resolved_images,
     create_master_template,
-    gatling_image_folder,
     exact_board_name,
+    export_gatling_output,
+    gatling_image_folder,
+    gatling_txt_folder,
     load_gatling_brand_jobs,
     normalize_gatling_source,
+    parse_export_mode,
     parse_gatling_article,
     paste_manuscripts_into_gatling,
     recognize_gatling_workbook,
     replace_image_tokens,
     reply_target_value,
     require_writable_gatling,
+    safe_txt_keyword,
     self_owned_board_link,
+    split_manuscript_txt_parts,
+    write_gatling_txt_files,
 )
 from v2r_auto.models import DailyPost
 
@@ -1606,3 +1619,180 @@ def test_comment_categories_accept_댓_and_댓글(tmp_path: Path) -> None:
         "sc5",
         "sc6",
     }
+
+
+FULL_TXT_SOURCE = """제목 :
+실제 원고 제목
+
+본문 :
+실제 원고 본문
+
+댓글1:
+첫 댓글
+대댓글1:
+첫 답글
+댓글2:
+둘째 댓글
+대댓글2:
+둘째 답글
+대대댓글2:
+깊은 답글
+대대대댓글2:
+더 깊은 답글
+댓글3:
+셋째 댓글
+댓글4:
+넷째 댓글
+댓글5:
+다섯째 댓글
+"""
+
+
+def test_parse_export_mode_accepts_excel_txt_or_both() -> None:
+    assert parse_export_mode("excel") == EXPORT_EXCEL
+    assert parse_export_mode("txt") == EXPORT_TXT
+    assert parse_export_mode("both") == EXPORT_BOTH
+    with pytest.raises(GatlingPasteError, match="엑셀, TXT"):
+        parse_export_mode("pdf")
+
+
+def test_split_manuscript_txt_parts_makes_four_files() -> None:
+    article = parse_article("단식원 가격", FULL_TXT_SOURCE)
+    parts = split_manuscript_txt_parts(article)
+    assert set(parts) == {TXT_TITLE_BODY, TXT_COMMENTS_123, TXT_COMMENTS_45, TXT_REPLIES}
+    assert "실제 원고 제목" in parts[TXT_TITLE_BODY]
+    assert "실제 원고 본문" in parts[TXT_TITLE_BODY]
+    assert "첫 댓글" in parts[TXT_COMMENTS_123]
+    assert "둘째 댓글" in parts[TXT_COMMENTS_123]
+    assert "셋째 댓글" in parts[TXT_COMMENTS_123]
+    assert "넷째 댓글" not in parts[TXT_COMMENTS_123]
+    assert "넷째 댓글" in parts[TXT_COMMENTS_45]
+    assert "다섯째 댓글" in parts[TXT_COMMENTS_45]
+    assert "첫 답글" in parts[TXT_REPLIES]
+    assert "둘째 답글" in parts[TXT_REPLIES]
+    assert "깊은 답글" in parts[TXT_REPLIES]
+    assert "더 깊은 답글" in parts[TXT_REPLIES]
+    assert "첫 댓글" not in parts[TXT_REPLIES]
+    assert reply_target_value(article.comments[1].children[0].children[0]) == 2.1
+    assert reply_target_value(article.comments[1].children[0].children[0].children[0]) == 2.2
+
+
+def test_write_gatling_txt_uses_keyword_filenames(tmp_path: Path) -> None:
+    job = GatlingBrandJob(
+        row_number=2,
+        keyword="단식원 가격",
+        article=parse_article("단식원 가격", FULL_TXT_SOURCE),
+        cafe="씨씨앙",
+        board="자유수다방",
+        article_type="질문형",
+    )
+    written = write_gatling_txt_files([job], tmp_path / "out")
+    names = sorted(path.name for path in written)
+    assert names == [
+        "단식원 가격_대댓글.txt",
+        "단식원 가격_댓글1,2,3.txt",
+        "단식원 가격_댓글4,5.txt",
+        "단식원 가격_제목본문.txt",
+    ]
+    comment_123 = (tmp_path / "out" / "단식원 가격_댓글1,2,3.txt").read_text(
+        encoding="utf-8-sig"
+    )
+    assert comment_123.startswith("댓글1:")
+    replies = (tmp_path / "out" / "단식원 가격_대댓글.txt").read_text(encoding="utf-8-sig")
+    assert "대대댓글2:" in replies
+    assert "대대대댓글2:" in replies
+
+
+def test_write_gatling_txt_skips_empty_comment_groups(tmp_path: Path) -> None:
+    source = "제목 :\n제목만\n\n본문 :\n본문만\n\n댓글1:\n첫 댓글\n"
+    job = GatlingBrandJob(
+        row_number=2,
+        keyword="코숨핏",
+        article=parse_article("코숨핏", source),
+        cafe="씨씨앙",
+        board="자유수다방",
+    )
+    names = [path.name for path in write_gatling_txt_files([job], tmp_path)]
+    assert "코숨핏_제목본문.txt" in names
+    assert "코숨핏_댓글1,2,3.txt" in names
+    assert "코숨핏_댓글4,5.txt" not in names
+    assert "코숨핏_대댓글.txt" not in names
+
+
+def test_safe_txt_keyword_strips_path_chars() -> None:
+    assert safe_txt_keyword("코숨/핏:후기") == "코숨_핏_후기"
+    assert safe_txt_keyword("   ") == "키워드"
+
+
+def test_duplicate_keywords_get_numbered_txt_names(tmp_path: Path) -> None:
+    source = "제목 :\n제목\n\n본문 :\n본문\n\n댓글1:\n댓글\n"
+    jobs = [
+        GatlingBrandJob(
+            row_number=2,
+            keyword="코숨핏",
+            article=parse_article("코숨핏", source),
+            cafe="씨씨앙",
+            board="자유수다방",
+        ),
+        GatlingBrandJob(
+            row_number=3,
+            keyword="코숨핏",
+            article=parse_article("코숨핏", source),
+            cafe="양평맘",
+            board="이모저모 이야기💕",
+        ),
+    ]
+    names = [path.name for path in write_gatling_txt_files(jobs, tmp_path)]
+    assert "코숨핏_제목본문.txt" in names
+    assert "코숨핏_2_제목본문.txt" in names
+
+
+def test_export_txt_only_does_not_need_gatling(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{FULL_TXT_SOURCE}",씨씨앙,writer,질문형,,,, ,자유수다방\n',
+    )
+    exported = export_gatling_output(
+        brand,
+        mode=EXPORT_TXT,
+        txt_dir=tmp_path / "txt",
+    )
+    assert exported.start_row is None
+    assert exported.build.rows
+    names = {path.name for path in exported.txt_paths}
+    assert "단식원 가격_제목본문.txt" in names
+    assert "단식원 가격_댓글1,2,3.txt" in names
+    assert "단식원 가격_댓글4,5.txt" in names
+    assert "단식원 가격_대댓글.txt" in names
+
+
+def test_export_both_writes_excel_and_txt(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{FULL_TXT_SOURCE}",고요한아침,writer,질문형,,,,,"약과 영양, 병원의 기억"\n',
+    )
+    gatling = write_gatling_xlsx(tmp_path)
+    exported = export_gatling_output(
+        brand,
+        mode=EXPORT_BOTH,
+        gatling_path=gatling,
+        txt_dir=gatling_txt_folder(gatling),
+    )
+    assert exported.start_row == 9
+    assert (gatling_txt_folder(gatling) / "단식원 가격_댓글1,2,3.txt").exists()
+    workbook = load_workbook(gatling)
+    sheet = workbook["마스터"]
+    assert sheet.cell(9, 3).value == "실제 원고 제목"
+    workbook.close()
+
+
+def test_gatling_gui_has_export_mode_controls() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "v2r_auto" / "gui_gatling_paste.py"
+    ).read_text(encoding="utf-8")
+    assert "받는 형식" in source
+    assert "TXT 저장 폴더" in source
+    assert "단식원 가격_댓글1,2,3.txt" in source
+    assert "export_gatling_output" in source

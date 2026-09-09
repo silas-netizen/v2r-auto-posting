@@ -1154,6 +1154,116 @@ def gatling_image_folder(gatling_path: str | Path) -> Path:
     return path.with_name(f"{path.stem}_images")
 
 
+EXPORT_EXCEL = "excel"
+EXPORT_TXT = "txt"
+EXPORT_BOTH = "both"
+EXPORT_MODES = (EXPORT_EXCEL, EXPORT_TXT, EXPORT_BOTH)
+TXT_TITLE_BODY = "제목본문"
+TXT_COMMENTS_123 = "댓글1,2,3"
+TXT_COMMENTS_45 = "댓글4,5"
+TXT_REPLIES = "대댓글"
+_UNSAFE_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*]')
+
+
+def parse_export_mode(value: str) -> str:
+    text = (value or "").strip()
+    if text in EXPORT_MODES:
+        return text
+    raise GatlingPasteError("엑셀, TXT, 둘 다 중에서 고르세요")
+
+
+def gatling_txt_folder(gatling_path: str | Path) -> Path:
+    path = Path(gatling_path)
+    return path.with_name(f"{path.stem}_txt")
+
+
+def safe_txt_keyword(keyword: str) -> str:
+    text = _UNSAFE_FILENAME_CHARS.sub("_", (keyword or "").strip())
+    text = text.strip(" .")
+    return text or "키워드"
+
+
+def _unique_txt_stem(keyword: str, used: set[str]) -> str:
+    base = safe_txt_keyword(keyword)
+    stem = base
+    index = 2
+    while stem.casefold() in used:
+        stem = f"{base}_{index}"
+        index += 1
+    used.add(stem.casefold())
+    return stem
+
+
+def _iter_comment_tree(nodes: list[CommentNode]) -> list[CommentNode]:
+    items: list[CommentNode] = []
+    for node in nodes:
+        items.append(node)
+        items.extend(_iter_comment_tree(node.children))
+    return items
+
+
+def _format_labeled_block(label: str, text: str) -> str:
+    body = replace_image_tokens(text).strip()
+    return f"{label}\n{body}".rstrip()
+
+
+def format_title_body_txt(article: ParsedArticle) -> str:
+    title = _format_labeled_block("제목 :", article.title)
+    body = _format_labeled_block("본문 :", article.body)
+    return f"{title}\n\n{body}\n"
+
+
+def format_comment_nodes_txt(nodes: list[CommentNode]) -> str:
+    blocks = [
+        _format_labeled_block(f"{node.label}:", node.text)
+        for node in nodes
+        if (node.text or "").strip()
+    ]
+    if not blocks:
+        return ""
+    return "\n\n".join(blocks) + "\n"
+
+
+def split_manuscript_txt_parts(article: ParsedArticle) -> dict[str, str]:
+    comments_123 = [node for node in article.comments if node.index in {1, 2, 3}]
+    comments_45 = [node for node in article.comments if node.index not in {1, 2, 3}]
+    replies = [
+        node
+        for root in article.comments
+        for node in _iter_comment_tree(root.children)
+    ]
+    parts = {
+        TXT_TITLE_BODY: format_title_body_txt(article),
+        TXT_COMMENTS_123: format_comment_nodes_txt(comments_123),
+        TXT_COMMENTS_45: format_comment_nodes_txt(comments_45),
+        TXT_REPLIES: format_comment_nodes_txt(replies),
+    }
+    return {name: text for name, text in parts.items() if text.strip()}
+
+
+def write_gatling_txt_files(
+    jobs: list[GatlingBrandJob], dest_dir: str | Path
+) -> list[Path]:
+    folder = Path(dest_dir)
+    folder.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    used: set[str] = set()
+    for job in jobs:
+        stem = _unique_txt_stem(job.keyword, used)
+        for suffix, content in split_manuscript_txt_parts(job.article).items():
+            path = folder / f"{stem}_{suffix}.txt"
+            path.write_text(content, encoding="utf-8-sig")
+            written.append(path)
+    return written
+
+
+@dataclass(slots=True)
+class GatlingExportResult:
+    build: GatlingBuildResult
+    start_row: int | None = None
+    txt_paths: list[Path] = field(default_factory=list)
+
+
 def collect_resolved_images(resolved: list[ResolvedImage], dest_dir: str | Path) -> str:
     folder = Path(dest_dir)
     folder.mkdir(parents=True, exist_ok=True)
@@ -1416,3 +1526,63 @@ def paste_manuscripts_into_gatling(
         )
     start_row = append_master_rows(gatling_path, result.rows)
     return result, start_row
+
+
+def export_gatling_output(
+    brand_path: str | Path,
+    *,
+    mode: str,
+    gatling_path: str | Path | None = None,
+    txt_dir: str | Path | None = None,
+    daily_path: str | Path | None = None,
+    skip_completed: bool = False,
+    rng: random.Random | None = None,
+    extra_exact_names: list[str] | tuple[str, ...] = (),
+    brand: str = "",
+    image_resolver: GoogleDriveImageResolver | None = None,
+    image_dir: str | Path | None = None,
+    proxy_book: ProxyBook | None = None,
+    comment_id_count: int = COMMENT_ID_COUNT,
+    author_id_count: int = DEFAULT_AUTO_ID_COUNT,
+) -> GatlingExportResult:
+    chosen = parse_export_mode(mode)
+    want_excel = chosen in {EXPORT_EXCEL, EXPORT_BOTH}
+    want_txt = chosen in {EXPORT_TXT, EXPORT_BOTH}
+    if want_excel and not gatling_path:
+        raise GatlingPasteError("기관총 엑셀 파일을 선택해 주세요")
+    if want_txt and not txt_dir:
+        raise GatlingPasteError("TXT 저장 폴더를 선택해 주세요")
+    existing_keys = (
+        load_existing_manuscript_keys(gatling_path) if want_excel and gatling_path else None
+    )
+    result = build_gatling_master(
+        brand_path,
+        daily_path,
+        skip_completed=skip_completed,
+        rng=rng,
+        extra_exact_names=extra_exact_names,
+        manuscript_only=not want_excel,
+        brand=brand,
+        image_resolver=image_resolver,
+        image_dir=image_dir,
+        existing_keys=existing_keys,
+        proxy_book=proxy_book,
+        comment_id_count=comment_id_count,
+        author_id_count=author_id_count,
+    )
+    start_row = None
+    txt_paths: list[Path] = []
+    if want_excel:
+        if not result.rows:
+            preview = "\n".join(result.skipped[:8])
+            extra = f"\n외 {len(result.skipped) - 8}건" if len(result.skipped) > 8 else ""
+            raise GatlingPasteError(
+                "제목·본문이 같은 원고는 이미 기관총에 있어 넣지 않았습니다."
+                + (f"\n{preview}{extra}" if preview else "")
+            )
+        start_row = append_master_rows(gatling_path, result.rows)
+    if want_txt:
+        if not result.jobs:
+            raise GatlingPasteError("TXT로 만들 원고가 없습니다")
+        txt_paths = write_gatling_txt_files(result.jobs, txt_dir)
+    return GatlingExportResult(build=result, start_row=start_row, txt_paths=txt_paths)
