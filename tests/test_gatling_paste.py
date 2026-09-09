@@ -1666,11 +1666,11 @@ def test_split_manuscript_txt_parts_makes_four_files() -> None:
     assert parts[TXT_TITLE_BODY] == "실제 원고 제목\n\n실제 원고 본문\n"
     assert "제목 :" not in parts[TXT_TITLE_BODY]
     assert "본문 :" not in parts[TXT_TITLE_BODY]
-    assert parts[TXT_COMMENTS_123] == "첫 댓글$둘째 댓글$셋째 댓글\n"
+    assert parts[TXT_COMMENTS_123] == "첫 댓글\n\n둘째 댓글\n\n셋째 댓글\n"
     assert "댓글1" not in parts[TXT_COMMENTS_123]
-    assert "\n" not in parts[TXT_COMMENTS_123].rstrip("\n")
-    assert parts[TXT_COMMENTS_45] == "넷째 댓글$다섯째 댓글\n"
-    assert parts[TXT_REPLIES] == "첫 답글$둘째 답글$깊은 답글$더 깊은 답글\n"
+    assert "$" not in parts[TXT_COMMENTS_123]
+    assert parts[TXT_COMMENTS_45] == "넷째 댓글\n\n다섯째 댓글\n"
+    assert parts[TXT_REPLIES] == "첫 답글\n\n둘째 답글\n\n깊은 답글\n\n더 깊은 답글\n"
     assert "첫 댓글" not in parts[TXT_REPLIES]
     assert reply_target_value(article.comments[1].children[0].children[0]) == 2.1
     assert reply_target_value(article.comments[1].children[0].children[0].children[0]) == 2.2
@@ -1693,6 +1693,15 @@ def test_flatten_comment_txt_joins_lines_with_dollar() -> None:
     assert "본문은\n두 줄" in parts[TXT_TITLE_BODY]
     assert "$" not in parts[TXT_TITLE_BODY]
     assert parts[TXT_COMMENTS_123] == flatten_comment_txt(text) + "\n"
+    two = parse_article(
+        "건강식단",
+        "제목 :\n제목\n\n본문 :\n본문\n\n댓글1:\n" + text + "댓글2:\n둘째는 한 줄\n",
+    )
+    two_parts = split_manuscript_txt_parts(two)
+    assert two_parts[TXT_COMMENTS_123] == (
+        flatten_comment_txt(text) + "\n\n둘째는 한 줄\n"
+    )
+    assert two_parts[TXT_COMMENTS_123].count("$") == 1
 
 
 def test_parse_completion_link_reads_cafe_and_article() -> None:

@@ -1290,7 +1290,7 @@ def format_comment_nodes_txt(nodes: list[CommentNode]) -> str:
             blocks.append(body)
     if not blocks:
         return ""
-    return "$".join(blocks) + "\n"
+    return "\n\n".join(blocks) + "\n"
 
 
 def split_manuscript_txt_parts(article: ParsedArticle) -> dict[str, str]:
