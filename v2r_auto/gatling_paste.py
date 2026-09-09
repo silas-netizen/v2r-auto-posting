@@ -1202,23 +1202,28 @@ def _iter_comment_tree(nodes: list[CommentNode]) -> list[CommentNode]:
     return items
 
 
-def _format_labeled_block(label: str, text: str) -> str:
-    body = replace_image_tokens(text).strip()
-    return f"{label}\n{body}".rstrip()
+def _format_txt_body(text: str) -> str:
+    return replace_image_tokens(text).strip()
 
 
 def format_title_body_txt(article: ParsedArticle) -> str:
-    title = _format_labeled_block("제목 :", article.title)
-    body = _format_labeled_block("본문 :", article.body)
+    title = _format_txt_body(article.title)
+    body = _format_txt_body(article.body)
+    if not title and not body:
+        return ""
+    if not title:
+        return f"{body}\n"
+    if not body:
+        return f"{title}\n"
     return f"{title}\n\n{body}\n"
 
 
 def format_comment_nodes_txt(nodes: list[CommentNode]) -> str:
-    blocks = [
-        _format_labeled_block(f"{node.label}:", node.text)
-        for node in nodes
-        if (node.text or "").strip()
-    ]
+    blocks: list[str] = []
+    for node in nodes:
+        body = _format_txt_body(node.text)
+        if body:
+            blocks.append(body)
     if not blocks:
         return ""
     return "\n\n".join(blocks) + "\n"
