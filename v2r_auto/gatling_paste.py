@@ -1162,7 +1162,23 @@ TXT_TITLE_BODY = "제목본문"
 TXT_COMMENTS_123 = "댓글1,2,3"
 TXT_COMMENTS_45 = "댓글4,5"
 TXT_REPLIES = "대댓글"
+TXT_FOLDER_NAMES = (
+    TXT_TITLE_BODY,
+    TXT_COMMENTS_123,
+    TXT_COMMENTS_45,
+    TXT_REPLIES,
+)
 _UNSAFE_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*]')
+_RESERVED_CAFE_SLUGS = {"f-e", "ca-fe", "cafes", "articles", "menus"}
+_COMPLETION_SLUG_ARTICLE_RE = re.compile(
+    r"(?:https?://)?(?:m\.)?cafe\.naver\.com/([^/?#]+)/(\d+)(?:[/?#]|$)",
+    re.IGNORECASE,
+)
+_COMPLETION_CAFES_ARTICLE_RE = re.compile(
+    r"(?:https?://)?(?:m\.)?cafe\.naver\.com/(?:f-e/|ca-fe/)?"
+    r"cafes/([^/]+)/articles/(\d+)",
+    re.IGNORECASE,
+)
 
 
 def parse_export_mode(value: str) -> str:
@@ -1183,8 +1199,47 @@ def safe_txt_keyword(keyword: str) -> str:
     return text or "키워드"
 
 
-def _unique_txt_stem(keyword: str, used: set[str]) -> str:
-    base = safe_txt_keyword(keyword)
+def parse_completion_cafe_article(url: str) -> tuple[str, str]:
+    text = (url or "").strip()
+    if not text:
+        raise GatlingPasteError(
+            "완료 링크가 없습니다. "
+            "https://cafe.naver.com/cantsb/3541968 형식으로 넣어 주세요"
+        )
+    match = _COMPLETION_SLUG_ARTICLE_RE.search(text)
+    if match:
+        slug, article = match.group(1), match.group(2)
+        if slug.casefold() not in _RESERVED_CAFE_SLUGS:
+            return slug, article
+    match = _COMPLETION_CAFES_ARTICLE_RE.search(text)
+    if match and not match.group(1).isdigit():
+        return match.group(1), match.group(2)
+    raise GatlingPasteError(
+        "완료 링크에서 카페명과 글 번호를 찾지 못했습니다. "
+        "https://cafe.naver.com/cantsb/3541968 형식으로 넣어 주세요"
+    )
+
+
+def completion_txt_stem(url: str) -> str:
+    slug, article = parse_completion_cafe_article(url)
+    slug = safe_txt_keyword(slug)
+    return f"{slug}_{article}"
+
+
+def require_txt_stems(jobs: list[GatlingBrandJob]) -> list[str]:
+    stems: list[str] = []
+    errors: list[str] = []
+    for job in jobs:
+        try:
+            stems.append(completion_txt_stem(job.completion_url))
+        except GatlingPasteError as exc:
+            errors.append(f"행 {job.row_number}: {exc}")
+    if errors:
+        raise GatlingPasteError("\n".join(errors))
+    return stems
+
+
+def _unique_txt_stem(base: str, used: set[str]) -> str:
     stem = base
     index = 2
     while stem.casefold() in used:
@@ -1251,12 +1306,14 @@ def write_gatling_txt_files(
 ) -> list[Path]:
     folder = Path(dest_dir)
     folder.mkdir(parents=True, exist_ok=True)
+    for name in TXT_FOLDER_NAMES:
+        (folder / name).mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     used: set[str] = set()
-    for job in jobs:
-        stem = _unique_txt_stem(job.keyword, used)
-        for suffix, content in split_manuscript_txt_parts(job.article).items():
-            path = folder / f"{stem}_{suffix}.txt"
+    for job, base in zip(jobs, require_txt_stems(jobs), strict=True):
+        stem = _unique_txt_stem(base, used)
+        for name, content in split_manuscript_txt_parts(job.article).items():
+            path = folder / name / f"{stem}.txt"
             path.write_text(content, encoding="utf-8-sig")
             written.append(path)
     return written
@@ -1577,6 +1634,10 @@ def export_gatling_output(
     )
     start_row = None
     txt_paths: list[Path] = []
+    if want_txt:
+        if not result.jobs:
+            raise GatlingPasteError("TXT로 만들 원고가 없습니다")
+        require_txt_stems(result.jobs)
     if want_excel:
         if not result.rows:
             preview = "\n".join(result.skipped[:8])
@@ -1587,7 +1648,5 @@ def export_gatling_output(
             )
         start_row = append_master_rows(gatling_path, result.rows)
     if want_txt:
-        if not result.jobs:
-            raise GatlingPasteError("TXT로 만들 원고가 없습니다")
         txt_paths = write_gatling_txt_files(result.jobs, txt_dir)
     return GatlingExportResult(build=result, start_row=start_row, txt_paths=txt_paths)

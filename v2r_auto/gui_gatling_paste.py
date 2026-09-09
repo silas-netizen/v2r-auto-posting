@@ -78,7 +78,9 @@ class GatlingPasteApp(AutomationApp):
                 "구글 시트 원고의 제목, 본문, 댓글·대댓글을 기관총 .xlsm 마스터에 "
                 "넣거나 TXT 파일로 받는 프로그램입니다. "
                 "엑셀, TXT, 둘 다 중에서 고를 수 있습니다. "
-                "TXT는 키워드마다 제목본문 / 댓글1,2,3 / 댓글4,5 / 대댓글 파일 4개를 만듭니다. "
+                "TXT는 제목본문 / 댓글1,2,3 / 댓글4,5 / 대댓글 폴더에 "
+                "완료 링크의 카페명_게시글번호.txt를 넣습니다. "
+                "예: https://cafe.naver.com/cantsb/3541968 → cantsb_3541968.txt. "
                 "대댓글 파일에는 2.1·2.2(대대댓글2·대대대댓글2)도 들어갑니다. "
                 "제휴 카페(씨씨앙·양평맘)는 새글(일상) → 글수정(원고) → 댓글 → 대댓글 "
                 "순서로 넣고, 새글 링크 열에는 그 카페 게시판 주소를 넣습니다. "
@@ -161,7 +163,7 @@ class GatlingPasteApp(AutomationApp):
         ).pack(side=tk.LEFT, padx=(12, 0))
         ttk.Label(
             mode_row,
-            text="TXT 파일 이름 예: 단식원 가격_댓글1,2,3.txt",
+            text="TXT 이름 예: 댓글1,2,3\\cantsb_3541968.txt",
         ).pack(side=tk.LEFT, padx=(16, 0))
 
         self._entry_row(
@@ -469,7 +471,8 @@ class GatlingPasteApp(AutomationApp):
                 if exported.txt_paths:
                     parts.append(
                         f"TXT {len(exported.txt_paths)}개를 {txt_dir}에 만들었습니다. "
-                        "키워드마다 제목본문, 댓글1,2,3, 댓글4,5, 대댓글 파일입니다."
+                        "제목본문, 댓글1,2,3, 댓글4,5, 대댓글 폴더에 "
+                        "카페명_게시글번호.txt를 넣었습니다."
                     )
                 self.ui_queue.put(
                     (
