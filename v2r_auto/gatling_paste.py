@@ -1261,6 +1261,15 @@ def _format_txt_body(text: str) -> str:
     return replace_image_tokens(text).strip()
 
 
+def flatten_comment_txt(text: str) -> str:
+    cleaned = replace_image_tokens(text or "")
+    lines = [
+        line.strip()
+        for line in cleaned.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    ]
+    return "$".join(line for line in lines if line)
+
+
 def format_title_body_txt(article: ParsedArticle) -> str:
     title = _format_txt_body(article.title)
     body = _format_txt_body(article.body)
@@ -1276,12 +1285,12 @@ def format_title_body_txt(article: ParsedArticle) -> str:
 def format_comment_nodes_txt(nodes: list[CommentNode]) -> str:
     blocks: list[str] = []
     for node in nodes:
-        body = _format_txt_body(node.text)
+        body = flatten_comment_txt(node.text)
         if body:
             blocks.append(body)
     if not blocks:
         return ""
-    return "\n\n".join(blocks) + "\n"
+    return "$".join(blocks) + "\n"
 
 
 def split_manuscript_txt_parts(article: ParsedArticle) -> dict[str, str]:
