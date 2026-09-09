@@ -1660,18 +1660,13 @@ def test_split_manuscript_txt_parts_makes_four_files() -> None:
     article = parse_article("단식원 가격", FULL_TXT_SOURCE)
     parts = split_manuscript_txt_parts(article)
     assert set(parts) == {TXT_TITLE_BODY, TXT_COMMENTS_123, TXT_COMMENTS_45, TXT_REPLIES}
-    assert "실제 원고 제목" in parts[TXT_TITLE_BODY]
-    assert "실제 원고 본문" in parts[TXT_TITLE_BODY]
-    assert "첫 댓글" in parts[TXT_COMMENTS_123]
-    assert "둘째 댓글" in parts[TXT_COMMENTS_123]
-    assert "셋째 댓글" in parts[TXT_COMMENTS_123]
-    assert "넷째 댓글" not in parts[TXT_COMMENTS_123]
-    assert "넷째 댓글" in parts[TXT_COMMENTS_45]
-    assert "다섯째 댓글" in parts[TXT_COMMENTS_45]
-    assert "첫 답글" in parts[TXT_REPLIES]
-    assert "둘째 답글" in parts[TXT_REPLIES]
-    assert "깊은 답글" in parts[TXT_REPLIES]
-    assert "더 깊은 답글" in parts[TXT_REPLIES]
+    assert parts[TXT_TITLE_BODY] == "실제 원고 제목\n\n실제 원고 본문\n"
+    assert "제목 :" not in parts[TXT_TITLE_BODY]
+    assert "본문 :" not in parts[TXT_TITLE_BODY]
+    assert parts[TXT_COMMENTS_123] == "첫 댓글\n\n둘째 댓글\n\n셋째 댓글\n"
+    assert "댓글1" not in parts[TXT_COMMENTS_123]
+    assert parts[TXT_COMMENTS_45] == "넷째 댓글\n\n다섯째 댓글\n"
+    assert parts[TXT_REPLIES] == "첫 답글\n\n둘째 답글\n\n깊은 답글\n\n더 깊은 답글\n"
     assert "첫 댓글" not in parts[TXT_REPLIES]
     assert reply_target_value(article.comments[1].children[0].children[0]) == 2.1
     assert reply_target_value(article.comments[1].children[0].children[0].children[0]) == 2.2
@@ -1697,10 +1692,13 @@ def test_write_gatling_txt_uses_keyword_filenames(tmp_path: Path) -> None:
     comment_123 = (tmp_path / "out" / "단식원 가격_댓글1,2,3.txt").read_text(
         encoding="utf-8-sig"
     )
-    assert comment_123.startswith("댓글1:")
+    assert comment_123.startswith("첫 댓글")
+    assert "댓글1" not in comment_123
     replies = (tmp_path / "out" / "단식원 가격_대댓글.txt").read_text(encoding="utf-8-sig")
-    assert "대대댓글2:" in replies
-    assert "대대대댓글2:" in replies
+    assert "깊은 답글" in replies
+    assert "더 깊은 답글" in replies
+    assert "대댓글" not in replies
+    assert "대대댓글" not in replies
 
 
 def test_write_gatling_txt_skips_empty_comment_groups(tmp_path: Path) -> None:
