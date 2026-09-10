@@ -48,8 +48,8 @@ from v2r_auto.gatling_paste import (
     parse_completion_cafe_article,
     parse_export_mode,
     parse_gatling_article,
-    parse_row_range,
     paste_manuscripts_into_gatling,
+    pick_txt_jobs,
     recognize_gatling_workbook,
     replace_image_tokens,
     reply_target_value,
@@ -1862,19 +1862,9 @@ def test_gatling_gui_has_export_mode_controls() -> None:
     assert "TXT 저장 폴더" in source
     assert "cantsb_3541968.txt" in source
     assert "export_gatling_output" in source
-    assert "행 범위" in source
-    assert "137-146" in source
-
-
-def test_parse_row_range_reads_sheet_rows() -> None:
-    assert parse_row_range("") is None
-    assert parse_row_range("137-146") == (137, 146)
-    assert parse_row_range(" 137 ~ 146 ") == (137, 146)
-    assert parse_row_range("137") == (137, 137)
-    with pytest.raises(GatlingPasteError, match="137-146"):
-        parse_row_range("abc")
-    with pytest.raises(GatlingPasteError, match="2행부터"):
-        parse_row_range("1-10")
+    assert "키워드, 본문이 있고" in source
+    assert "행 범위" not in source
+    assert "137-146" not in source
 
 
 def test_txt_only_skips_other_cafes_and_does_not_need_board(tmp_path: Path) -> None:
@@ -1895,20 +1885,64 @@ def test_txt_only_skips_other_cafes_and_does_not_need_board(tmp_path: Path) -> N
     assert any("완료 링크" in item for item in exported.build.skipped)
 
 
-def test_txt_row_range_keeps_only_selected_rows(tmp_path: Path) -> None:
+def test_pick_txt_jobs_needs_keyword_body_and_cafe_article_link() -> None:
+    ready_job = GatlingBrandJob(
+        row_number=2,
+        keyword="단식원 가격",
+        article=parse_article("단식원 가격", FULL_TXT_SOURCE),
+        cafe="양평맘",
+        board="",
+        completion_url="https://cafe.naver.com/cantsb/3541968",
+    )
+    no_link = GatlingBrandJob(
+        row_number=3,
+        keyword="코숨핏",
+        article=parse_article("코숨핏", FULL_TXT_SOURCE),
+        cafe="양평맘",
+        board="",
+    )
+    no_body = GatlingBrandJob(
+        row_number=4,
+        keyword="코숨핏",
+        article=ParsedArticle(title="제목만", body="", keyword="코숨핏", tag="", comments=[]),
+        cafe="양평맘",
+        board="",
+        completion_url="https://cafe.naver.com/cantsb/111",
+    )
+    no_keyword = GatlingBrandJob(
+        row_number=5,
+        keyword="  ",
+        article=parse_article("코숨핏", FULL_TXT_SOURCE),
+        cafe="양평맘",
+        board="",
+        completion_url="https://cafe.naver.com/cantsb/222",
+    )
+    ready, skipped = pick_txt_jobs([ready_job, no_link, no_body, no_keyword])
+    assert [job.row_number for job in ready] == [2]
+    assert any("완료 링크" in item for item in skipped)
+    assert any("본문" in item for item in skipped)
+    assert any("키워드" in item for item in skipped)
+
+
+def test_txt_export_keeps_only_complete_rows(tmp_path: Path) -> None:
+    empty_body = "제목 :\n제목만\n\n본문 :\n\n댓글1:\n댓글\n"
+    other = (
+        "제목 :\n다른 제목\n\n본문 :\n다른 본문\n\n댓글1:\n다른 댓글\n"
+    )
     brand = write_brand_csv(
         tmp_path,
         "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
         f'"첫째","{FULL_TXT_SOURCE}",양평맘,writer,질문형,https://cafe.naver.com/cantsb/111,,,,이모저모 이야기💕\n'
-        f'"둘째","{FULL_TXT_SOURCE}",양평맘,writer,질문형,https://cafe.naver.com/cantsb/222,,,,이모저모 이야기💕\n'
-        f'"셋째","{FULL_TXT_SOURCE}",양평맘,writer,질문형,https://cafe.naver.com/cantsb/333,,,,이모저모 이야기💕\n',
+        f'"둘째","{empty_body}",양평맘,writer,질문형,https://cafe.naver.com/cantsb/222,,,,이모저모 이야기💕\n'
+        f'"셋째","{other}",양평맘,writer,질문형,https://example.com/nope,,,,이모저모 이야기💕\n',
     )
     exported = export_gatling_output(
         brand,
         mode=EXPORT_TXT,
         txt_dir=tmp_path / "txt",
-        row_range=(3, 3),
     )
     names = {path.name for path in exported.txt_paths}
-    assert names == {"cantsb_222.txt"}
-    assert [job.keyword for job in exported.build.jobs] == ["둘째"]
+    assert names == {"cantsb_111.txt"}
+    assert [job.keyword for job in exported.build.jobs] == ["첫째"]
+    assert any("본문" in item for item in exported.build.skipped)
+    assert any("완료 링크" in item for item in exported.build.skipped)

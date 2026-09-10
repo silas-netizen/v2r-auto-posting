@@ -1190,40 +1190,18 @@ def parse_export_mode(value: str) -> str:
     raise GatlingPasteError("엑셀, TXT, 둘 다 중에서 고르세요")
 
 
-def parse_row_range(value: str) -> tuple[int, int] | None:
-    text = (value or "").strip().replace(" ", "")
-    if not text:
-        return None
-    text = text.replace("~", "-").replace("–", "-").replace("—", "-")
-    if "-" in text:
-        left, right = text.split("-", 1)
-        if not left.isdigit() or not right.isdigit():
-            raise GatlingPasteError("행 범위는 137-146처럼 넣어 주세요")
-        start, end = int(left), int(right)
-    elif text.isdigit():
-        start = end = int(text)
-    else:
-        raise GatlingPasteError("행 범위는 137-146처럼 넣어 주세요")
-    if start < 2 or end < start:
-        raise GatlingPasteError("행 범위는 2행부터, 작은 번호-큰 번호로 넣어 주세요")
-    return start, end
-
-
-def apply_row_range(
-    jobs: list[GatlingBrandJob], row_range: tuple[int, int] | None
-) -> list[GatlingBrandJob]:
-    if row_range is None:
-        return jobs
-    start, end = row_range
-    return [job for job in jobs if start <= job.row_number <= end]
-
-
 def pick_txt_jobs(
     jobs: list[GatlingBrandJob],
 ) -> tuple[list[GatlingBrandJob], list[str]]:
     ready: list[GatlingBrandJob] = []
     skipped: list[str] = []
     for job in jobs:
+        if not (job.keyword or "").strip():
+            skipped.append(f"행 {job.row_number}: 키워드가 비어 있음")
+            continue
+        if not (job.article.body or "").strip():
+            skipped.append(f"행 {job.row_number}: 본문이 비어 있음")
+            continue
         try:
             completion_txt_stem(job.completion_url)
         except GatlingPasteError as exc:
@@ -1441,7 +1419,6 @@ def build_gatling_master(
     proxy_book: ProxyBook | None = None,
     comment_id_count: int = COMMENT_ID_COUNT,
     author_id_count: int = DEFAULT_AUTO_ID_COUNT,
-    row_range: tuple[int, int] | None = None,
     need_master_rows: bool = True,
 ) -> GatlingBuildResult:
     jobs, skipped = load_gatling_brand_jobs(
@@ -1449,10 +1426,9 @@ def build_gatling_master(
         skip_completed=skip_completed,
         brand=brand,
     )
-    jobs = apply_row_range(jobs, row_range)
-    jobs, duplicate_skipped = drop_duplicate_manuscripts(jobs, existing_keys)
-    skipped.extend(duplicate_skipped)
     if not need_master_rows:
+        jobs, txt_skipped = pick_txt_jobs(jobs)
+        skipped.extend(txt_skipped)
         return GatlingBuildResult(
             rows=[],
             jobs=jobs,
@@ -1460,6 +1436,8 @@ def build_gatling_master(
             image_count=0,
             account_count=0,
         )
+    jobs, duplicate_skipped = drop_duplicate_manuscripts(jobs, existing_keys)
+    skipped.extend(duplicate_skipped)
     include_daily_new_post = not manuscript_only
     affiliate_jobs = [job for job in jobs if is_affiliate_cafe(job.cafe)]
     if include_daily_new_post and affiliate_jobs:
@@ -1671,7 +1649,6 @@ def export_gatling_output(
     proxy_book: ProxyBook | None = None,
     comment_id_count: int = COMMENT_ID_COUNT,
     author_id_count: int = DEFAULT_AUTO_ID_COUNT,
-    row_range: tuple[int, int] | None = None,
 ) -> GatlingExportResult:
     chosen = parse_export_mode(mode)
     want_excel = chosen in {EXPORT_EXCEL, EXPORT_BOTH}
@@ -1697,7 +1674,6 @@ def export_gatling_output(
         proxy_book=proxy_book,
         comment_id_count=comment_id_count,
         author_id_count=author_id_count,
-        row_range=row_range,
         need_master_rows=want_excel,
     )
     start_row = None
@@ -1710,8 +1686,9 @@ def export_gatling_output(
             preview = "\n".join(txt_skipped[:8])
             extra = f"\n외 {len(txt_skipped) - 8}건" if len(txt_skipped) > 8 else ""
             raise GatlingPasteError(
-                "TXT로 만들 완료 링크가 없습니다. "
-                "https://cafe.naver.com/cantsb/3541968 형식으로 넣어 주세요"
+                "TXT로 만들 행이 없습니다. "
+                "키워드, 본문이 있고 완료 링크가 "
+                "https://cafe.naver.com/cantsb/3541968 형식인 행만 받습니다"
                 + (f"\n{preview}{extra}" if preview else "")
             )
     if want_excel:
