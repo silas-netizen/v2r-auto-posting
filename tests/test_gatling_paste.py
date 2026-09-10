@@ -48,6 +48,7 @@ from v2r_auto.gatling_paste import (
     parse_completion_cafe_article,
     parse_export_mode,
     parse_gatling_article,
+    parse_row_range,
     paste_manuscripts_into_gatling,
     recognize_gatling_workbook,
     replace_image_tokens,
@@ -150,6 +151,7 @@ def test_exact_board_name_ignores_spaces_and_keeps_cafe_spelling() -> None:
     assert exact_board_name("자유수다방", "씨씨앙") == "자유 수다방"
     assert exact_board_name("이모저모이야기", "양평맘") == "이모저모 이야기💕"
     assert exact_board_name("", "씨씨앙") == AFFILIATE_EXACT_BOARDS["씨씨앙"]
+    assert exact_board_name("", "쌍둥이맘 모여라") == "ㄴ가족업체 자유게시판"
 
 
 def test_exact_board_name_rejects_wrong_affiliate_board() -> None:
@@ -1822,7 +1824,8 @@ def test_export_txt_only_does_not_need_gatling(tmp_path: Path) -> None:
         txt_dir=tmp_path / "txt",
     )
     assert exported.start_row is None
-    assert exported.build.rows
+    assert exported.build.jobs
+    assert exported.build.rows == []
     rels = {path.relative_to(tmp_path / "txt").as_posix() for path in exported.txt_paths}
     assert "제목본문/cantsb_3541968.txt" in rels
     assert "댓글1,2,3/cantsb_3541968.txt" in rels
@@ -1859,3 +1862,53 @@ def test_gatling_gui_has_export_mode_controls() -> None:
     assert "TXT 저장 폴더" in source
     assert "cantsb_3541968.txt" in source
     assert "export_gatling_output" in source
+    assert "행 범위" in source
+    assert "137-146" in source
+
+
+def test_parse_row_range_reads_sheet_rows() -> None:
+    assert parse_row_range("") is None
+    assert parse_row_range("137-146") == (137, 146)
+    assert parse_row_range(" 137 ~ 146 ") == (137, 146)
+    assert parse_row_range("137") == (137, 137)
+    with pytest.raises(GatlingPasteError, match="137-146"):
+        parse_row_range("abc")
+    with pytest.raises(GatlingPasteError, match="2행부터"):
+        parse_row_range("1-10")
+
+
+def test_txt_only_skips_other_cafes_and_does_not_need_board(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        '"다른키워드","제목 :\n다른제목\n\n본문 :\n다른본문\n\n댓글1:\n댓글\n",쌍둥이맘 모여라,writer,질문형,,,,,\n'
+        f'"단식원 가격","{FULL_TXT_SOURCE}",양평맘,writer,질문형,https://cafe.naver.com/cantsb/3541968,,,,이모저모 이야기💕\n',
+    )
+    exported = export_gatling_output(
+        brand,
+        mode=EXPORT_TXT,
+        txt_dir=tmp_path / "txt",
+    )
+    assert exported.start_row is None
+    rels = {path.relative_to(tmp_path / "txt").as_posix() for path in exported.txt_paths}
+    assert "댓글1,2,3/cantsb_3541968.txt" in rels
+    assert any("완료 링크" in item for item in exported.build.skipped)
+
+
+def test_txt_row_range_keeps_only_selected_rows(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"첫째","{FULL_TXT_SOURCE}",양평맘,writer,질문형,https://cafe.naver.com/cantsb/111,,,,이모저모 이야기💕\n'
+        f'"둘째","{FULL_TXT_SOURCE}",양평맘,writer,질문형,https://cafe.naver.com/cantsb/222,,,,이모저모 이야기💕\n'
+        f'"셋째","{FULL_TXT_SOURCE}",양평맘,writer,질문형,https://cafe.naver.com/cantsb/333,,,,이모저모 이야기💕\n',
+    )
+    exported = export_gatling_output(
+        brand,
+        mode=EXPORT_TXT,
+        txt_dir=tmp_path / "txt",
+        row_range=(3, 3),
+    )
+    names = {path.name for path in exported.txt_paths}
+    assert names == {"cantsb_222.txt"}
+    assert [job.keyword for job in exported.build.jobs] == ["둘째"]

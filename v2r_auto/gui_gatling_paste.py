@@ -28,6 +28,7 @@ from .gatling_paste import (
     load_existing_manuscript_keys,
     load_gatling_brand_jobs,
     parse_export_mode,
+    parse_row_range,
     recognize_gatling_workbook,
 )
 from .images import GoogleDriveImageResolver, brand_from_sheet_title, load_sheet_brand
@@ -50,8 +51,8 @@ class GatlingPasteApp(AutomationApp):
             messagebox.showerror("중복 실행", str(exc))
             self.destroy()
             raise SystemExit(1) from exc
-        self.geometry("860x800")
-        self.minsize(800, 720)
+        self.geometry("860x840")
+        self.minsize(800, 740)
 
     def _create_variables(self) -> None:
         self.sheet_url = tk.StringVar()
@@ -60,6 +61,7 @@ class GatlingPasteApp(AutomationApp):
         self.proxy_path = tk.StringVar()
         self.auto_id_count = tk.IntVar(value=DEFAULT_AUTO_ID_COUNT)
         self.export_mode = tk.StringVar(value=EXPORT_EXCEL)
+        self.row_range = tk.StringVar()
         self.txt_dir = tk.StringVar()
         self.progress_text = tk.StringVar(value="대기 중")
 
@@ -67,7 +69,7 @@ class GatlingPasteApp(AutomationApp):
         outer = ttk.Frame(self, padding=16)
         outer.pack(fill=tk.BOTH, expand=True)
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(11, weight=1)
+        outer.rowconfigure(12, weight=1)
 
         ttk.Label(outer, text=self.app_name, font=("", 18, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
@@ -82,6 +84,7 @@ class GatlingPasteApp(AutomationApp):
                 "완료 링크의 카페명_게시글번호.txt를 넣습니다. "
                 "예: https://cafe.naver.com/cantsb/3541968 → cantsb_3541968.txt. "
                 "한 댓글 안에서 줄이 나뉘면 $로 바꿉니다. 댓글1·2·3은 서로 따로 둡니다. "
+                "행 범위를 넣으면 그 행만 합니다. TXT만 고르면 일상 글 시트와 게시판명은 보지 않습니다. "
                 "대댓글 파일에는 2.1·2.2(대대댓글2·대대대댓글2)도 들어갑니다. "
                 "제휴 카페(씨씨앙·양평맘)는 새글(일상) → 글수정(원고) → 댓글 → 대댓글 "
                 "순서로 넣고, 새글 링크 열에는 그 카페 게시판 주소를 넣습니다. "
@@ -167,16 +170,22 @@ class GatlingPasteApp(AutomationApp):
             text="TXT 이름 예: 댓글1,2,3\\cantsb_3541968.txt",
         ).pack(side=tk.LEFT, padx=(16, 0))
 
+        self._entry_row(outer, 8, "행 범위", self.row_range)
+        ttk.Label(
+            outer,
+            text="비우면 전체. 예: 137-146",
+        ).grid(row=8, column=2, sticky="w", padx=(6, 0))
+
         self._entry_row(
             outer,
-            8,
+            9,
             "TXT 저장 폴더",
             self.txt_dir,
             button=("폴더", self._choose_txt_dir),
         )
 
         actions = ttk.Frame(outer)
-        actions.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(8, 10))
+        actions.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(8, 10))
         ttk.Button(actions, text="구글 시트 열기", command=self._open_sheet).pack(
             side=tk.LEFT
         )
@@ -199,7 +208,7 @@ class GatlingPasteApp(AutomationApp):
         self.stop_button.pack(side=tk.LEFT, padx=(8, 0))
 
         progress_frame = ttk.Frame(outer)
-        progress_frame.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        progress_frame.grid(row=11, column=0, columnspan=3, sticky="ew", pady=(0, 6))
         progress_frame.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_frame, maximum=100)
         self.progress.grid(row=0, column=0, sticky="ew")
@@ -208,7 +217,7 @@ class GatlingPasteApp(AutomationApp):
         )
 
         log_frame = ttk.LabelFrame(outer, text="진행 기록", padding=8)
-        log_frame.grid(row=11, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=12, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state=tk.DISABLED)
@@ -334,54 +343,75 @@ class GatlingPasteApp(AutomationApp):
         self._run_background(work)
 
     def _check_data(self) -> None:
+        try:
+            parse_export_mode(self.export_mode.get())
+            parse_row_range(self.row_range.get())
+        except GatlingPasteError as exc:
+            messagebox.showerror("입력 오류", str(exc))
+            return
+
         def work() -> None:
-            brand_path, daily_path = self._brand_and_daily_paths()
+            mode = parse_export_mode(self.export_mode.get())
+            want_excel = mode in {EXPORT_EXCEL, EXPORT_BOTH}
+            row_range = parse_row_range(self.row_range.get())
+            if want_excel:
+                brand_path, daily_path = self._brand_and_daily_paths()
+            else:
+                brand_path = self._brand_path()
+                daily_path = None
             gatling_path = self.gatling_path.get().strip()
             existing_keys = (
-                load_existing_manuscript_keys(gatling_path) if gatling_path else None
+                load_existing_manuscript_keys(gatling_path)
+                if want_excel and gatling_path
+                else None
             )
             result = build_gatling_master(
                 brand_path,
                 daily_path,
-                manuscript_only=False,
+                manuscript_only=not want_excel,
                 skip_completed=False,
                 brand=self._brand_name(brand_path),
-                image_resolver=self._image_resolver(),
+                image_resolver=self._image_resolver() if want_excel else None,
                 existing_keys=existing_keys,
-                proxy_book=self._proxy_book(),
+                proxy_book=self._proxy_book() if want_excel else None,
                 author_id_count=self._auto_id_count(),
+                row_range=row_range,
+                need_master_rows=want_excel,
             )
             counts = result.type_counts()
-            self.logger.info(
-                "원고 확인: %s건 / 새글 %s / 글수정 %s / 댓글 %s / 대댓글 %s / 이미지 %s / 계정 %s",
-                len(result.jobs),
-                counts.get("새글", 0),
-                counts.get("글수정", 0),
-                counts.get("댓글", 0),
-                counts.get("대댓글", 0),
-                result.image_count,
-                result.account_count,
+            scope = (
+                f"{row_range[0]}-{row_range[1]}행"
+                if row_range
+                else "전체"
             )
+            if want_excel:
+                self.logger.info(
+                    "원고 확인: %s / %s건 / 새글 %s / 글수정 %s / 댓글 %s / 대댓글 %s / 이미지 %s / 계정 %s",
+                    scope,
+                    len(result.jobs),
+                    counts.get("새글", 0),
+                    counts.get("글수정", 0),
+                    counts.get("댓글", 0),
+                    counts.get("대댓글", 0),
+                    result.image_count,
+                    result.account_count,
+                )
+                detail = (
+                    f"{scope} 원고 {len(result.jobs)}건\n"
+                    f"새글 {counts.get('새글', 0)} / "
+                    f"글수정 {counts.get('글수정', 0)} / "
+                    f"댓글 {counts.get('댓글', 0)} / "
+                    f"대댓글 {counts.get('대댓글', 0)} / "
+                    f"이미지 {result.image_count}장 / "
+                    f"계정 {result.account_count}줄\n"
+                    f"건너뜀 {len(result.skipped)}건"
+                )
+            else:
+                self.logger.info("원고 확인(TXT): %s / %s건", scope, len(result.jobs))
+                detail = f"{scope} TXT 원고 {len(result.jobs)}건\n건너뜀 {len(result.skipped)}건"
             for item in result.skipped:
                 self.logger.info("건너뜀 %s", item)
-            self.ui_queue.put(
-                (
-                    "info",
-                    (
-                        "원고 확인",
-                        (
-                            f"원고 {len(result.jobs)}건\n"
-                            f"새글 {counts.get('새글', 0)} / "
-                            f"글수정 {counts.get('글수정', 0)} / "
-                            f"댓글 {counts.get('댓글', 0)} / "
-                            f"대댓글 {counts.get('대댓글', 0)} / "
-                            f"이미지 {result.image_count}장 / "
-                            f"계정 {result.account_count}줄\n"
-                            f"건너뜀 {len(result.skipped)}건"
-                        ),
-                    ),
-                )
-            )
+            self.ui_queue.put(("info", ("원고 확인", detail)))
 
         self._run_background(work)
 
@@ -403,6 +433,11 @@ class GatlingPasteApp(AutomationApp):
             return
         want_excel = mode in {EXPORT_EXCEL, EXPORT_BOTH}
         want_txt = mode in {EXPORT_TXT, EXPORT_BOTH}
+        try:
+            row_range = parse_row_range(self.row_range.get())
+        except GatlingPasteError as exc:
+            messagebox.showerror("입력 오류", str(exc))
+            return
         gatling_path = self.gatling_path.get().strip()
         if want_excel and not gatling_path:
             messagebox.showerror("입력 오류", "기관총 엑셀 파일을 선택해 주세요")
@@ -437,6 +472,7 @@ class GatlingPasteApp(AutomationApp):
                     image_dir=gatling_image_folder(gatling_path) if gatling_path else None,
                     proxy_book=self._proxy_book() if want_excel else None,
                     author_id_count=self._auto_id_count(),
+                    row_range=row_range,
                 )
                 result = exported.build
                 counts = result.type_counts()
