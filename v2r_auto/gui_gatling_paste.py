@@ -50,8 +50,8 @@ class GatlingPasteApp(AutomationApp):
             messagebox.showerror("중복 실행", str(exc))
             self.destroy()
             raise SystemExit(1) from exc
-        self.geometry("860x800")
-        self.minsize(800, 720)
+        self.geometry("860x840")
+        self.minsize(800, 740)
 
     def _create_variables(self) -> None:
         self.sheet_url = tk.StringVar()
@@ -82,6 +82,8 @@ class GatlingPasteApp(AutomationApp):
                 "완료 링크의 카페명_게시글번호.txt를 넣습니다. "
                 "예: https://cafe.naver.com/cantsb/3541968 → cantsb_3541968.txt. "
                 "한 댓글 안에서 줄이 나뉘면 $로 바꿉니다. 댓글1·2·3은 서로 따로 둡니다. "
+                "TXT는 키워드, 본문이 있고 완료 링크에 카페명과 게시글 번호가 있는 행만 만듭니다. "
+                "TXT만 고르면 일상 글 시트와 게시판명은 보지 않습니다. "
                 "대댓글 파일에는 2.1·2.2(대대댓글2·대대대댓글2)도 들어갑니다. "
                 "제휴 카페(씨씨앙·양평맘)는 새글(일상) → 글수정(원고) → 댓글 → 대댓글 "
                 "순서로 넣고, 새글 링크 열에는 그 카페 게시판 주소를 넣습니다. "
@@ -334,54 +336,70 @@ class GatlingPasteApp(AutomationApp):
         self._run_background(work)
 
     def _check_data(self) -> None:
+        try:
+            parse_export_mode(self.export_mode.get())
+        except GatlingPasteError as exc:
+            messagebox.showerror("입력 오류", str(exc))
+            return
+
         def work() -> None:
-            brand_path, daily_path = self._brand_and_daily_paths()
+            mode = parse_export_mode(self.export_mode.get())
+            want_excel = mode in {EXPORT_EXCEL, EXPORT_BOTH}
+            if want_excel:
+                brand_path, daily_path = self._brand_and_daily_paths()
+            else:
+                brand_path = self._brand_path()
+                daily_path = None
             gatling_path = self.gatling_path.get().strip()
             existing_keys = (
-                load_existing_manuscript_keys(gatling_path) if gatling_path else None
+                load_existing_manuscript_keys(gatling_path)
+                if want_excel and gatling_path
+                else None
             )
             result = build_gatling_master(
                 brand_path,
                 daily_path,
-                manuscript_only=False,
+                manuscript_only=not want_excel,
                 skip_completed=False,
                 brand=self._brand_name(brand_path),
-                image_resolver=self._image_resolver(),
+                image_resolver=self._image_resolver() if want_excel else None,
                 existing_keys=existing_keys,
-                proxy_book=self._proxy_book(),
+                proxy_book=self._proxy_book() if want_excel else None,
                 author_id_count=self._auto_id_count(),
+                need_master_rows=want_excel,
             )
             counts = result.type_counts()
-            self.logger.info(
-                "원고 확인: %s건 / 새글 %s / 글수정 %s / 댓글 %s / 대댓글 %s / 이미지 %s / 계정 %s",
-                len(result.jobs),
-                counts.get("새글", 0),
-                counts.get("글수정", 0),
-                counts.get("댓글", 0),
-                counts.get("대댓글", 0),
-                result.image_count,
-                result.account_count,
-            )
+            if want_excel:
+                self.logger.info(
+                    "원고 확인: %s건 / 새글 %s / 글수정 %s / 댓글 %s / 대댓글 %s / 이미지 %s / 계정 %s",
+                    len(result.jobs),
+                    counts.get("새글", 0),
+                    counts.get("글수정", 0),
+                    counts.get("댓글", 0),
+                    counts.get("대댓글", 0),
+                    result.image_count,
+                    result.account_count,
+                )
+                detail = (
+                    f"원고 {len(result.jobs)}건\n"
+                    f"새글 {counts.get('새글', 0)} / "
+                    f"글수정 {counts.get('글수정', 0)} / "
+                    f"댓글 {counts.get('댓글', 0)} / "
+                    f"대댓글 {counts.get('대댓글', 0)} / "
+                    f"이미지 {result.image_count}장 / "
+                    f"계정 {result.account_count}줄\n"
+                    f"건너뜀 {len(result.skipped)}건"
+                )
+            else:
+                self.logger.info("원고 확인(TXT): %s건", len(result.jobs))
+                detail = (
+                    f"TXT 원고 {len(result.jobs)}건\n"
+                    "키워드, 본문, 완료 링크(카페/글번호)가 있는 행만 셉니다.\n"
+                    f"건너뜀 {len(result.skipped)}건"
+                )
             for item in result.skipped:
                 self.logger.info("건너뜀 %s", item)
-            self.ui_queue.put(
-                (
-                    "info",
-                    (
-                        "원고 확인",
-                        (
-                            f"원고 {len(result.jobs)}건\n"
-                            f"새글 {counts.get('새글', 0)} / "
-                            f"글수정 {counts.get('글수정', 0)} / "
-                            f"댓글 {counts.get('댓글', 0)} / "
-                            f"대댓글 {counts.get('대댓글', 0)} / "
-                            f"이미지 {result.image_count}장 / "
-                            f"계정 {result.account_count}줄\n"
-                            f"건너뜀 {len(result.skipped)}건"
-                        ),
-                    ),
-                )
-            )
+            self.ui_queue.put(("info", ("원고 확인", detail)))
 
         self._run_background(work)
 
