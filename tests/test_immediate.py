@@ -208,10 +208,10 @@ def test_daily_excel_maps_columns_by_header_and_reads_board_link(
     assert "실제 본문" in job.body
 
 
-def test_daily_excel_interleaves_cafes_without_reordering_each_cafe(
+def test_daily_excel_preserves_excel_row_order(
     tmp_path: Path,
 ) -> None:
-    path = tmp_path / "daily-interleaved.xlsx"
+    path = tmp_path / "daily-row-order.xlsx"
     workbook = Workbook()
     sheet = workbook.active
     sheet.append(["카페명", "게시판명", "각색제목", "각색본문"])
@@ -224,10 +224,13 @@ def test_daily_excel_interleaves_cafes_without_reordering_each_cafe(
 
     jobs = load_daily_excel_jobs(path)
 
-    assert all(first.cafe != second.cafe for first, second in zip(jobs, jobs[1:]))
-    assert [job.title for job in jobs if job.cafe == "헬씨트리"] == [
+    assert [job.row_number for job in jobs] == [2, 3, 4, 5, 6]
+    assert [job.title for job in jobs] == [
         "헬씨1",
         "헬씨2",
+        "송도1",
+        "송도2",
+        "글로시1",
     ]
 
 
@@ -527,7 +530,10 @@ def test_code_27000_result_includes_detection_and_release_dates() -> None:
         now=detected_at,
     )
 
-    result = publisher._restriction_result("restricted-id")
+    result = publisher._restriction_result(
+        "restricted-id",
+        now=detected_at + timedelta(days=1),
+    )
 
     assert "발견 2026-08-12" in result
     assert "제외 종료 2026-09-11" in result

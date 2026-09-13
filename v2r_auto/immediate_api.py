@@ -82,8 +82,13 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         self.last_restricted_account = ""
         self.auto_account_limit = 10
 
-    def _restriction_result(self, account: str) -> str:
-        record = self.restrictions.account_record(account)
+    def _restriction_result(
+        self,
+        account: str,
+        *,
+        now: datetime | None = None,
+    ) -> str:
+        record = self.restrictions.account_record(account, now=now)
         if not record:
             return "코드 27000 활동 제한"
         detected = datetime.fromisoformat(record["detected_at"])

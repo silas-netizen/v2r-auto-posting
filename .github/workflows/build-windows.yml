@@ -40,7 +40,9 @@ jobs:
           python -m PyInstaller --noconfirm --clean v2r-immediate-posting.spec
 
       - name: Publish verified executable ZIPs
-        if: github.ref_name == 'cursor/fix-seone-image-upload-3901'
+        if: >-
+          github.ref_name == 'cursor/fix-seone-image-upload-3901' ||
+          github.ref_name == 'cursor/preserve-excel-row-order-3901'
         shell: pwsh
         run: |
           git fetch origin cursor/image-upload-downloads-3901

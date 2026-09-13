@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+import re
 from typing import Any
 
 from .content import CommentNode, ParsedArticle
@@ -101,8 +102,14 @@ class AffiliateJob:
         errors: list[str] = []
         if not self.cafe.strip():
             errors.append("카페명이 없습니다")
-        elif self.cafe.strip() not in {"씨씨앙", "양평맘"}:
-            errors.append("카페명은 씨씨앙 또는 양평맘만 사용할 수 있습니다")
+        elif self.cafe.strip() not in {
+            "씨씨앙",
+            "양평맘",
+            "쌍둥이맘 모여라",
+        }:
+            errors.append(
+                "카페명은 씨씨앙, 양평맘 또는 쌍둥이맘 모여라만 사용할 수 있습니다"
+            )
         if (
             self.cafe.strip() == "씨씨앙"
             and self.revision_board.strip()
@@ -111,6 +118,18 @@ class AffiliateJob:
             errors.append(
                 "씨씨앙 J열 게시판명은 자유수다방 또는 공란만 사용할 수 있습니다"
             )
+        if self.cafe.strip() == "쌍둥이맘 모여라" and self.revision_board.strip():
+            board_text = re.sub(
+                r"[^0-9a-z가-힣]+",
+                "",
+                self.revision_board,
+                flags=re.IGNORECASE,
+            ).casefold()
+            if board_text != "가족업체자유게시판":
+                errors.append(
+                    "쌍둥이맘 모여라 J열 게시판명은 "
+                    "가족업체 자유게시판 또는 공란만 사용할 수 있습니다"
+                )
         if not self.account.strip() and self.account_type.strip() not in {"실명", "비실명"}:
             errors.append("작성계정 또는 계정유형이 없습니다")
         if not self.article_type.strip():
