@@ -31,10 +31,18 @@ COMMENT_ACCOUNTS = (
     "chenallo",
     "colpith",
 )
-CAFE_DELAYS = {"씨씨앙": 4, "양평맘": 20}
+CAFE_DELAYS = {
+    "씨씨앙": 4,
+    "양평맘": 20,
+    "쌍둥이맘 모여라": 22,
+}
 CCCANG_CURRENT_BOARD = {"menu_id": 328, "menu_name": "자유 수다방"}
 CCCANG_OLD_BOARD = {"menu_id": 2458, "menu_name": "자유수다방(구)"}
 CCCANG_DAILY_HEAD = {"head_id": 1749, "head_name": "댓글 이벤트 X"}
+TWIN_MOMS_BOARD = {
+    "menu_id": 664,
+    "menu_name": "ㄴ가족업체 자유게시판",
+}
 CAFE_DESTINATIONS = {
     "씨씨앙": {
         "cafe_id": 25016228,
@@ -47,6 +55,11 @@ CAFE_DESTINATIONS = {
         "cafe_name": "양평 맘`s 전원 Story",
         "menu_id": 14,
         "menu_name": "이모저모 이야기💕",
+    },
+    "쌍둥이맘 모여라": {
+        "cafe_id": 10174516,
+        "cafe_name": "쌍둥이맘 모여라",
+        **TWIN_MOMS_BOARD,
     },
 }
 

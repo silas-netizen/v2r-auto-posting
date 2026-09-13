@@ -12,9 +12,11 @@ from v2r_auto.affiliate_api import (
     AffiliateApiError,
     AffiliateApiPublisher,
     AffiliateDailyPending,
+    CAFE_DESTINATIONS,
     CAFE_DELAYS,
     CCCANG_DAILY_HEAD,
     CCCANG_OLD_BOARD,
+    TWIN_MOMS_BOARD,
     _content_json,
 )
 from v2r_auto.content import parse_article
@@ -100,6 +102,19 @@ def test_cccang_rejects_unknown_revision_board(tmp_path: Path) -> None:
     assert "J열 게시판명" in " ".join(job.validate())
 
 
+def test_twin_moms_accepts_decorated_family_business_board(
+    tmp_path: Path,
+) -> None:
+    job = load_affiliate_jobs(
+        write_affiliate_csv(tmp_path),
+        selected_row_number=2,
+    )[0]
+    job.cafe = "쌍둥이맘 모여라"
+    job.revision_board = "💚 ㄴ가족업체 자유게시판 ✔"
+
+    assert job.validate() == []
+
+
 def test_failure_text_in_completion_column_is_retried(tmp_path: Path) -> None:
     jobs = load_affiliate_jobs(
         write_affiliate_csv(
@@ -179,6 +194,61 @@ def test_daily_posts_are_matched_to_cafe_without_reuse(tmp_path: Path) -> None:
     assert {job.daily_post.title for job in jobs if job.daily_post} == {"첫 일상", "둘 일상"}
 
 
+def test_twin_moms_reuses_yangpyeong_daily_post_pool(tmp_path: Path) -> None:
+    path = tmp_path / "daily.csv"
+    path.write_text(
+        (
+            "번호,제목,내용,카페\n"
+            '1,분류,"제목 : 양평 일상\n본문 : 양평 본문",양평맘\n'
+        ),
+        encoding="utf-8-sig",
+    )
+    job = load_affiliate_jobs(
+        write_affiliate_csv(tmp_path),
+        selected_row_number=2,
+    )[0]
+    job.cafe = "쌍둥이맘 모여라"
+
+    assign_daily_posts([job], load_daily_posts(path), random.Random(1))
+
+    assert job.daily_post is not None
+    assert job.daily_post.cafe == "양평맘"
+    assert job.daily_post.title == "양평 일상"
+
+
+def test_twin_moms_and_yangpyeong_never_reuse_same_daily_post(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "daily.csv"
+    path.write_text(
+        (
+            "번호,제목,내용,카페\n"
+            '1,분류,"제목 : 첫 일상\n본문 : 첫 본문",양평맘\n'
+            '2,분류,"제목 : 둘 일상\n본문 : 둘 본문",양평맘\n'
+        ),
+        encoding="utf-8-sig",
+    )
+    yangpyeong = load_affiliate_jobs(
+        write_affiliate_csv(tmp_path),
+        selected_row_number=2,
+    )[0]
+    twin_moms = load_affiliate_jobs(
+        write_affiliate_csv(tmp_path),
+        selected_row_number=2,
+    )[0]
+    twin_moms.cafe = "쌍둥이맘 모여라"
+
+    assign_daily_posts(
+        [yangpyeong, twin_moms],
+        load_daily_posts(path),
+        random.Random(1),
+    )
+
+    assert yangpyeong.daily_post is not None
+    assert twin_moms.daily_post is not None
+    assert yangpyeong.daily_post.title != twin_moms.daily_post.title
+
+
 def test_affiliate_daily_schedules_are_random_and_independent_per_cafe(
     tmp_path: Path,
 ) -> None:
@@ -214,7 +284,11 @@ def test_affiliate_daily_schedules_are_random_and_independent_per_cafe(
 
 
 def test_cccang_daily_and_revision_both_allow_comments() -> None:
-    assert CAFE_DELAYS == {"씨씨앙": 4, "양평맘": 20}
+    assert CAFE_DELAYS == {
+        "씨씨앙": 4,
+        "양평맘": 20,
+        "쌍둥이맘 모여라": 22,
+    }
     assert CCCANG_OLD_BOARD["menu_id"] == 2458
     assert CCCANG_DAILY_HEAD == {
         "head_id": 1749,
@@ -236,6 +310,97 @@ def test_cccang_daily_and_revision_both_allow_comments() -> None:
         )
         is False
     )
+
+
+def test_twin_moms_uses_same_board_without_heads_for_both_reservations(
+    tmp_path: Path,
+) -> None:
+    class TwinPairPublisher(AffiliateApiPublisher):
+        def __init__(self):
+            super().__init__(None, logging.getLogger("twin-moms-pair-test"))
+            self.created = []
+
+        def _capture_authorization(self) -> None:
+            return None
+
+        def _resolve_destination(self, job):
+            config = CAFE_DESTINATIONS[job.cafe]
+            return {
+                **config,
+                "head_id": None,
+                "head_name": None,
+                "naver_login_id": job.account,
+                "target_view_count": 0,
+                "use_comment_ai": True,
+                "parent_id": None,
+            }
+
+        def _create_source(
+            self,
+            title,
+            body,
+            tags,
+            destination,
+            comments,
+            parent_source_id=None,
+            content_json=None,
+            recovery_statuses=("DONE",),
+            enable_comment=True,
+        ):
+            self.created.append(
+                {
+                    "destination": dict(destination),
+                    "parent": parent_source_id,
+                    "enable_comment": enable_comment,
+                }
+            )
+            return f"source-{len(self.created)}"
+
+        def _verify_destination_settings(self, source_id, **kwargs):
+            return None
+
+        def _comments(self, job, start_at, cafe_id, comment_accounts=None):
+            return []
+
+        def _prepare_revision_content(self, job, destination):
+            return _content_json(job.body)
+
+        def _verify(self, source_id, job, start_at, **kwargs):
+            return None
+
+    job = load_affiliate_jobs(
+        write_affiliate_csv(tmp_path),
+        selected_row_number=2,
+    )[0]
+    job.cafe = "쌍둥이맘 모여라"
+    job.daily_post = DailyPost(2, "양평맘", "일상", "내용")
+    job.daily_scheduled_at = datetime(
+        2026,
+        9,
+        13,
+        4,
+        0,
+        tzinfo=timezone.utc,
+    )
+    publisher = TwinPairPublisher()
+
+    publisher.publish(job, dry_run=False)
+
+    assert TWIN_MOMS_BOARD == {
+        "menu_id": 664,
+        "menu_name": "ㄴ가족업체 자유게시판",
+    }
+    assert len(publisher.created) == 2
+    assert publisher.created[0]["destination"]["menu_id"] == 664
+    assert publisher.created[0]["destination"]["head_id"] is None
+    assert publisher.created[0]["enable_comment"] is True
+    assert publisher.created[1]["destination"]["start_at"] == (
+        "2026-09-14T02:00:00Z"
+    )
+    assert publisher.created[1]["destination"]["menu_id"] == 664
+    assert publisher.created[1]["destination"]["head_id"] is None
+    assert publisher.created[1]["parent"] == "source-1"
+    assert publisher.created[1]["enable_comment"] is True
 
 
 def test_missing_join_model_is_retryable_account_failure() -> None:

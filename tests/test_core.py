@@ -87,6 +87,11 @@ def test_board_selection_requires_exact_display_name() -> None:
         "게시판", "이모저모 이야기", "이모저모 이야기💘"
     )
     assert V2RBrowser._option_text_matches("게시판", "뷰티&미용", "뷰티미용")
+    assert V2RBrowser._option_text_matches(
+        "게시판",
+        "가족업체 자유게시판",
+        "💚 ㄴ가족업체 자유게시판 ✔",
+    )
 
 
 def test_se_one_board_waits_without_repeatedly_toggling_dropdown() -> None:

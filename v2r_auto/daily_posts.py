@@ -8,6 +8,13 @@ from .content import ContentFormatError, parse_article
 from .models import AffiliateJob, DailyPost, JobStatus
 
 
+DAILY_POST_SOURCE_CAFES = {
+    "씨씨앙": "씨씨앙",
+    "양평맘": "양평맘",
+    "쌍둥이맘 모여라": "양평맘",
+}
+
+
 class DailyPostSheetError(ValueError):
     pass
 
@@ -59,7 +66,8 @@ def assign_daily_posts(
 ) -> None:
     """Randomly assign unique same-cafe daily posts for this run."""
     randomizer = rng or random.SystemRandom()
-    for cafe in ("씨씨앙", "양평맘"):
+    used_posts: set[tuple[int, str, str, str]] = set()
+    for cafe, source_cafe in DAILY_POST_SOURCE_CAFES.items():
         cafe_jobs = [
             job
             for job in jobs
@@ -67,11 +75,19 @@ def assign_daily_posts(
             and not job.completion_url
             and job.status == JobStatus.PENDING
         ]
-        candidates = [post for post in daily_posts if post.cafe == cafe]
+        candidates = [
+            post
+            for post in daily_posts
+            if post.cafe == source_cafe
+            and (post.row_number, post.cafe, post.title, post.body) not in used_posts
+        ]
         if len(candidates) < len(cafe_jobs):
             raise DailyPostSheetError(
-                f"{cafe} 일상 글이 부족합니다: 필요 {len(cafe_jobs)}개, "
+                f"{cafe}용 {source_cafe} 일상 글이 부족합니다: "
+                f"필요 {len(cafe_jobs)}개, "
                 f"사용 가능 {len(candidates)}개"
             )
-        for job, post in zip(cafe_jobs, randomizer.sample(candidates, len(cafe_jobs))):
+        selected = randomizer.sample(candidates, len(cafe_jobs))
+        for job, post in zip(cafe_jobs, selected):
             job.daily_post = post
+            used_posts.add((post.row_number, post.cafe, post.title, post.body))
