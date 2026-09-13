@@ -388,7 +388,7 @@ def test_twin_moms_uses_same_board_without_heads_for_both_reservations(
 
     assert TWIN_MOMS_BOARD == {
         "menu_id": 664,
-        "menu_name": "ㄴ가족업체 자유게시판",
+        "menu_name": "⭐가족업체 자유게시판",
     }
     assert len(publisher.created) == 2
     assert publisher.created[0]["destination"]["menu_id"] == 664

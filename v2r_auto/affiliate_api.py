@@ -41,7 +41,7 @@ CCCANG_OLD_BOARD = {"menu_id": 2458, "menu_name": "자유수다방(구)"}
 CCCANG_DAILY_HEAD = {"head_id": 1749, "head_name": "댓글 이벤트 X"}
 TWIN_MOMS_BOARD = {
     "menu_id": 664,
-    "menu_name": "ㄴ가족업체 자유게시판",
+    "menu_name": "⭐가족업체 자유게시판",
 }
 CAFE_DESTINATIONS = {
     "씨씨앙": {
