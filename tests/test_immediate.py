@@ -530,7 +530,10 @@ def test_code_27000_result_includes_detection_and_release_dates() -> None:
         now=detected_at,
     )
 
-    result = publisher._restriction_result("restricted-id")
+    result = publisher._restriction_result(
+        "restricted-id",
+        now=detected_at + timedelta(days=1),
+    )
 
     assert "발견 2026-08-12" in result
     assert "제외 종료 2026-09-11" in result
