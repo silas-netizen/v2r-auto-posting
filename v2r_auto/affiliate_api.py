@@ -37,7 +37,7 @@ CAFE_DELAYS = {
     "쌍둥이맘 모여라": 22,
 }
 CCCANG_CURRENT_BOARD = {"menu_id": 328, "menu_name": "자유 수다방"}
-CCCANG_DAILY_HEAD = {"head_id": 1749, "head_name": "댓글 이벤트 X"}
+CCCANG_DAILY_HEAD = {"head_name": "일상"}
 TWIN_MOMS_BOARD = {
     "menu_id": 664,
     "menu_name": "⭐가족업체 자유게시판",
@@ -1667,7 +1667,6 @@ class AffiliateApiPublisher:
                 menu_id=int(CCCANG_CURRENT_BOARD["menu_id"]),
                 menu_name=str(CCCANG_CURRENT_BOARD["menu_name"]),
                 head_name=str(CCCANG_DAILY_HEAD["head_name"]),
-                head_id=int(CCCANG_DAILY_HEAD["head_id"]),
             )
             revision_destination_template = self._retarget_destination(
                 destination,

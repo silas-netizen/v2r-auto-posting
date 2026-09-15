@@ -293,10 +293,7 @@ def test_cccang_daily_and_revision_both_allow_comments() -> None:
         "menu_id": 328,
         "menu_name": "자유 수다방",
     }
-    assert CCCANG_DAILY_HEAD == {
-        "head_id": 1749,
-        "head_name": "댓글 이벤트 X",
-    }
+    assert CCCANG_DAILY_HEAD == {"head_name": "일상"}
     assert (
         AffiliateApiPublisher._write_options(enable_comment=True)[
             "enableComment"
@@ -450,12 +447,15 @@ def test_cccang_uses_current_board_for_daily_and_revision_reservations(
             head_name=None,
             head_id=None,
         ):
+            resolved_head_id = (
+                999 if head_name == "일상" and head_id is None else head_id
+            )
             result = dict(destination)
             result.update(
                 {
                     "menu_id": menu_id,
                     "menu_name": menu_name,
-                    "head_id": head_id if head_name else None,
+                    "head_id": resolved_head_id if head_name else None,
                     "head_name": head_name,
                 }
             )
@@ -517,13 +517,15 @@ def test_cccang_uses_current_board_for_daily_and_revision_reservations(
         "2026-08-13T09:10:00Z"
     )
     assert publisher.created[0]["destination"]["menu_id"] == 328
-    assert publisher.created[0]["destination"]["head_id"] == 1749
+    assert publisher.created[0]["destination"]["head_id"] == 999
+    assert publisher.created[0]["destination"]["head_name"] == "일상"
     assert publisher.created[0]["enable_comment"] is True
     assert publisher.created[1]["destination"]["start_at"] == (
         "2026-08-13T13:10:00Z"
     )
     assert publisher.created[1]["destination"]["menu_id"] == 328
     assert publisher.created[1]["destination"]["head_id"] is None
+    assert publisher.created[1]["destination"]["head_name"] is None
     assert publisher.created[1]["parent"] == "source-1"
     assert publisher.created[1]["enable_comment"] is True
 
