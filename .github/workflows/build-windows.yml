@@ -42,7 +42,8 @@ jobs:
       - name: Publish verified executable ZIPs
         if: >-
           github.ref_name == 'cursor/fix-seone-image-upload-3901' ||
-          github.ref_name == 'cursor/preserve-excel-row-order-3901'
+          github.ref_name == 'cursor/preserve-excel-row-order-3901' ||
+          github.ref_name == 'cursor/use-current-chat-board-415f'
         shell: pwsh
         run: |
           git fetch origin cursor/image-upload-downloads-3901
