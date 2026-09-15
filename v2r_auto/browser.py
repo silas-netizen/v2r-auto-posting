@@ -207,6 +207,25 @@ _SHEET_DATETIME_RE = re.compile(
 )
 
 
+def sheet_csv_looks_like_html(text: str) -> bool:
+    head = (text or "").lstrip()[:200].casefold()
+    return head.startswith("<!doctype") or head.startswith("<html")
+
+
+def sheet_csv_cell(text: str, column: str, row_number: int) -> str:
+    """Read one cell from a Sheets CSV export. Row 1 is the header."""
+    if sheet_csv_looks_like_html(text):
+        return ""
+    column_index = 0
+    for letter in column.upper():
+        column_index = column_index * 26 + (ord(letter) - ord("A") + 1)
+    column_index -= 1
+    rows = list(csv.reader(io.StringIO(text or "")))
+    if len(rows) >= row_number and len(rows[row_number - 1]) > column_index:
+        return rows[row_number - 1][column_index]
+    return ""
+
+
 def _sheet_datetime(value: str) -> datetime | None:
     match = _SHEET_DATETIME_RE.search(value or "")
     if not match:
@@ -494,18 +513,29 @@ class V2RBrowser:
         )
 
     def _type_into_selected_grid_cell(self, value: str) -> None:
-        """Overwrite the name-box-selected cell. Do not click the waffle."""
+        """Replace the name-box-selected cell. Do not open the waffle editor."""
         assert self.driver
         self._dismiss_sheet_clipboard_prompt()
+        editing = False
         try:
-            self.driver.execute_script(
-                """
-                const waffle = document.getElementById('waffle-rich-text-editor');
-                if (waffle) waffle.focus();
-                """
+            editing = bool(
+                self.driver.execute_script(
+                    """
+                    const waffle = document.getElementById('waffle-rich-text-editor');
+                    return !!(waffle && waffle === document.activeElement);
+                    """
+                )
             )
         except Exception:
-            pass
+            editing = False
+        if editing:
+            ActionChains(self.driver).key_down(Keys.CONTROL).send_keys("a").key_up(
+                Keys.CONTROL
+            ).perform()
+            time.sleep(0.05)
+        else:
+            ActionChains(self.driver).send_keys(Keys.DELETE).perform()
+            time.sleep(0.08)
         typed = False
         try:
             self.driver.execute_cdp_cmd("Input.insertText", {"text": value})
@@ -682,19 +712,37 @@ class V2RBrowser:
     def _exported_sheet_cell(
         self, sheet_url: str, column: str, row_number: int
     ) -> str:
-        column_index = 0
-        for letter in column.upper():
-            column_index = column_index * 26 + (ord(letter) - ord("A") + 1)
-        column_index -= 1
         export_url = self._sheet_export_url(sheet_url)
         separator = "&" if "?" in export_url else "?"
-        with urlopen(
-            f"{export_url}{separator}cache={time.time_ns()}", timeout=20
-        ) as response:
-            rows = list(csv.reader(io.StringIO(response.read().decode("utf-8-sig"))))
-        if len(rows) >= row_number and len(rows[row_number - 1]) > column_index:
-            return rows[row_number - 1][column_index]
-        return ""
+        busted = f"{export_url}{separator}cache={time.time_ns()}"
+        text = self._fetch_sheet_csv_in_browser(busted)
+        if not text:
+            with urlopen(busted, timeout=20) as response:
+                text = response.read().decode("utf-8-sig")
+        return sheet_csv_cell(text, column, row_number)
+
+    def _fetch_sheet_csv_in_browser(self, export_url: str) -> str:
+        """Read the CSV with the logged-in Chrome tab so private sheets work."""
+        if not self.driver:
+            return ""
+        try:
+            self._switch_to_handle(self.google_handle)
+            self.google_handle = self.driver.current_window_handle
+            self.driver.set_script_timeout(60)
+            text = self.driver.execute_async_script(
+                """
+                const url = arguments[0];
+                const done = arguments[1];
+                fetch(url, {credentials: 'include', cache: 'no-store'})
+                  .then((response) => response.text())
+                  .then((body) => done(body))
+                  .catch(() => done(''));
+                """,
+                export_url,
+            )
+        except Exception:
+            return ""
+        return str(text or "")
 
     def _sheet_cell_matches(
         self, sheet_url: str, column: str, row_number: int, expected: str
