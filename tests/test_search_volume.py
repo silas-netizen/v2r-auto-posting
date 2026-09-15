@@ -5,6 +5,7 @@ from urllib.error import HTTPError
 
 from datetime import datetime, timezone
 
+from v2r_auto.browser import sheet_csv_cell, sheet_csv_looks_like_html
 from v2r_auto.exposure import ExposureRow, naver_search_url
 from v2r_auto.exposure_notion import NotionExposureStore
 from v2r_auto.exposure_sheet import (
@@ -525,7 +526,49 @@ def test_sheet_store_keeps_writing_other_cells_after_one_fails() -> None:
         search_url=naver_search_url("비만"),
     )
     assert failed == 1
-    assert writer.writes == ["K", "J"]
+    assert writer.writes == ["K"]
+
+
+def test_sheet_store_skips_time_when_search_url_fails() -> None:
+    class FlakyWriter:
+        def __init__(self):
+            self.writes: list[str] = []
+
+        def write_cell(self, sheet_url, column, row_number, value):
+            if column == "I":
+                raise RuntimeError("시트 I2 저장에 3회 실패했습니다")
+            self.writes.append(column)
+
+    writer = FlakyWriter()
+    store = GoogleSheetExposureStore(
+        PATSOON_URL,
+        logging.getLogger("test"),
+        writer=writer,
+        now=lambda: datetime(2026, 9, 15, 12, 17, 48),
+    )
+    row = ExposureRow(
+        "2",
+        "비타민C",
+        "",
+        "",
+        "밀려남",
+        "G",
+        "select",
+        volume_property="K",
+        keyword_property="H",
+        keyword_type="rich_text",
+        edited_property="J",
+        search_url_property="I",
+    )
+    failed = store.update_volume_and_keyword(
+        row,
+        keyword=None,
+        search_volume=None,
+        volume_found=False,
+        search_url=naver_search_url("비타민C"),
+    )
+    assert failed == 1
+    assert writer.writes == []
 
 
 def test_filler_continues_after_one_row_write_fails() -> None:
@@ -643,10 +686,27 @@ def test_first_cell_write_overwrites_selected_grid_cell() -> None:
     assert "_formula_bar_matches" not in write
     assert "수식 입력줄에 값이 들어가지 않았습니다" not in source
     assert ".click()" not in grid
+    assert "waffle.focus()" not in grid
+    assert "Keys.DELETE" in grid
     assert "Input.insertText" in grid
     assert "Keys.TAB" in grid
+    assert "_fetch_sheet_csv_in_browser" in source
     assert "textarea.cell-input" not in find
     assert ".formula-content" not in find
     gui = Path("v2r_auto/gui_search_volume.py").read_text(encoding="utf-8")
-    assert "그 칸에 바로 덮어씁니다" in gui
+    assert "있던 값을 지우고" in gui
+    assert "시각은 건드리지 않습니다" in gui
     assert "시트보내기에 값이 남으면" in gui
+
+
+def test_sheet_csv_cell_reads_j_column_and_rejects_login_html() -> None:
+    csv_text = (
+        "키워드,통합검색,시각\n"
+        "비타민C,,2026-09-10 0:38:48\n"
+        "나이아신아마이드,https://search.naver.com/search.naver?query=x,2026-09-15 12:17:48\n"
+    )
+    assert sheet_csv_cell(csv_text, "C", 2) == "2026-09-10 0:38:48"
+    assert sheet_csv_cell(csv_text, "B", 2) == ""
+    assert sheet_csv_cell(csv_text, "C", 3) == "2026-09-15 12:17:48"
+    assert sheet_csv_looks_like_html("<!doctype html><html><body>로그인</body></html>")
+    assert sheet_csv_cell("<html><body>login</body></html>", "C", 2) == ""

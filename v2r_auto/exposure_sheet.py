@@ -353,7 +353,16 @@ class GoogleSheetExposureStore:
         )
         row_number = int(row.page_id)
         failed = 0
+        edited_col = (row.edited_property or "").upper()
         for write in writes:
+            is_time = bool(edited_col) and write.column.upper() == edited_col
+            if is_time and failed:
+                self.logger.info(
+                    "앞 칸을 못 넣어서 %s%s 시각은 그대로 둡니다",
+                    write.column,
+                    row_number,
+                )
+                continue
             try:
                 self.writer.write_cell(
                     self.sheet_url, write.column, row_number, write.value
