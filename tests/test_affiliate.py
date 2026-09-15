@@ -14,8 +14,8 @@ from v2r_auto.affiliate_api import (
     AffiliateDailyPending,
     CAFE_DESTINATIONS,
     CAFE_DELAYS,
+    CCCANG_CURRENT_BOARD,
     CCCANG_DAILY_HEAD,
-    CCCANG_OLD_BOARD,
     TWIN_MOMS_BOARD,
     _content_json,
 )
@@ -289,7 +289,10 @@ def test_cccang_daily_and_revision_both_allow_comments() -> None:
         "양평맘": 20,
         "쌍둥이맘 모여라": 22,
     }
-    assert CCCANG_OLD_BOARD["menu_id"] == 2458
+    assert CCCANG_CURRENT_BOARD == {
+        "menu_id": 328,
+        "menu_name": "자유 수다방",
+    }
     assert CCCANG_DAILY_HEAD == {
         "head_id": 1749,
         "head_name": "댓글 이벤트 X",
@@ -415,7 +418,7 @@ def test_missing_join_model_is_retryable_account_failure() -> None:
     assert retryable is True
 
 
-def test_affiliate_revision_uses_planned_daily_time_without_waiting(
+def test_cccang_uses_current_board_for_daily_and_revision_reservations(
     tmp_path: Path,
 ) -> None:
     class PairPublisher(AffiliateApiPublisher):
@@ -513,25 +516,16 @@ def test_affiliate_revision_uses_planned_daily_time_without_waiting(
     assert publisher.created[0]["destination"]["start_at"] == (
         "2026-08-13T09:10:00Z"
     )
-    assert publisher.created[0]["destination"]["menu_id"] == 2458
+    assert publisher.created[0]["destination"]["menu_id"] == 328
     assert publisher.created[0]["destination"]["head_id"] == 1749
     assert publisher.created[0]["enable_comment"] is True
     assert publisher.created[1]["destination"]["start_at"] == (
         "2026-08-13T13:10:00Z"
     )
-    assert publisher.created[1]["destination"]["menu_id"] == 2458
+    assert publisher.created[1]["destination"]["menu_id"] == 328
     assert publisher.created[1]["destination"]["head_id"] is None
     assert publisher.created[1]["parent"] == "source-1"
     assert publisher.created[1]["enable_comment"] is True
-
-    job.revision_board = "자유수다방"
-    moved_publisher = PairPublisher()
-    moved_publisher.publish(job, dry_run=False)
-
-    assert moved_publisher.created[0]["destination"]["menu_id"] == 2458
-    assert moved_publisher.created[1]["destination"]["menu_id"] == 328
-    assert moved_publisher.created[1]["destination"]["head_id"] is None
-
 
 def test_image_failure_happens_before_any_daily_reservation(
     tmp_path: Path,
