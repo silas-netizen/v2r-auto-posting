@@ -67,6 +67,38 @@ dist\V2R-Auto-Posting.exe
 
 GitHub Actions의 **Build Windows EXE** 작업에서도 Windows 실행 파일을 자동으로 생성합니다. 작업 화면의 Artifacts에서 `V2R-Auto-Posting-Windows`를 내려받을 수 있습니다.
 
+## 원격 통합 제어
+
+통합 제어 서버는 보안을 위해 `127.0.0.1:8765`에만 연결됩니다. 인터넷에서
+여러 PC로 접속할 때는 공인 인증서를 사용하는 Caddy, nginx 또는 Tailscale
+Serve를 같은 메인 PC에 두고 HTTPS 요청을 이 루프백 주소로 전달하세요.
+
+```powershell
+py main_control.py --public-host control.example.com --port 8765
+```
+
+- 공유기와 Windows 방화벽에는 프록시의 HTTPS 포트(보통 443)만 엽니다.
+- 애플리케이션 포트 8765는 포트 포워딩하거나 외부에 직접 노출하지 않습니다.
+- 프록시는 외부 `Host`를 유지하고, 내부 인증서는 프로그램 데이터 폴더의
+  `https\remote-control-cert.pem`을 신뢰하도록 설정합니다.
+- 공인 IP를 직접 사용하는 경우에도 브라우저가 신뢰하는 IP-SAN 인증서와
+  자동 갱신이 필요합니다. 불가능하면 Tailscale 같은 사설 연결을 사용하세요.
+
+## Playwright 웹 전용판
+
+이 브랜치는 `V2R-Playwright-Web.exe` 한 파일만 빌드합니다. 프로그램이
+`api-v2r.daboja.im`에 직접 HTTP 요청하지 않고, 지속 프로필의 Playwright
+Chromium에서 보이는 V2R 화면을 조작해 다음 작업을 처리합니다.
+
+- 수동 로그인 확인과 작업 창별 독립 로그인 프로필
+- Google Sheet 다운로드 및 D/F/H/I/J열 화면 기록
+- 자사 즉시·예약 발행과 예약 댓글
+- 제휴 일상 글 예약, 수정 글 예약, 계층형 예약 댓글
+- 포토워셔 처리 이미지의 SmartEditor 파일 첨부
+
+V2R 웹 페이지 자체가 정상 동작하기 위해 수행하는 브라우저 네트워크 요청은
+사이트 동작의 일부이며, 프로그램의 직접 API 호출과는 구분됩니다.
+
 ## 개발 실행
 
 Python 3.11 이상과 Chrome이 필요합니다.

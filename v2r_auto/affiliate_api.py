@@ -13,6 +13,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from .affiliate_errors import AffiliateDailyPending, AffiliateRunStopped
 from .cafe_catalog import CafeCatalogEntry, CafeCatalogService
 from .images import (
     GoogleDriveImageResolver,
@@ -37,8 +38,7 @@ CAFE_DELAYS = {
     "쌍둥이맘 모여라": 22,
 }
 CCCANG_CURRENT_BOARD = {"menu_id": 328, "menu_name": "자유 수다방"}
-CCCANG_OLD_BOARD = {"menu_id": 2458, "menu_name": "자유수다방(구)"}
-CCCANG_DAILY_HEAD = {"head_id": 1749, "head_name": "댓글 이벤트 X"}
+CCCANG_DAILY_HEAD = {"head_name": "일상"}
 TWIN_MOMS_BOARD = {
     "menu_id": 664,
     "menu_name": "⭐가족업체 자유게시판",
@@ -65,14 +65,6 @@ CAFE_DESTINATIONS = {
 
 
 class AffiliateApiError(RuntimeError):
-    pass
-
-
-class AffiliateDailyPending(AffiliateApiError):
-    pass
-
-
-class AffiliateRunStopped(AffiliateApiError):
     pass
 
 
@@ -223,26 +215,11 @@ class AffiliateApiPublisher:
     def _capture_authorization(self) -> None:
         if self.authorization:
             return
-        driver = self.browser.driver
-        if driver is None:
+        if self.browser is None:
             raise AffiliateApiError("Chrome이 열려 있지 않습니다")
-        driver.get_log("performance")
-        driver.get("https://v2r.daboja.im/nc/board?view=list")
-        time.sleep(1)
-        for entry in driver.get_log("performance"):
-            try:
-                message = json.loads(entry["message"])["message"]
-                request = message["params"]["request"]
-            except (KeyError, TypeError, json.JSONDecodeError):
-                continue
-            if message.get("method") != "Network.requestWillBeSent":
-                continue
-            if "api-v2r.daboja.im" not in request.get("url", ""):
-                continue
-            headers = request.get("headers", {})
-            token = headers.get("Authorization") or headers.get("authorization")
-            if token:
-                self.authorization = token
+        self.authorization = str(
+            self.browser.capture_v2r_authorization() or ""
+        )
         if not self.authorization:
             raise AffiliateApiError("V2R 로그인 정보를 확인하지 못했습니다. 다시 로그인하세요")
 
@@ -1665,20 +1642,14 @@ class AffiliateApiPublisher:
         if job.cafe == "씨씨앙":
             daily_destination_template = self._retarget_destination(
                 destination,
-                menu_id=int(CCCANG_OLD_BOARD["menu_id"]),
-                menu_name=str(CCCANG_OLD_BOARD["menu_name"]),
+                menu_id=int(CCCANG_CURRENT_BOARD["menu_id"]),
+                menu_name=str(CCCANG_CURRENT_BOARD["menu_name"]),
                 head_name=str(CCCANG_DAILY_HEAD["head_name"]),
-                head_id=int(CCCANG_DAILY_HEAD["head_id"]),
-            )
-            revision_board = (
-                CCCANG_CURRENT_BOARD
-                if job.revision_board.replace(" ", "") == "자유수다방"
-                else CCCANG_OLD_BOARD
             )
             revision_destination_template = self._retarget_destination(
                 destination,
-                menu_id=int(revision_board["menu_id"]),
-                menu_name=str(revision_board["menu_name"]),
+                menu_id=int(CCCANG_CURRENT_BOARD["menu_id"]),
+                menu_name=str(CCCANG_CURRENT_BOARD["menu_name"]),
                 head_name=None,
             )
         if dry_run:

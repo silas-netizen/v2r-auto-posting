@@ -865,6 +865,35 @@ def test_history_round_trip(tmp_path: Path) -> None:
     assert HistoryStore(path).contains(job)
 
 
+def test_history_parallel_writers_preserve_all_records(tmp_path: Path) -> None:
+    path = tmp_path / "history.json"
+    jobs = [
+        PostJob(
+            row_number=index,
+            keyword=f"키워드{index}",
+            title=f"제목{index}",
+            body=f"본문{index}",
+            cafe="카페",
+            board="게시판",
+            post_url=f"https://v2r.example/{index}",
+        )
+        for index in range(2, 12)
+    ]
+    stores = [HistoryStore(path) for _ in jobs]
+    threads = [
+        threading.Thread(target=store.record, args=(job,))
+        for store, job in zip(stores, jobs)
+    ]
+
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    reloaded = HistoryStore(path)
+    assert all(reloaded.contains(job) for job in jobs)
+
+
 def test_report_is_utf8_bom_text(tmp_path: Path) -> None:
     job = sample_job()
     job.status = JobStatus.SUCCESS
