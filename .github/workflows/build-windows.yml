@@ -40,6 +40,13 @@ jobs:
           python -m PyInstaller --noconfirm --clean v2r-immediate-posting.spec
           python -m PyInstaller --noconfirm --clean v2r-unified-control.spec
 
+      - name: Upload unified HTTPS control executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: V2R-Unified-Control
+          path: dist/V2R-Unified-Control.exe
+          if-no-files-found: error
+
       - name: Publish verified executable ZIPs
         if: >-
           github.ref_name == 'cursor/fix-seone-image-upload-3901' ||
