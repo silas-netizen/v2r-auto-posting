@@ -56,7 +56,7 @@ def test_https_control_server_serves_token_scoped_actions(
     try:
         with urlopen(server.url, context=context()) as response:
             assert response.status == 200
-            assert "V2R 통합 제어" in response.read().decode("utf-8")
+            assert "V2R Playwright 웹 제어" in response.read().decode("utf-8")
 
         configure = Request(
             server.url + "api/configure",

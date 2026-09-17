@@ -2,7 +2,7 @@
 
 from PyInstaller.utils.hooks import collect_all
 
-selenium_datas, selenium_binaries, selenium_hiddenimports = collect_all("selenium")
+playwright_datas, playwright_binaries, playwright_hiddenimports = collect_all("playwright")
 openpyxl_datas, openpyxl_binaries, openpyxl_hiddenimports = collect_all("openpyxl")
 pillow_datas, pillow_binaries, pillow_hiddenimports = collect_all("PIL")
 crypto_datas, crypto_binaries, crypto_hiddenimports = collect_all("cryptography")
@@ -11,19 +11,19 @@ a = Analysis(
     ["main_control.py"],
     pathex=[],
     binaries=(
-        selenium_binaries
+        playwright_binaries
         + openpyxl_binaries
         + pillow_binaries
         + crypto_binaries
     ),
     datas=(
-        selenium_datas
+        playwright_datas
         + openpyxl_datas
         + pillow_datas
         + crypto_datas
     ),
     hiddenimports=(
-        selenium_hiddenimports
+        playwright_hiddenimports
         + openpyxl_hiddenimports
         + pillow_hiddenimports
         + crypto_hiddenimports
@@ -31,7 +31,11 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        "selenium",
+        "v2r_auto.affiliate_api",
+        "v2r_auto.immediate_api",
+    ],
     noarchive=False,
     optimize=0,
 )
@@ -43,7 +47,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="V2R-Unified-Control",
+    name="V2R-Playwright-Web",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

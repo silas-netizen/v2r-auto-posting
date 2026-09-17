@@ -35,16 +35,16 @@ CONTROL_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>V2R 통합 제어</title>
+  <title>V2R Playwright 웹 제어</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <main>
     <header>
       <div>
-        <p class="eyebrow">LOCAL HTTPS CONTROL</p>
-        <h1>V2R 통합 제어</h1>
-        <p class="description">자사·제휴 작업 창과 진행 상태를 한곳에서 관리합니다.</p>
+        <p class="eyebrow">PLAYWRIGHT WEB ONLY · API OFF</p>
+        <h1>V2R Playwright 웹 제어</h1>
+        <p class="description">V2R API 없이 자사·제휴 작업을 Chrome 웹 화면으로 처리합니다.</p>
       </div>
       <span id="server-state" class="pill">연결 중</span>
     </header>

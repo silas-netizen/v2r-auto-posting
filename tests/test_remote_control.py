@@ -135,7 +135,7 @@ def test_remote_server_requires_setup_login_and_csrf(tmp_path: Path) -> None:
         body = response.read().decode()
         cookie = "; ".join(f"{item.name}={item.value}" for item in jar)
         assert "__Host-v2r_session=" in cookie
-        assert "V2R 통합 제어" in body
+        assert "V2R Playwright 웹 제어" in body
         csrf = re.search(
             r'<meta name="csrf-token" content="([^"]+)"',
             body,
