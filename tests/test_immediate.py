@@ -1376,3 +1376,26 @@ def test_failed_account_test_writes_only_result_column(tmp_path: Path) -> None:
     )
 
     assert browser.sheet_updates == [("H", 2, "V2R 미등록 계정")]
+
+
+def test_menu_permission_candidates_are_bounded_but_keep_fixed_accounts() -> None:
+    class Job:
+        def __init__(self, account: str):
+            self.account = account
+            self.status = JobStatus.PENDING
+
+    publisher = ImmediateApiPublisher(
+        None,
+        logging.getLogger("menu-candidate-limit-test"),
+    )
+    publisher.auto_account_limit = 4
+    eligible = [f"account-{index}" for index in range(50)]
+
+    candidates = publisher._bounded_menu_candidates(
+        eligible,
+        [Job("account-49")],
+    )
+
+    assert candidates[:10] == eligible[:10]
+    assert candidates[-1] == "account-49"
+    assert len(candidates) == 11
