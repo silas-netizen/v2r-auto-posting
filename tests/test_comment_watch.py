@@ -1,3 +1,6 @@
+import threading
+import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -10,14 +13,20 @@ from v2r_auto.comment_watch import (
     build_plan,
     cafe_article_url,
     decide_row,
+    format_wait_remaining,
     load_watch_rows,
+    next_cycle_wait_seconds,
+    next_daily_wait_seconds,
     other_member_comment_count,
     page_requires_cafe_login,
     parse_article_view,
+    parse_daily_time,
+    parse_repeat_minutes,
     plan_matches_sheet,
     source_id_from_url,
     user_facing_watch_error,
     v2r_article_is_gone,
+    wait_with_events,
 )
 from v2r_auto.sheets_write import (
     batch_update_url,
@@ -539,3 +548,88 @@ def test_cafe_login_error_still_stops_the_run(tmp_path: Path) -> None:
 
     with pytest.raises(CommentWatchError, match="로그인"):
         build_plan(headers, rows, payloads.__getitem__, check_cafe)
+
+
+def test_comment_watch_gui_has_auto_loop_controls() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "v2r_auto" / "gui_comment_watch.py"
+    ).read_text(encoding="utf-8")
+    assert "끝나면 다시" in source
+    assert "매일 이 시각에 시작" in source
+    assert "settings.json" in source
+    assert "next_cycle_wait_seconds" in source
+    assert "확인하기" in source
+
+
+def test_parse_repeat_minutes_and_daily_time() -> None:
+    assert parse_repeat_minutes("") == 60
+    assert parse_repeat_minutes("15") == 15
+    assert parse_daily_time("09:00") == (9, 0)
+    assert parse_daily_time("9:05") == (9, 5)
+    for value, needle in (("0", "1분 이상"), ("abc", "분만")):
+        try:
+            parse_repeat_minutes(value)
+        except ValueError as exc:
+            assert needle in str(exc)
+        else:
+            raise AssertionError(f"expected ValueError for {value!r}")
+    for value, needle in (("25:00", "00:00"), ("9시", "시:분"), ("", "시:분")):
+        try:
+            parse_daily_time(value)
+        except ValueError as exc:
+            assert needle in str(exc)
+        else:
+            raise AssertionError(f"expected ValueError for {value!r}")
+
+
+def test_next_cycle_wait_uses_daily_time_then_interval() -> None:
+    morning = datetime(2026, 9, 17, 8, 30, 0)
+    assert next_cycle_wait_seconds(
+        repeat_enabled=True,
+        repeat_minutes=15,
+        daily_enabled=True,
+        daily_time=(9, 0),
+        first_cycle=True,
+        now=morning,
+    ) == 30 * 60
+    assert next_cycle_wait_seconds(
+        repeat_enabled=True,
+        repeat_minutes=15,
+        daily_enabled=True,
+        daily_time=(9, 0),
+        first_cycle=False,
+        now=datetime(2026, 9, 17, 10, 0, 0),
+    ) == 15 * 60
+    assert next_cycle_wait_seconds(
+        repeat_enabled=False,
+        repeat_minutes=60,
+        daily_enabled=True,
+        daily_time=(9, 0),
+        first_cycle=False,
+        now=datetime(2026, 9, 17, 10, 0, 0),
+    ) == 23 * 3600
+    assert (
+        next_cycle_wait_seconds(
+            repeat_enabled=False,
+            repeat_minutes=60,
+            daily_enabled=False,
+            daily_time=None,
+            first_cycle=False,
+        )
+        is None
+    )
+    assert (
+        next_daily_wait_seconds(
+            9, 0, now=datetime(2026, 9, 17, 9, 0, 20), allow_grace=True
+        )
+        == 0
+    )
+    assert format_wait_remaining(90) == "1분 30초"
+
+
+def test_wait_with_events_stops_quickly() -> None:
+    stop = threading.Event()
+    threading.Timer(0.05, stop.set).start()
+    started = time.monotonic()
+    assert wait_with_events(2.0, stop_event=stop, step=0.02) is False
+    assert time.monotonic() - started < 1.0
