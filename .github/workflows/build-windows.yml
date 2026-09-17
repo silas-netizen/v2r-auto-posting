@@ -39,6 +39,16 @@ jobs:
           python -m PyInstaller --noconfirm --clean v2r-auto-affiliate.spec
           python -m PyInstaller --noconfirm --clean v2r-immediate-posting.spec
 
+      - name: Upload API optimized executables
+        if: github.ref_name == 'cursor/api-load-reduction-415f'
+        uses: actions/upload-artifact@v4
+        with:
+          name: V2R-API-Optimized-Windows
+          path: |
+            dist/V2R-API-Optimized-Affiliate.exe
+            dist/V2R-API-Optimized-Immediate.exe
+          if-no-files-found: error
+
       - name: Publish verified executable ZIPs
         if: >-
           github.ref_name == 'cursor/fix-seone-image-upload-3901' ||

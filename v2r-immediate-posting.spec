@@ -35,7 +35,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="V2R-Immediate-Posting",
+    name="V2R-API-Optimized-Immediate",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -63,6 +63,8 @@ Windows PowerShell에서:
 
 ```text
 dist\V2R-Auto-Posting.exe
+dist\V2R-API-Optimized-Affiliate.exe
+dist\V2R-API-Optimized-Immediate.exe
 ```
 
 GitHub Actions의 **Build Windows EXE** 작업에서도 Windows 실행 파일을 자동으로 생성합니다. 작업 화면의 Artifacts에서 `V2R-Auto-Posting-Windows`를 내려받을 수 있습니다.

@@ -10,5 +10,5 @@ py -m PyInstaller --noconfirm --clean "v2r-immediate-posting.spec"
 
 Write-Host ""
 Write-Host "빌드 완료: dist\V2R-Auto-Posting.exe"
-Write-Host "빌드 완료: dist\V2R-Affiliate-Revision.exe"
-Write-Host "빌드 완료: dist\V2R-Immediate-Posting.exe"
+Write-Host "빌드 완료: dist\V2R-API-Optimized-Affiliate.exe"
+Write-Host "빌드 완료: dist\V2R-API-Optimized-Immediate.exe"
