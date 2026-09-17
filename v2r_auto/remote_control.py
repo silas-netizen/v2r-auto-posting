@@ -446,10 +446,21 @@ class RemoteHttpsControlServer:
                     self._json(404, {"error": "not found"})
 
             def do_POST(self) -> None:
-                if not self._host_allowed():
+                host_allowed = self._host_allowed()
+                origin_allowed = self._origin_allowed()
+                # region agent log
+                open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId":"H1,H2,H5","location":"remote_control.py:Handler.do_POST:entry","message":"POST routing inputs","data":{"path":self.path,"host":self.headers.get("Host",""),"origin":self.headers.get("Origin",""),"contentType":self.headers.get("Content-Type",""),"contentLength":self.headers.get("Content-Length"),"secFetchSite":self.headers.get("Sec-Fetch-Site"),"serverPort":server_ref.port,"hostAllowed":host_allowed,"originAllowed":origin_allowed},"timestamp":time.time_ns()//1_000_000})+"\n")
+                # endregion
+                if not host_allowed:
+                    # region agent log
+                    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId":"H2","location":"remote_control.py:Handler.do_POST:host_rejected","message":"Host validation rejected POST","data":{"path":self.path},"timestamp":time.time_ns()//1_000_000})+"\n")
+                    # endregion
                     self._json(421, {"error": "허용되지 않은 접속 주소입니다"})
                     return
-                if not self._origin_allowed():
+                if not origin_allowed:
+                    # region agent log
+                    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId":"H1","location":"remote_control.py:Handler.do_POST:origin_rejected","message":"Origin validation rejected POST","data":{"path":self.path,"serverPort":server_ref.port},"timestamp":time.time_ns()//1_000_000})+"\n")
+                    # endregion
                     self._json(403, {"error": "요청 출처가 올바르지 않습니다"})
                     return
                 address = self.client_address[0]
@@ -479,7 +490,11 @@ class RemoteHttpsControlServer:
                     self._redirect("/")
                     return
                 if self.path == "/auth/login":
-                    if not server_ref.rate_limiter.allowed(address):
+                    rate_allowed = server_ref.rate_limiter.allowed(address)
+                    # region agent log
+                    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId":"H4","location":"remote_control.py:Handler.do_POST:login_rate_check","message":"Login rate-limit decision","data":{"rateAllowed":rate_allowed,"clientIsLoopback":self._is_loopback()},"timestamp":time.time_ns()//1_000_000})+"\n")
+                    # endregion
+                    if not rate_allowed:
                         self._json(429, {"error": "로그인 시도가 잠시 제한됐습니다"})
                         return
                     try:
@@ -487,7 +502,14 @@ class RemoteHttpsControlServer:
                     except (UnicodeDecodeError, ValueError) as exc:
                         self._json(400, {"error": str(exc)})
                         return
-                    if not server_ref.credentials.verify(password):
+                    # region agent log
+                    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId":"H5","location":"remote_control.py:Handler.do_POST:form_parsed","message":"Login form parsed","data":{"passwordPresent":bool(password),"passwordLength":len(password)},"timestamp":time.time_ns()//1_000_000})+"\n")
+                    # endregion
+                    verified = server_ref.credentials.verify(password)
+                    # region agent log
+                    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId":"H3","location":"remote_control.py:Handler.do_POST:credential_verified","message":"Credential verification result","data":{"configured":server_ref.credentials.configured,"credentialFile":str(server_ref.credentials.path),"verified":verified},"timestamp":time.time_ns()//1_000_000})+"\n")
+                    # endregion
+                    if not verified:
                         server_ref.rate_limiter.fail(address)
                         body = LOGIN_HTML.format(
                             message="비밀번호가 올바르지 않습니다."
@@ -496,6 +518,9 @@ class RemoteHttpsControlServer:
                         return
                     server_ref.rate_limiter.succeed(address)
                     session_id, _session = server_ref.sessions.create()
+                    # region agent log
+                    open("/opt/cursor/logs/debug.log", "a").write(json.dumps({"hypothesisId":"H3,H4","location":"remote_control.py:Handler.do_POST:session_created","message":"Login accepted and session created","data":{"sessionCreated":bool(session_id),"redirect":"/"},"timestamp":time.time_ns()//1_000_000})+"\n")
+                    # endregion
                     self._redirect(
                         "/",
                         "__Host-v2r_session="
