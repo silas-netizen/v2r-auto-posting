@@ -26,7 +26,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="V2R-Affiliate-Revision",
+    name="V2R-API-Optimized-Affiliate",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -168,6 +168,7 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
             "/naver_cafes/naver_join_cafe",
             query={"cafe_id": cafe_id},
         )
+        self._member_status_cache[cafe_id] = status
         joined = self._joined_accounts(status)
         restricted = self.restrictions.blocked_accounts()
         eligible = [
@@ -235,11 +236,36 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                     item.writable_accounts.append(account)
         return list(menu_map.values()), healthy
 
+    def _bounded_menu_candidates(
+        self,
+        eligible: list[str],
+        jobs: list[ImmediateJob],
+    ) -> list[str]:
+        candidate_limit = max(10, self.auto_account_limit * 2)
+        fixed_accounts = {
+            job.account
+            for job in jobs
+            if job.status == JobStatus.PENDING and job.account
+        }
+        candidates = list(eligible[:candidate_limit])
+        candidates.extend(
+            account
+            for account in eligible
+            if account in fixed_accounts and account not in candidates
+        )
+        return candidates
+
     def _prepare_account_tests(
         self,
         jobs: list[ImmediateJob],
         cafes: list[CafeCatalogEntry],
     ) -> None:
+        if not any(
+            job.status == JobStatus.PENDING
+            and job.source_kind == "account_test"
+            for job in jobs
+        ):
+            return
         test_cafes = [
             cafe for cafe in cafes if cafe.cafe_id in TEST_CAFE_IDS
         ]
@@ -402,7 +428,24 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                         job.message = "브랜드 원고는 자사 카페에만 발행할 수 있습니다"
 
             eligible, _joined = self._eligible_accounts(cafe.cafe_id)
-            menus, healthy = self._load_menus(cafe.cafe_id, eligible)
+            # Menu permissions are account-specific, but scanning every V2R
+            # account creates a large request burst. Inspect a bounded rotation
+            # pool plus explicitly requested accounts.
+            menu_candidates = self._bounded_menu_candidates(
+                eligible,
+                cafe_jobs,
+            )
+            if len(menu_candidates) < len(eligible):
+                self.logger.info(
+                    "%s 게시판 권한 조회를 %s/%s개 계정으로 제한합니다",
+                    cafe.name,
+                    len(menu_candidates),
+                    len(eligible),
+                )
+            menus, healthy = self._load_menus(
+                cafe.cafe_id,
+                menu_candidates,
+            )
             if not healthy:
                 raise AffiliateApiError(
                     f"{cafe.name}에 로그인 가능한 작성계정이 없습니다"
@@ -585,7 +628,7 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         if not unique_urls:
             return {}
         self._capture_authorization()
-        worker_count = min(6, len(unique_urls))
+        worker_count = min(2, len(unique_urls))
         pending_urls = list(unique_urls)
         results: dict[str, dict[str, str]] = {}
         deadline = time.monotonic() + 8
@@ -822,12 +865,14 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         self,
         source_id: str,
         job: ImmediateJob,
+        detail: dict[str, Any] | None = None,
     ) -> None:
-        detail = self._request(
-            "GET",
-            "/naver_cafe_articles/article",
-            query={"source_id": source_id},
-        )
+        if detail is None:
+            detail = self._request(
+                "GET",
+                "/naver_cafe_articles/article",
+                query={"source_id": source_id},
+            )
         source = detail["naver_cafe_article_source"]
         destination = detail["naver_cafe_article_destination"]
         comments = detail.get("naver_cafe_article_source_comments") or []
@@ -930,9 +975,14 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                     ("DONE",) if is_immediate else ("RESERVED", "DONE")
                 ),
             )
+            detail = None
             if is_immediate:
-                self._wait_for_written_at(source_id, job.cafe_id)
-            self._verify_immediate(source_id, job)
+                _written_at, detail = self._wait_for_written_at(
+                    source_id,
+                    job.cafe_id,
+                    return_detail=True,
+                )
+            self._verify_immediate(source_id, job, detail=detail)
         except Exception as exc:
             error_text = str(exc)
             if "27000" in error_text or "게시글 작성 및 카페" in error_text:

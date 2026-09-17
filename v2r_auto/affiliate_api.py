@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import random
 import re
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -23,6 +24,35 @@ from .models import AffiliateJob, JobStatus
 
 
 API_ROOT = "https://api-v2r.daboja.im"
+API_MIN_REQUEST_INTERVAL_SECONDS = 0.25
+API_CACHE_TTL_SECONDS = 300.0
+API_CACHEABLE_GET_PATHS = {
+    "/navers/accounts",
+    "/naver_cafes/naver_join_cafes",
+    "/naver_cafes/menus",
+    "/naver_cafes/heads",
+}
+
+
+class _ApiRequestGate:
+    """Limit aggregate request bursts from all parallel browser workers."""
+
+    def __init__(self, min_interval: float):
+        self.min_interval = min_interval
+        self._lock = threading.Lock()
+        self._next_at = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            delay = self._next_at - now
+            if delay > 0:
+                time.sleep(delay)
+                now = time.monotonic()
+            self._next_at = max(now, self._next_at) + self.min_interval
+
+
+_API_REQUEST_GATE = _ApiRequestGate(API_MIN_REQUEST_INTERVAL_SECONDS)
 COMMENT_ACCOUNTS = (
     "quilliant",
     "hunnede",
@@ -207,6 +237,9 @@ class AffiliateApiPublisher:
         self.blocked_accounts: set[str] = set()
         self.used_accounts: set[str] = set()
         self.comment_slots: dict[str, set[datetime]] = {}
+        self._get_cache: dict[str, tuple[float, Any]] = {}
+        self._get_cache_lock = threading.Lock()
+        self._member_status_cache: dict[int, Any] = {}
         self.image_resolver = (
             GoogleDriveImageResolver(
                 self.browser.config.download_dir,
@@ -254,12 +287,17 @@ class AffiliateApiPublisher:
         query: dict[str, Any] | None = None,
         *,
         retry_auth: bool = True,
-        max_attempts: int = 5,
+        max_attempts: int = 3,
         request_timeout: float = 30,
     ) -> Any:
         url = API_ROOT + path
         if query:
             url += "?" + urlencode(query)
+        if method == "GET" and path in API_CACHEABLE_GET_PATHS:
+            with self._get_cache_lock:
+                cached = self._get_cache.get(url)
+                if cached and cached[0] > time.monotonic():
+                    return deepcopy(cached[1])
         data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode()
         request = Request(
             url,
@@ -270,9 +308,10 @@ class AffiliateApiPublisher:
                 "Content-Type": "application/json",
             },
         )
-        delays = (10, 30, 120, 300)
+        delays = (10, 30)
         for attempt in range(max_attempts):
             try:
+                _API_REQUEST_GATE.wait()
                 with urlopen(request, timeout=request_timeout) as response:
                     raw = response.read()
                 break
@@ -292,12 +331,21 @@ class AffiliateApiPublisher:
                         payload,
                         query,
                         retry_auth=False,
+                        max_attempts=max_attempts,
+                        request_timeout=request_timeout,
                     )
                 if (
                     (exc.code == 429 or exc.code >= 500)
                     and attempt < max_attempts - 1
                 ):
-                    delay = delays[attempt]
+                    retry_after = (
+                        (exc.headers or {}).get("Retry-After", "").strip()
+                    )
+                    delay = (
+                        min(900, int(retry_after))
+                        if retry_after.isdigit()
+                        else delays[min(attempt, len(delays) - 1)]
+                    )
                     self.logger.warning(
                         "V2R 일시 오류 %s: %s초 후 재시도 (%s/%s)",
                         exc.code,
@@ -312,7 +360,7 @@ class AffiliateApiPublisher:
                 ) from exc
             except (URLError, TimeoutError) as exc:
                 if attempt < max_attempts - 1:
-                    delay = delays[attempt]
+                    delay = delays[min(attempt, len(delays) - 1)]
                     self.logger.warning(
                         "네트워크 오류: %s초 후 재시도 (%s/%s)",
                         delay,
@@ -324,7 +372,14 @@ class AffiliateApiPublisher:
                 raise AffiliateApiError(f"V2R 네트워크 요청 실패: {path}") from exc
         else:
             raise AffiliateApiError(f"V2R 요청 재시도 실패: {path}")
-        return json.loads(raw) if raw else None
+        result = json.loads(raw) if raw else None
+        if method == "GET" and path in API_CACHEABLE_GET_PATHS:
+            with self._get_cache_lock:
+                self._get_cache[url] = (
+                    time.monotonic() + API_CACHE_TTL_SECONDS,
+                    deepcopy(result),
+                )
+        return result
 
     @staticmethod
     def _source_id_from_url(url: str) -> str:
@@ -363,7 +418,7 @@ class AffiliateApiPublisher:
         if not unique_urls:
             return {}
         self._capture_authorization()
-        worker_count = min(6, len(unique_urls))
+        worker_count = min(2, len(unique_urls))
         pending_urls = list(unique_urls)
         results: dict[str, bool | None] = {}
         deadline = time.monotonic() + 8
@@ -517,10 +572,12 @@ class AffiliateApiPublisher:
     def _last_used(self, cafe_id: int) -> dict[str, str]:
         rows: list[dict[str, Any]] = []
         token: str | None = None
-        for _ in range(50):
+        # Recent usage is only a rotation hint. Limiting pagination prevents one
+        # startup from scanning months of history and flooding the V2R server.
+        for _ in range(5):
             query: dict[str, Any] = {
                 "cafe_id": cafe_id,
-                "days_ago": 180,
+                "days_ago": 30,
                 "include_reserve": "true",
             }
             if token:
@@ -624,6 +681,7 @@ class AffiliateApiPublisher:
             status_data = self._request(
                 "GET", "/naver_cafes/naver_join_cafe", query={"cafe_id": cafe_id}
             )
+            self._member_status_cache[cafe_id] = status_data
             joined = {
                 str(item["login_id"]): item
                 for item in _walk_dicts(status_data)
@@ -794,11 +852,14 @@ class AffiliateApiPublisher:
         failed_jobs: list[Any] = []
         for (cafe_name, cafe_id), cafe_jobs in pending_by_cafe.items():
             assigned_accounts = {job.account for job in cafe_jobs}
-            status = self._request(
-                "GET",
-                "/naver_cafes/naver_join_cafe",
-                query={"cafe_id": cafe_id},
-            )
+            status = self._member_status_cache.get(cafe_id)
+            if status is None:
+                status = self._request(
+                    "GET",
+                    "/naver_cafes/naver_join_cafe",
+                    query={"cafe_id": cafe_id},
+                )
+                self._member_status_cache[cafe_id] = status
             rows = self._account_rows(status)
             missing = sorted(
                 account
@@ -852,6 +913,7 @@ class AffiliateApiPublisher:
                     "/naver_cafes/naver_join_cafe",
                     query={"cafe_id": cafe_id},
                 )
+                self._member_status_cache[cafe_id] = refreshed
                 refreshed_rows = self._account_rows(refreshed)
                 unresolved = {
                     account
@@ -994,11 +1056,14 @@ class AffiliateApiPublisher:
                     self._delete_source(str(item["source_id"]))
 
     def _member(self, cafe_id: int, account: str) -> dict[str, str]:
-        cafe = self._request(
-            "GET",
-            "/naver_cafes/naver_join_cafe",
-            query={"cafe_id": cafe_id},
-        )
+        cafe = self._member_status_cache.get(cafe_id)
+        if cafe is None:
+            cafe = self._request(
+                "GET",
+                "/naver_cafes/naver_join_cafe",
+                query={"cafe_id": cafe_id},
+            )
+            self._member_status_cache[cafe_id] = cafe
         candidate = next(
             (
                 item for item in _walk_dicts(cafe)
@@ -1141,13 +1206,23 @@ class AffiliateApiPublisher:
         cafe_id: int,
         expected_start_at: datetime | None = None,
         wait_control=None,
-    ) -> datetime:
+        *,
+        return_detail: bool = False,
+    ) -> datetime | tuple[datetime, dict[str, Any]]:
         wait_seconds = 90.0
         if expected_start_at is not None:
             remaining = (
                 expected_start_at - datetime.now(timezone.utc)
             ).total_seconds()
             wait_seconds = max(wait_seconds, remaining + 30 * 60)
+            while remaining > 15:
+                if wait_control:
+                    wait_control()
+                time.sleep(min(30, remaining - 15))
+                remaining = (
+                    expected_start_at - datetime.now(timezone.utc)
+                ).total_seconds()
+            wait_seconds = 30 * 60 + 15
         deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline:
             if wait_control:
@@ -1157,10 +1232,18 @@ class AffiliateApiPublisher:
                     "GET",
                     "/naver_cafe_articles/article",
                     query={"source_id": source_id},
+                    max_attempts=1,
+                    request_timeout=8,
                 )
             except AffiliateApiError as exc:
-                if "(404)" in str(exc):
-                    time.sleep(2)
+                text = str(exc)
+                if (
+                    "(404)" in text
+                    or "(429)" in text
+                    or re.search(r"\(5\d\d\)", text)
+                    or "네트워크 요청 실패" in text
+                ):
+                    time.sleep(10 if "(429)" in text else 5)
                     continue
                 raise
             source = detail.get("naver_cafe_article_source") or {}
@@ -1175,11 +1258,14 @@ class AffiliateApiPublisher:
                 or source.get("created_at")
             )
             if history_status in {"DONE", "SUCCESS"}:
-                if written_raw:
-                    return datetime.fromisoformat(
+                written_at = (
+                    datetime.fromisoformat(
                         str(written_raw).replace("Z", "+00:00")
                     )
-                return datetime.now(timezone.utc)
+                    if written_raw
+                    else datetime.now(timezone.utc)
+                )
+                return (written_at, detail) if return_detail else written_at
             if history_status == "FAIL" or status == "FAIL":
                 reason = str(
                     article_history.get("fail_reason")
@@ -1190,8 +1276,9 @@ class AffiliateApiPublisher:
                 )
                 raise AffiliateApiError(f"일상 글 발행 실패: {reason}")
             if not article_history and status == "DONE":
-                return datetime.now(timezone.utc)
-            time.sleep(2)
+                written_at = datetime.now(timezone.utc)
+                return (written_at, detail) if return_detail else written_at
+            time.sleep(5)
         raise AffiliateDailyPending(
             "일상 글이 예약시간 이후 30분 동안 예약대기 상태입니다. "
             "예약은 유지하며 다음 실행에서 다시 확인합니다"
