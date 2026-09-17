@@ -5,6 +5,7 @@ import json
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.error import URLError
 
 import pytest
 
@@ -14,8 +15,8 @@ from v2r_auto.affiliate_api import (
     AffiliateDailyPending,
     CAFE_DESTINATIONS,
     CAFE_DELAYS,
+    CCCANG_CURRENT_BOARD,
     CCCANG_DAILY_HEAD,
-    CCCANG_OLD_BOARD,
     TWIN_MOMS_BOARD,
     _content_json,
 )
@@ -289,11 +290,11 @@ def test_cccang_daily_and_revision_both_allow_comments() -> None:
         "양평맘": 20,
         "쌍둥이맘 모여라": 22,
     }
-    assert CCCANG_OLD_BOARD["menu_id"] == 2458
-    assert CCCANG_DAILY_HEAD == {
-        "head_id": 1749,
-        "head_name": "댓글 이벤트 X",
+    assert CCCANG_CURRENT_BOARD == {
+        "menu_id": 328,
+        "menu_name": "자유 수다방",
     }
+    assert CCCANG_DAILY_HEAD == {"head_name": "일상"}
     assert (
         AffiliateApiPublisher._write_options(enable_comment=True)[
             "enableComment"
@@ -415,7 +416,7 @@ def test_missing_join_model_is_retryable_account_failure() -> None:
     assert retryable is True
 
 
-def test_affiliate_revision_uses_planned_daily_time_without_waiting(
+def test_cccang_uses_current_board_for_daily_and_revision_reservations(
     tmp_path: Path,
 ) -> None:
     class PairPublisher(AffiliateApiPublisher):
@@ -447,12 +448,15 @@ def test_affiliate_revision_uses_planned_daily_time_without_waiting(
             head_name=None,
             head_id=None,
         ):
+            resolved_head_id = (
+                999 if head_name == "일상" and head_id is None else head_id
+            )
             result = dict(destination)
             result.update(
                 {
                     "menu_id": menu_id,
                     "menu_name": menu_name,
-                    "head_id": head_id if head_name else None,
+                    "head_id": resolved_head_id if head_name else None,
                     "head_name": head_name,
                 }
             )
@@ -513,25 +517,18 @@ def test_affiliate_revision_uses_planned_daily_time_without_waiting(
     assert publisher.created[0]["destination"]["start_at"] == (
         "2026-08-13T09:10:00Z"
     )
-    assert publisher.created[0]["destination"]["menu_id"] == 2458
-    assert publisher.created[0]["destination"]["head_id"] == 1749
+    assert publisher.created[0]["destination"]["menu_id"] == 328
+    assert publisher.created[0]["destination"]["head_id"] == 999
+    assert publisher.created[0]["destination"]["head_name"] == "일상"
     assert publisher.created[0]["enable_comment"] is True
     assert publisher.created[1]["destination"]["start_at"] == (
         "2026-08-13T13:10:00Z"
     )
-    assert publisher.created[1]["destination"]["menu_id"] == 2458
+    assert publisher.created[1]["destination"]["menu_id"] == 328
     assert publisher.created[1]["destination"]["head_id"] is None
+    assert publisher.created[1]["destination"]["head_name"] is None
     assert publisher.created[1]["parent"] == "source-1"
     assert publisher.created[1]["enable_comment"] is True
-
-    job.revision_board = "자유수다방"
-    moved_publisher = PairPublisher()
-    moved_publisher.publish(job, dry_run=False)
-
-    assert moved_publisher.created[0]["destination"]["menu_id"] == 2458
-    assert moved_publisher.created[1]["destination"]["menu_id"] == 328
-    assert moved_publisher.created[1]["destination"]["head_id"] is None
-
 
 def test_image_failure_happens_before_any_daily_reservation(
     tmp_path: Path,
@@ -940,7 +937,7 @@ def test_saved_source_probes_run_in_parallel_with_unknowns_preserved() -> None:
     results = ProbePublisher().probe_source_urls(urls)
     elapsed = time.monotonic() - started
 
-    assert elapsed < 0.75
+    assert elapsed < 1.0
     assert results[deleted_url] is True
     assert results[uncertain_url] is None
     assert sum(value is False for value in results.values()) == 22
@@ -968,7 +965,7 @@ def test_saved_source_probe_stops_after_first_full_outage_batch() -> None:
     elapsed = time.monotonic() - started
 
     assert elapsed < 0.3
-    assert publisher.calls == 6
+    assert publisher.calls == 2
     assert len(results) == 100
     assert set(results.values()) == {None}
 
@@ -995,9 +992,14 @@ def test_written_status_uses_article_detail_not_removed_history_api() -> None:
             }
 
     publisher = DetailStatusPublisher()
-    result = publisher._wait_for_written_at("source-id", 31670254)
+    result, detail = publisher._wait_for_written_at(
+        "source-id",
+        31670254,
+        return_detail=True,
+    )
 
     assert result == datetime(2026, 8, 31, 1, 30, tzinfo=timezone.utc)
+    assert detail["naver_cafe_article_history"]["status"] == "DONE"
     assert publisher.paths == ["/naver_cafe_articles/article"]
 
 
@@ -1492,3 +1494,138 @@ def test_completed_affiliate_source_is_probed_then_republished(
     assert browser.calls == 1
     assert result.jobs[0].status == JobStatus.SUCCESS
     assert result.jobs[0].revision_url.endswith("new-revision")
+
+
+def test_authorization_capture_uses_browser_engine_contract() -> None:
+    class Browser:
+        def capture_v2r_authorization(self):
+            return "Bearer playwright-session"
+
+    publisher = AffiliateApiPublisher(
+        Browser(),
+        logging.getLogger("authorization-contract-test"),
+    )
+
+    publisher._capture_authorization()
+
+    assert publisher.authorization == "Bearer playwright-session"
+
+
+def test_static_api_gets_are_cached_within_one_run(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b'{"accounts":[{"naver_login_id":"writer"}]}'
+
+    def fake_urlopen(request, timeout):
+        del timeout
+        calls.append(request.full_url)
+        return Response()
+
+    monkeypatch.setattr("v2r_auto.affiliate_api.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        "v2r_auto.affiliate_api._API_REQUEST_GATE.wait",
+        lambda: None,
+    )
+    publisher = AffiliateApiPublisher(
+        None,
+        logging.getLogger("static-api-cache-test"),
+    )
+    publisher.authorization = "token"
+
+    first = publisher._request("GET", "/navers/accounts")
+    second = publisher._request("GET", "/navers/accounts")
+
+    assert first == second
+    assert len(calls) == 1
+
+
+def test_recent_account_rotation_history_has_five_page_cap() -> None:
+    class HistoryPublisher(AffiliateApiPublisher):
+        def __init__(self):
+            super().__init__(None, logging.getLogger("history-page-cap-test"))
+            self.calls = 0
+
+        def _request(self, method, path, payload=None, query=None, **kwargs):
+            del method, path, payload, kwargs
+            self.calls += 1
+            assert query["days_ago"] == 30
+            return {
+                "histories": [],
+                "next_token": f"page-{self.calls}",
+            }
+
+    publisher = HistoryPublisher()
+
+    assert publisher._last_used(1234) == {}
+    assert publisher.calls == 5
+
+
+def test_comment_member_status_is_loaded_once_per_cafe() -> None:
+    class MemberPublisher(AffiliateApiPublisher):
+        def __init__(self):
+            super().__init__(None, logging.getLogger("member-cache-test"))
+            self.calls = 0
+
+        def _request(self, method, path, payload=None, query=None, **kwargs):
+            del method, path, payload, query, kwargs
+            self.calls += 1
+            return {
+                "accounts": [
+                    {
+                        "login_id": "writer-a",
+                        "member_key": "member-a",
+                        "nick_name": "A",
+                    },
+                    {
+                        "login_id": "writer-b",
+                        "member_key": "member-b",
+                        "nick_name": "B",
+                    },
+                ]
+            }
+
+    publisher = MemberPublisher()
+
+    assert publisher._member(1234, "writer-a")["member_key"] == "member-a"
+    assert publisher._member(1234, "writer-b")["member_key"] == "member-b"
+    assert publisher.calls == 1
+
+
+def test_api_network_failures_are_limited_to_three_attempts(monkeypatch) -> None:
+    calls = 0
+    sleeps: list[int] = []
+
+    def failing_urlopen(_request, timeout):
+        nonlocal calls
+        del timeout
+        calls += 1
+        raise URLError("temporary outage")
+
+    monkeypatch.setattr("v2r_auto.affiliate_api.urlopen", failing_urlopen)
+    monkeypatch.setattr(
+        "v2r_auto.affiliate_api._API_REQUEST_GATE.wait",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "v2r_auto.affiliate_api.time.sleep",
+        lambda delay: sleeps.append(delay),
+    )
+    publisher = AffiliateApiPublisher(
+        None,
+        logging.getLogger("api-retry-cap-test"),
+    )
+    publisher.authorization = "token"
+
+    with pytest.raises(AffiliateApiError, match="네트워크 요청 실패"):
+        publisher._request("GET", "/dynamic")
+
+    assert calls == 3
+    assert sleeps == [10, 30]

@@ -66,7 +66,16 @@ def assign_daily_posts(
 ) -> None:
     """Randomly assign unique same-cafe daily posts for this run."""
     randomizer = rng or random.SystemRandom()
-    used_posts: set[tuple[int, str, str, str]] = set()
+    used_posts: set[tuple[int, str, str, str]] = {
+        (
+            job.daily_post.row_number,
+            job.daily_post.cafe,
+            job.daily_post.title,
+            job.daily_post.body,
+        )
+        for job in jobs
+        if job.daily_post is not None
+    }
     for cafe, source_cafe in DAILY_POST_SOURCE_CAFES.items():
         cafe_jobs = [
             job
@@ -74,6 +83,7 @@ def assign_daily_posts(
             if job.cafe == cafe
             and not job.completion_url
             and job.status == JobStatus.PENDING
+            and job.daily_post is None
         ]
         candidates = [
             post

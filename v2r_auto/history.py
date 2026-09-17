@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from pathlib import Path
 
 from .models import PostJob
@@ -11,22 +12,39 @@ class HistoryCorruptedError(RuntimeError):
     pass
 
 
+_history_locks_guard = threading.Lock()
+_history_locks: dict[Path, threading.RLock] = {}
+
+
+def _history_lock(path: Path) -> threading.RLock:
+    resolved = path.resolve()
+    with _history_locks_guard:
+        return _history_locks.setdefault(resolved, threading.RLock())
+
+
 class HistoryStore:
     def __init__(self, path: Path):
         self.path = path
+        self._lock = _history_lock(path)
         self._items: dict[str, dict[str, str]] = {}
-        if path.exists():
+        self._reload()
+
+    def _reload(self) -> None:
+        if self.path.exists():
             try:
-                loaded = json.loads(path.read_text(encoding="utf-8"))
+                loaded = json.loads(self.path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError) as exc:
                 raise HistoryCorruptedError(
-                    f"중복 이력 파일을 읽지 못했습니다. 파일을 확인하세요: {path}"
+                    "중복 이력 파일을 읽지 못했습니다. "
+                    f"파일을 확인하세요: {self.path}"
                 ) from exc
             if not isinstance(loaded, dict):
                 raise HistoryCorruptedError(
-                    f"중복 이력 파일 형식이 올바르지 않습니다: {path}"
+                    f"중복 이력 파일 형식이 올바르지 않습니다: {self.path}"
                 )
             self._items = loaded
+        else:
+            self._items = {}
 
     @staticmethod
     def key(job: PostJob) -> str:
@@ -37,34 +55,42 @@ class HistoryStore:
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def contains(self, job: PostJob) -> bool:
-        return self.key(job) in self._items
+        with self._lock:
+            self._reload()
+            return self.key(job) in self._items
 
     def get(self, job: PostJob) -> dict[str, str] | None:
-        record = self._items.get(self.key(job))
-        return dict(record) if record else None
+        with self._lock:
+            self._reload()
+            record = self._items.get(self.key(job))
+            return dict(record) if record else None
 
     def record(self, job: PostJob) -> None:
-        self._items[self.key(job)] = {
-            "title": job.title,
-            "cafe": job.cafe,
-            "board": job.board,
-            "url": job.post_url,
-        }
-        self._save()
+        with self._lock:
+            self._reload()
+            self._items[self.key(job)] = {
+                "title": job.title,
+                "cafe": job.cafe,
+                "board": job.board,
+                "url": job.post_url,
+            }
+            self._save()
 
     def remove_urls(self, urls: set[str]) -> int:
         if not urls:
             return 0
-        keys = [
-            key
-            for key, record in self._items.items()
-            if record.get("url") in urls
-        ]
-        for key in keys:
-            self._items.pop(key, None)
-        if keys:
-            self._save()
-        return len(keys)
+        with self._lock:
+            self._reload()
+            keys = [
+                key
+                for key, record in self._items.items()
+                if record.get("url") in urls
+            ]
+            for key in keys:
+                self._items.pop(key, None)
+            if keys:
+                self._save()
+            return len(keys)
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
