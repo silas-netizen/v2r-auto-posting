@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+import json
 import tkinter as tk
+from pathlib import Path
 from tkinter import messagebox, ttk
 
 from .affiliate_api import AffiliateApiError
 from .comment_watch import (
+    DEFAULT_REPEAT_MINUTES,
     DEFAULT_SHEET_URL,
     CommentWatchError,
     build_plan,
+    format_wait_remaining,
     load_watch_rows,
+    next_cycle_wait_seconds,
+    parse_daily_time,
+    parse_repeat_minutes,
     user_facing_watch_error,
     v2r_article_is_gone,
+    wait_with_events,
 )
 from .gui import AutomationApp
 from .state import AnotherInstanceRunningError, InstanceLock
@@ -29,19 +37,66 @@ class CommentWatchApp(AutomationApp):
             messagebox.showerror("중복 실행", str(exc))
             self.destroy()
             raise SystemExit(1) from exc
-        self.geometry("820x620")
-        self.minsize(760, 560)
+        self.geometry("820x720")
+        self.minsize(760, 640)
+        self._load_settings()
+
+    def _settings_path(self) -> Path:
+        return self.data_dir / "settings.json"
+
+    def _load_settings(self) -> None:
+        path = self._settings_path()
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        url = str(data.get("sheet_url") or "").strip()
+        if url:
+            self.sheet_url.set(url)
+        if "preview_only" in data:
+            self.preview_only.set(bool(data.get("preview_only")))
+        if "repeat_enabled" in data:
+            self.repeat_enabled.set(bool(data.get("repeat_enabled")))
+        minutes = str(data.get("repeat_minutes") or "").strip()
+        if minutes:
+            self.repeat_minutes.set(minutes)
+        if "daily_enabled" in data:
+            self.daily_enabled.set(bool(data.get("daily_enabled")))
+        daily_time = str(data.get("daily_time") or "").strip()
+        if daily_time:
+            self.daily_time.set(daily_time)
+
+    def _save_settings(self) -> None:
+        payload = {
+            "sheet_url": self.sheet_url.get().strip() or DEFAULT_SHEET_URL,
+            "preview_only": self.preview_only.get(),
+            "repeat_enabled": self.repeat_enabled.get(),
+            "repeat_minutes": self.repeat_minutes.get().strip()
+            or str(DEFAULT_REPEAT_MINUTES),
+            "daily_enabled": self.daily_enabled.get(),
+            "daily_time": self.daily_time.get().strip() or "09:00",
+        }
+        self._settings_path().write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     def _create_variables(self) -> None:
         self.sheet_url = tk.StringVar(value=DEFAULT_SHEET_URL)
         self.preview_only = tk.BooleanVar(value=False)
+        self.repeat_enabled = tk.BooleanVar(value=False)
+        self.repeat_minutes = tk.StringVar(value=str(DEFAULT_REPEAT_MINUTES))
+        self.daily_enabled = tk.BooleanVar(value=False)
+        self.daily_time = tk.StringVar(value="09:00")
         self.progress_text = tk.StringVar(value="대기 중")
 
     def _build_ui(self) -> None:
         outer = ttk.Frame(self, padding=16)
         outer.pack(fill=tk.BOTH, expand=True)
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(6, weight=1)
+        outer.rowconfigure(7, weight=1)
 
         ttk.Label(outer, text=self.app_name, font=("", 18, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
@@ -62,15 +117,47 @@ class CommentWatchApp(AutomationApp):
         self._entry_row(outer, 2, "Google 시트 URL", self.sheet_url)
 
         options = ttk.Frame(outer)
-        options.grid(row=3, column=0, columnspan=3, sticky="w", pady=(0, 10))
+        options.grid(row=3, column=0, columnspan=3, sticky="w", pady=(0, 8))
         ttk.Checkbutton(
             options,
             text="미리보기만 (시트에 쓰지 않음)",
             variable=self.preview_only,
         ).pack(side=tk.LEFT)
 
+        schedule = ttk.LabelFrame(outer, text="자동 반복 · 시간 예약", padding=8)
+        schedule.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        repeat_row = ttk.Frame(schedule)
+        repeat_row.pack(fill=tk.X)
+        ttk.Checkbutton(
+            repeat_row,
+            text="끝나면 다시",
+            variable=self.repeat_enabled,
+        ).pack(side=tk.LEFT)
+        ttk.Label(repeat_row, text="간격(분)").pack(side=tk.LEFT, padx=(12, 4))
+        ttk.Entry(repeat_row, textvariable=self.repeat_minutes, width=6).pack(
+            side=tk.LEFT
+        )
+        ttk.Label(
+            repeat_row,
+            text="한 바퀴가 끝나면 기다렸다가 또 합니다.",
+        ).pack(side=tk.LEFT, padx=(8, 0))
+        daily_row = ttk.Frame(schedule)
+        daily_row.pack(fill=tk.X, pady=(6, 0))
+        ttk.Checkbutton(
+            daily_row,
+            text="매일 이 시각에 시작",
+            variable=self.daily_enabled,
+        ).pack(side=tk.LEFT)
+        ttk.Entry(daily_row, textvariable=self.daily_time, width=8).pack(
+            side=tk.LEFT, padx=(8, 0)
+        )
+        ttk.Label(
+            daily_row,
+            text="예: 09:00  한국 시각.",
+        ).pack(side=tk.LEFT, padx=(8, 0))
+
         buttons = ttk.Frame(outer)
-        buttons.grid(row=4, column=0, columnspan=3, sticky="w", pady=(0, 10))
+        buttons.grid(row=5, column=0, columnspan=3, sticky="w", pady=(0, 10))
         ttk.Button(buttons, text="로그인 준비", command=self._open_login).pack(
             side=tk.LEFT
         )
@@ -82,16 +169,16 @@ class CommentWatchApp(AutomationApp):
         self.stop_button.pack(side=tk.LEFT, padx=(8, 0))
 
         progress_frame = ttk.Frame(outer)
-        progress_frame.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        progress_frame.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 6))
         progress_frame.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_frame, maximum=100)
         self.progress.grid(row=0, column=0, sticky="ew")
-        ttk.Label(progress_frame, textvariable=self.progress_text, width=22).grid(
+        ttk.Label(progress_frame, textvariable=self.progress_text, width=36).grid(
             row=0, column=1, padx=(10, 0)
         )
 
         log_frame = ttk.LabelFrame(outer, text="진행 기록", padding=8)
-        log_frame.grid(row=6, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=7, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state=tk.DISABLED)
@@ -100,7 +187,75 @@ class CommentWatchApp(AutomationApp):
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.log_text.configure(yscrollcommand=scrollbar.set)
 
+    def _set_status(self, text: str) -> None:
+        self.ui_queue.put(("status", text))
+
+    def _wait_for_schedule(
+        self,
+        seconds: float,
+        *,
+        daily_enabled: bool,
+        daily_time: tuple[int, int] | None,
+        first_cycle: bool,
+    ) -> bool:
+        if seconds <= 0:
+            return not self.stop_event.is_set()
+        if daily_enabled and first_cycle and daily_time is not None:
+            clock = f"{daily_time[0]:02d}:{daily_time[1]:02d}"
+            self.logger.info("매일 %s까지 기다립니다", clock)
+            prefix = f"매일 {clock}까지"
+        else:
+            self.logger.info("%s 후 다시 시작합니다", format_wait_remaining(seconds))
+            prefix = "다음 실행까지"
+
+        def on_tick(remaining: float, paused: bool = False) -> None:
+            if paused:
+                self._set_status("일시 중지")
+                return
+            self._set_status(f"{prefix} {format_wait_remaining(remaining)}")
+
+        return wait_with_events(
+            seconds,
+            stop_event=self.stop_event,
+            on_tick=on_tick,
+        )
+
+    def _run_one_pass(self, sheet_url: str, preview_only: bool) -> str:
+        self.logger.info("시트를 읽습니다")
+        csv_path = self.browser.download_sheet(sheet_url)
+        headers, rows = load_watch_rows(csv_path)
+        self._set_progress(1, 3)
+        if self.stop_event.is_set():
+            return ""
+        self.logger.info("카페를 열어 다른 회원 댓글을 확인합니다")
+        plan = build_plan(
+            headers,
+            rows,
+            self.browser.fetch_v2r_article,
+            self.browser.check_cafe_article_comments,
+            should_stop=self.stop_event.is_set,
+        )
+        for row in plan.rows:
+            if not row.get("__source_id"):
+                continue
+            self.logger.info(
+                "%s행 %s · %s",
+                row.get("__row"),
+                row.get("__title") or row.get("__source_id"),
+                row.get("__reason") or row.get("__skip_reason") or "",
+            )
+        summary = plan.summary()
+        self.logger.info(summary.replace("\n", " / "))
+        self._set_progress(2, 3)
+        if preview_only or self.stop_event.is_set():
+            return summary
+        self.logger.info("K열을 시트에 저장합니다")
+        self.browser.write_comment_marks(sheet_url, plan)
+        self._set_progress(3, 3)
+        return summary
+
     def _open_login(self) -> None:
+        self._save_settings()
         sheet_url = self.sheet_url.get().strip()
         self._run_background(
             lambda: self.browser.open_login_window(sheet_url, include_cafe=True)
@@ -113,78 +268,117 @@ class CommentWatchApp(AutomationApp):
         if not sheet_url:
             messagebox.showerror("입력 오류", "Google 시트 주소를 넣어 주세요")
             return
+        try:
+            repeat_enabled = self.repeat_enabled.get()
+            daily_enabled = self.daily_enabled.get()
+            repeat_minutes = DEFAULT_REPEAT_MINUTES
+            daily_time = None
+            if repeat_enabled:
+                repeat_minutes = parse_repeat_minutes(self.repeat_minutes.get())
+            if daily_enabled:
+                daily_time = parse_daily_time(self.daily_time.get())
+        except ValueError as exc:
+            messagebox.showerror("입력 오류", str(exc))
+            return
         preview_only = self.preview_only.get()
+        looping = repeat_enabled or daily_enabled
+        extra_notes = []
+        if daily_enabled and daily_time is not None:
+            extra_notes.append(
+                f"매일 {daily_time[0]:02d}:{daily_time[1]:02d}에 시작합니다."
+            )
+        if repeat_enabled:
+            extra_notes.append(f"한 바퀴가 끝나면 {repeat_minutes}분 후 다시 합니다.")
+        note = ("\n" + " ".join(extra_notes)) if extra_notes else ""
         if not preview_only:
             confirmed = messagebox.askyesno(
                 "시트에 쓰기",
                 "K열(일상 글에 댓글)만 바꿉니다.\n"
                 "카페에서 다른 회원 댓글이 있는 행에는 카페 링크를 넣고, "
-                "없는 행은 비웁니다.\n계속할까요?",
+                f"없는 행은 비웁니다.{note}\n계속할까요?",
             )
             if not confirmed:
                 return
+        elif looping:
+            if not messagebox.askyesno(
+                "미리보기 반복",
+                f"미리보기만 반복합니다. 시트에는 쓰지 않습니다.{note}\n계속할까요?",
+            ):
+                return
+        self._save_settings()
         self.stop_event.clear()
         self.start_button.configure(state=tk.DISABLED)
         self.stop_button.configure(state=tk.NORMAL)
         self._set_progress(0, 3)
 
         def work() -> None:
+            cycle = 0
+            last_summary = ""
             try:
-                self.logger.info("시트를 읽습니다")
-                csv_path = self.browser.download_sheet(sheet_url)
-                headers, rows = load_watch_rows(csv_path)
-                self._set_progress(1, 3)
-                if self.stop_event.is_set():
-                    return
-                self.logger.info("카페를 열어 다른 회원 댓글을 확인합니다")
-                plan = build_plan(
-                    headers,
-                    rows,
-                    self.browser.fetch_v2r_article,
-                    self.browser.check_cafe_article_comments,
-                    should_stop=self.stop_event.is_set,
-                )
-                for row in plan.rows:
-                    if not row.get("__source_id"):
-                        continue
-                    self.logger.info(
-                        "%s행 %s · %s",
-                        row.get("__row"),
-                        row.get("__title") or row.get("__source_id"),
-                        row.get("__reason") or row.get("__skip_reason") or "",
+                while True:
+                    wait_for = next_cycle_wait_seconds(
+                        repeat_enabled=repeat_enabled,
+                        repeat_minutes=repeat_minutes,
+                        daily_enabled=daily_enabled,
+                        daily_time=daily_time,
+                        first_cycle=cycle == 0,
                     )
-                self.logger.info(plan.summary().replace("\n", " / "))
-                self._set_progress(2, 3)
-                if preview_only:
-                    self.ui_queue.put(("info", ("미리보기", plan.summary())))
-                    return
+                    if wait_for is None:
+                        break
+                    if not self._wait_for_schedule(
+                        wait_for,
+                        daily_enabled=daily_enabled,
+                        daily_time=daily_time,
+                        first_cycle=cycle == 0,
+                    ):
+                        break
+                    cycle += 1
+                    if looping:
+                        self.logger.info("자동 확인 %s바퀴를 시작합니다", cycle)
+                    try:
+                        last_summary = self._run_one_pass(sheet_url, preview_only)
+                    except CommentWatchError as exc:
+                        title = "시트 열 확인" if "열을 찾지" in str(exc) else "확인 실패"
+                        self.logger.error("%s", exc)
+                        if looping:
+                            continue
+                        self.ui_queue.put(("error", (title, str(exc))))
+                        return
+                    except Exception as exc:
+                        message = user_facing_watch_error(exc)
+                        if (
+                            v2r_article_is_gone(exc)
+                            or isinstance(exc, AffiliateApiError)
+                            or "시트 표시를 확인하지 못했습니다" in str(exc)
+                        ):
+                            self.logger.error(message)
+                        else:
+                            self.logger.exception("댓글 확인 실패")
+                        if looping:
+                            continue
+                        self.ui_queue.put(("error", ("확인 실패", message)))
+                        return
+                    if self.stop_event.is_set():
+                        break
+                    if looping:
+                        self.logger.info("자동 확인 %s바퀴를 마쳤습니다", cycle)
+                        continue
+                    break
                 if self.stop_event.is_set():
-                    return
-                self.logger.info("K열을 시트에 저장합니다")
-                self.browser.write_comment_marks(sheet_url, plan)
-                self._set_progress(3, 3)
-                self.ui_queue.put(("info", ("확인 완료", plan.summary())))
-            except CommentWatchError as exc:
-                title = "시트 열 확인" if "열을 찾지" in str(exc) else "확인 실패"
-                self.logger.error("%s", exc)
-                self.ui_queue.put(("error", (title, str(exc))))
-            except Exception as exc:
-                message = user_facing_watch_error(exc)
-                if (
-                    v2r_article_is_gone(exc)
-                    or isinstance(exc, AffiliateApiError)
-                    or "시트 표시를 확인하지 못했습니다" in str(exc)
-                ):
-                    self.logger.error(message)
-                else:
-                    self.logger.exception("댓글 확인 실패")
-                self.ui_queue.put(("error", ("확인 실패", message)))
+                    self.ui_queue.put(("info", ("확인 중지", "중지했습니다.")))
+                elif not looping:
+                    title = "미리보기" if preview_only else "확인 완료"
+                    self.ui_queue.put(("info", (title, last_summary or "확인을 마쳤습니다.")))
             finally:
                 self.ui_queue.put(("finished", None))
 
         self.worker = self.executor.submit(work)
 
     def _on_close(self) -> None:
+        try:
+            self._save_settings()
+        except OSError:
+            pass
         if hasattr(self, "instance_lock"):
             self.instance_lock.__exit__(None, None, None)
         super()._on_close()
