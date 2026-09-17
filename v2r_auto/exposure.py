@@ -5,6 +5,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from html import unescape
 from pathlib import Path
 from typing import Iterable, Protocol
@@ -230,6 +231,158 @@ def apply_start_row(
             continue
         kept.append(row)
     return kept, skipped
+
+
+KST = timezone(timedelta(hours=9))
+DEFAULT_REPEAT_MINUTES = 60
+
+
+def parse_sheet_urls(text: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for line in (text or "").splitlines():
+        url = line.strip()
+        if not url or url.startswith("#"):
+            continue
+        key = url.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        urls.append(url)
+    return urls
+
+
+def sheet_urls_from_settings(data: dict) -> str:
+    raw = data.get("sheet_urls")
+    if isinstance(raw, list) and raw:
+        lines = [str(item).strip() for item in raw if str(item).strip()]
+        if lines:
+            return "\n".join(lines)
+    return str(data.get("sheet_url") or "").strip()
+
+
+def parse_repeat_minutes(value: str, *, default: int = DEFAULT_REPEAT_MINUTES) -> int:
+    text = (value or "").strip()
+    if not text:
+        return default
+    if not text.isdigit():
+        raise ValueError("반복 간격은 분만 넣어 주세요. 예: 60")
+    number = int(text)
+    if number < 1:
+        raise ValueError("반복 간격은 1분 이상으로 넣어 주세요")
+    if number > 24 * 60:
+        raise ValueError("반복 간격은 1440분(하루) 이하로 넣어 주세요")
+    return number
+
+
+def parse_daily_time(value: str) -> tuple[int, int]:
+    text = (value or "").strip()
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", text)
+    if not match:
+        raise ValueError("매일 실행 시각은 시:분으로 넣어 주세요. 예: 09:00")
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour > 23 or minute > 59:
+        raise ValueError("매일 실행 시각은 00:00부터 23:59까지입니다")
+    return hour, minute
+
+
+def now_kst(now: datetime | None = None) -> datetime:
+    if now is None:
+        return datetime.now(KST)
+    if now.tzinfo is None:
+        return now.replace(tzinfo=KST)
+    return now.astimezone(KST)
+
+
+def next_daily_wait_seconds(
+    hour: int,
+    minute: int,
+    now: datetime | None = None,
+    *,
+    allow_grace: bool = False,
+    grace_seconds: int = 60,
+) -> float:
+    current = now_kst(now)
+    target = current.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if current < target:
+        return (target - current).total_seconds()
+    elapsed = (current - target).total_seconds()
+    if allow_grace and elapsed <= grace_seconds:
+        return 0.0
+    target += timedelta(days=1)
+    return (target - current).total_seconds()
+
+
+def next_cycle_wait_seconds(
+    *,
+    repeat_enabled: bool,
+    repeat_minutes: int,
+    daily_enabled: bool,
+    daily_time: tuple[int, int] | None,
+    first_cycle: bool,
+    now: datetime | None = None,
+) -> float | None:
+    """Seconds to wait before the next pass. None means the job should stop."""
+    if first_cycle:
+        if daily_enabled and daily_time is not None:
+            return next_daily_wait_seconds(
+                daily_time[0],
+                daily_time[1],
+                now=now,
+                allow_grace=True,
+            )
+        return 0.0
+    if repeat_enabled:
+        return float(max(1, repeat_minutes) * 60)
+    if daily_enabled and daily_time is not None:
+        return next_daily_wait_seconds(
+            daily_time[0],
+            daily_time[1],
+            now=now,
+            allow_grace=False,
+        )
+    return None
+
+
+def format_wait_remaining(seconds: float) -> str:
+    total = max(0, int(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}시간 {minutes}분"
+    if minutes:
+        return f"{minutes}분 {secs}초"
+    return f"{secs}초"
+
+
+def wait_with_events(
+    seconds: float,
+    *,
+    stop_event,
+    pause_event=None,
+    on_tick=None,
+    step: float = 1.0,
+) -> bool:
+    """Wait while honoring stop/pause. Return False if stopped."""
+    remaining = max(0.0, float(seconds))
+    chunk = max(0.05, float(step))
+    while remaining > 0:
+        if stop_event.is_set():
+            return False
+        if pause_event is not None and pause_event.is_set():
+            if on_tick is not None:
+                on_tick(remaining, paused=True)
+            if stop_event.wait(timeout=chunk):
+                return False
+            continue
+        if on_tick is not None:
+            on_tick(remaining, paused=False)
+        slept = min(chunk, remaining)
+        if stop_event.wait(timeout=slept):
+            return False
+        remaining -= slept
+    return True
 
 
 def parse_keyword_lines(text: str) -> list[str]:
