@@ -336,7 +336,7 @@ def test_account_tests_resolve_registration_membership_and_alternate_cafes(
 
 def test_code_27000_result_includes_detection_and_release_dates() -> None:
     publisher = ImmediateApiPublisher(None, logging.getLogger("test"))
-    detected_at = datetime(2026, 8, 12, 3, 0, tzinfo=timezone.utc)
+    detected_at = datetime.now(timezone.utc)
     publisher.restrictions.observe_code_27000(
         source_id="source-27000",
         account="restricted-id",
@@ -346,8 +346,10 @@ def test_code_27000_result_includes_detection_and_release_dates() -> None:
 
     result = publisher._restriction_result("restricted-id")
 
-    assert "발견 2026-08-12" in result
-    assert "제외 종료 2026-09-11" in result
+    found = detected_at.astimezone().strftime("%Y-%m-%d")
+    ended = (detected_at + timedelta(days=30)).astimezone().strftime("%Y-%m-%d")
+    assert f"발견 {found}" in result
+    assert f"제외 종료 {ended}" in result
 
 
 def test_prepare_jobs_matches_live_ids_and_rotates_all_writers(tmp_path: Path) -> None:
