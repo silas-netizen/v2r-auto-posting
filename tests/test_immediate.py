@@ -1399,3 +1399,64 @@ def test_menu_permission_candidates_are_bounded_but_keep_fixed_accounts() -> Non
     assert candidates[:10] == eligible[:10]
     assert candidates[-1] == "account-49"
     assert len(candidates) == 11
+
+
+def test_non_account_test_run_skips_test_cafe_api_queries() -> None:
+    class Job:
+        status = JobStatus.PENDING
+        source_kind = "brand"
+
+    class Publisher(ImmediateApiPublisher):
+        def _request(self, *_args, **_kwargs):
+            raise AssertionError("일반 실행에서 계정 테스트 API를 호출하면 안 됩니다")
+
+    publisher = Publisher(
+        None,
+        logging.getLogger("skip-account-test-probes"),
+    )
+
+    publisher._prepare_account_tests([Job()], [])
+
+
+def test_immediate_publish_reuses_completed_poll_detail(tmp_path: Path) -> None:
+    path = tmp_path / "brand.csv"
+    path.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        '"키워드","제목 : 제목\n본문 : 본문",헬씨 트리,writer,질문형,,,,Y,자유게시판\n',
+        encoding="utf-8-sig",
+    )
+    job = load_brand_immediate_jobs(
+        path,
+        brand="테스트",
+    )[0]
+    job.cafe_id = 23708088
+    job.menu_id = 29
+    job.account = "writer"
+    job.canonical_cafe_name = "헬씨 트리"
+    job.canonical_board_name = "자유게시판"
+    job.publish_immediately = True
+    observed: list[dict] = []
+    completed_detail = {"completed": True}
+
+    class Publisher(ImmediateApiPublisher):
+        def _prepare_revision_content(self, *_args):
+            return "{}"
+
+        def _create_source(self, *_args, **_kwargs):
+            return "source-id"
+
+        def _wait_for_written_at(self, *_args, **kwargs):
+            assert kwargs["return_detail"] is True
+            return datetime.now(timezone.utc), completed_detail
+
+        def _verify_immediate(self, _source_id, _job, detail=None):
+            observed.append(detail)
+
+    publisher = Publisher(
+        None,
+        logging.getLogger("reuse-poll-detail-test"),
+    )
+
+    publisher.publish(job, dry_run=False)
+
+    assert observed == [completed_detail]

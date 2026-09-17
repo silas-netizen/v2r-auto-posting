@@ -992,9 +992,14 @@ def test_written_status_uses_article_detail_not_removed_history_api() -> None:
             }
 
     publisher = DetailStatusPublisher()
-    result = publisher._wait_for_written_at("source-id", 31670254)
+    result, detail = publisher._wait_for_written_at(
+        "source-id",
+        31670254,
+        return_detail=True,
+    )
 
     assert result == datetime(2026, 8, 31, 1, 30, tzinfo=timezone.utc)
+    assert detail["naver_cafe_article_history"]["status"] == "DONE"
     assert publisher.paths == ["/naver_cafe_articles/article"]
 
 

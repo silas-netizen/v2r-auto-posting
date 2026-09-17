@@ -168,6 +168,7 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
             "/naver_cafes/naver_join_cafe",
             query={"cafe_id": cafe_id},
         )
+        self._member_status_cache[cafe_id] = status
         joined = self._joined_accounts(status)
         restricted = self.restrictions.blocked_accounts()
         eligible = [
@@ -259,6 +260,12 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         jobs: list[ImmediateJob],
         cafes: list[CafeCatalogEntry],
     ) -> None:
+        if not any(
+            job.status == JobStatus.PENDING
+            and job.source_kind == "account_test"
+            for job in jobs
+        ):
+            return
         test_cafes = [
             cafe for cafe in cafes if cafe.cafe_id in TEST_CAFE_IDS
         ]
@@ -858,12 +865,14 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
         self,
         source_id: str,
         job: ImmediateJob,
+        detail: dict[str, Any] | None = None,
     ) -> None:
-        detail = self._request(
-            "GET",
-            "/naver_cafe_articles/article",
-            query={"source_id": source_id},
-        )
+        if detail is None:
+            detail = self._request(
+                "GET",
+                "/naver_cafe_articles/article",
+                query={"source_id": source_id},
+            )
         source = detail["naver_cafe_article_source"]
         destination = detail["naver_cafe_article_destination"]
         comments = detail.get("naver_cafe_article_source_comments") or []
@@ -966,9 +975,14 @@ class ImmediateApiPublisher(AffiliateApiPublisher):
                     ("DONE",) if is_immediate else ("RESERVED", "DONE")
                 ),
             )
+            detail = None
             if is_immediate:
-                self._wait_for_written_at(source_id, job.cafe_id)
-            self._verify_immediate(source_id, job)
+                _written_at, detail = self._wait_for_written_at(
+                    source_id,
+                    job.cafe_id,
+                    return_detail=True,
+                )
+            self._verify_immediate(source_id, job, detail=detail)
         except Exception as exc:
             error_text = str(exc)
             if "27000" in error_text or "게시글 작성 및 카페" in error_text:
