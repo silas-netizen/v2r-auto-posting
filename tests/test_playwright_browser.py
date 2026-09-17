@@ -105,13 +105,41 @@ def test_ensure_v2r_login_only_accepts_existing_manual_session(
 
     browser.ensure_v2r_login("ignored@example.com", "ignored-password")
 
-    browser._navigate.assert_called_once_with(page, V2R_BOARD_URL)
+    browser._navigate.assert_not_called()
 
     password.count.return_value = 1
     password.first.is_visible.return_value = True
     page.content.return_value = "<input type=password>"
     with pytest.raises(AutomationError, match="직접 로그인"):
         browser.ensure_v2r_login("still-ignored", "still-ignored")
+    browser._navigate.assert_not_called()
+
+
+def test_current_login_verification_never_navigates(tmp_path: Path) -> None:
+    page = MagicMock()
+    page.url = "https://v2r.daboja.im/nc/board?view=list"
+    page.content.return_value = "<button>글쓰기</button>"
+    password = MagicMock()
+    password.count.return_value = 0
+    page.locator.return_value = password
+    browser = make_browser(tmp_path, page)
+    browser._navigate = MagicMock()
+
+    browser.verify_current_v2r_login()
+
+    browser._navigate.assert_not_called()
+
+
+def test_coordinator_login_window_opens_only_sheet(tmp_path: Path) -> None:
+    page = MagicMock()
+    browser = make_browser(tmp_path, page)
+    browser._navigate = MagicMock()
+    sheet_url = "https://docs.google.com/spreadsheets/d/example"
+
+    browser.open_sheet_login_window(sheet_url)
+
+    assert browser.google_page is page
+    browser._navigate.assert_called_once_with(page, sheet_url)
 
 
 def test_download_sheet_uses_browser_download_and_validates_headers(

@@ -23,6 +23,7 @@ class Job:
 
 class FakeBrowser:
     created_profiles: list[Path] = []
+    events: list[tuple[str, str]] = []
 
     def __init__(self, config, _logger):
         self.config = config
@@ -33,10 +34,21 @@ class FakeBrowser:
     def open_login_window(self, sheet_url=""):
         self.thread_ids.append(threading.get_ident())
         self.calls.append(("open", sheet_url))
+        self.events.append((self.config.profile_dir.name, "open"))
 
     def ensure_v2r_login(self, _email, _password):
         self.thread_ids.append(threading.get_ident())
         self.calls.append(("verify", ""))
+
+    def verify_current_v2r_login(self):
+        self.thread_ids.append(threading.get_ident())
+        self.calls.append(("inspect", ""))
+        self.events.append((self.config.profile_dir.name, "inspect"))
+
+    def open_sheet_login_window(self, sheet_url):
+        self.thread_ids.append(threading.get_ident())
+        self.calls.append(("sheet", sheet_url))
+        self.events.append((self.config.profile_dir.name, "sheet"))
 
     def close(self):
         self.thread_ids.append(threading.get_ident())
@@ -79,6 +91,7 @@ def test_partition_jobs_keeps_each_cafe_on_one_worker() -> None:
 
 def test_pool_uses_unique_profiles_and_thread_bound_browsers(tmp_path: Path) -> None:
     FakeBrowser.created_profiles = []
+    FakeBrowser.events = []
     pool = BrowserWorkerPool(
         data_dir=tmp_path,
         download_dir=tmp_path / "downloads",
@@ -94,17 +107,49 @@ def test_pool_uses_unique_profiles_and_thread_bound_browsers(tmp_path: Path) -> 
         assert len(FakeBrowser.created_profiles) == 4
         assert len(set(FakeBrowser.created_profiles)) == 4
         assert snapshots[0].worker_id == -1
-        assert all(snapshot.state == "로그인 완료" for snapshot in snapshots)
+        assert snapshots[0].state == "대기"
+        assert all(snapshot.state == "로그인 완료" for snapshot in snapshots[1:])
         assert pool.coordinator.browser.calls[0] == (
-            "open",
+            "sheet",
             "https://sheet.example",
         )
         assert all(
             worker.browser.calls[0] == ("open", "")
             for worker in pool.workers
         )
+        assert ("inspect", "") not in pool.coordinator.browser.calls
+        assert FakeBrowser.events[:4] == [
+            ("coordinator", "sheet"),
+            ("worker-1", "open"),
+            ("worker-2", "open"),
+            ("worker-3", "open"),
+        ]
         for worker in (pool.coordinator, *pool.workers):
             assert len(set(worker.browser.thread_ids)) == 1
+    finally:
+        pool.close()
+
+
+def test_pool_can_limit_login_to_first_worker(tmp_path: Path) -> None:
+    pool = BrowserWorkerPool(
+        data_dir=tmp_path,
+        download_dir=tmp_path / "downloads",
+        worker_count=3,
+        logger=logging.getLogger("limited-login-test"),
+        browser_factory=FakeBrowser,
+    )
+    try:
+        pool.open_login_windows(
+            "https://sheet.example",
+            worker_limit=1,
+        )
+        pool.verify_logins()
+
+        assert pool.coordinator.browser.calls == [
+            ("sheet", "https://sheet.example"),
+        ]
+        assert pool.workers[0].browser.calls == [("open", ""), ("inspect", "")]
+        assert all(not worker.browser.calls for worker in pool.workers[1:])
     finally:
         pool.close()
 

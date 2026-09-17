@@ -177,6 +177,14 @@ class PlaywrightBrowser:
             self.logger.info("Google Sheets 로그인 확인 탭을 열었습니다")
         self.logger.info("로그인 준비 창을 열었습니다. Google과 V2R 로그인을 확인하세요")
 
+    def open_sheet_login_window(self, sheet_url: str) -> None:
+        """Open only the Sheet login/lobby in the coordinator context."""
+        self.start()
+        if self.google_page is None or self.google_page.is_closed():
+            self.google_page = self.page
+        self._navigate(self.google_page, sheet_url)
+        self.logger.info("Google Sheets 로그인 확인 창을 열었습니다")
+
     def _login_state(self) -> str | None:
         page = self.page
         password = page.locator("input[type='password']")
@@ -193,6 +201,14 @@ class PlaywrightBrowser:
         """Verify a login completed manually; credentials are never submitted."""
         del email, password
         self.start()
+        state = self._login_state()
+        if state == "authenticated":
+            self.logger.info("기존 V2R 로그인 세션을 사용합니다")
+            return
+        if state == "login":
+            raise AutomationError(
+                "V2R 로그인이 필요합니다. 로그인 준비 창에서 직접 로그인한 뒤 다시 실행하세요"
+            )
         self._navigate(self.page, V2R_LIST_URL)
         deadline = time.monotonic() + self.config.timeout_seconds
         while time.monotonic() < deadline:
@@ -206,6 +222,19 @@ class PlaywrightBrowser:
                 )
             self.page.wait_for_timeout(250)
         raise AutomationError("V2R 로그인 화면 또는 게시글 목록을 확인하지 못했습니다")
+
+    def verify_current_v2r_login(self) -> None:
+        """Inspect the current worker page without issuing another navigation."""
+        self.start()
+        state = self._login_state()
+        if state == "authenticated":
+            self.logger.info("현재 V2R 로그인 세션을 확인했습니다")
+            return
+        if state == "login":
+            raise AutomationError(
+                "V2R 로그인이 필요합니다. 로그인 준비 창에서 직접 로그인한 뒤 다시 실행하세요"
+            )
+        raise AutomationError("현재 창에서 V2R 게시글 목록을 확인하지 못했습니다")
 
     @staticmethod
     def _sheet_export_url(sheet_url: str) -> str:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import threading
+
 import pytest
 
-from v2r_auto.automation_service import ControlConfig
+from v2r_auto.automation_service import ControlConfig, UnifiedAutomationBackend
 
 
 def test_control_config_accepts_parallel_affiliate_settings() -> None:
@@ -39,6 +41,29 @@ def test_control_config_accepts_immediate_daily_settings() -> None:
     assert config.auto_account_limit == 8
     assert config.immediate_interval_minutes == 4
     assert config.browser_recycle_jobs == 30
+
+
+def test_account_test_login_opens_only_one_worker(monkeypatch) -> None:
+    class Pool:
+        def __init__(self):
+            self.calls = []
+
+        def open_login_windows(self, sheet_url, *, worker_limit=None):
+            self.calls.append((sheet_url, worker_limit))
+
+    pool = Pool()
+    backend = UnifiedAutomationBackend.__new__(UnifiedAutomationBackend)
+    backend.config = ControlConfig(
+        program="immediate",
+        worker_count=3,
+        input_mode="account_test",
+    )
+    backend._lock = threading.RLock()
+    monkeypatch.setattr(backend, "_ensure_pool", lambda: pool)
+
+    backend._open_login()
+
+    assert pool.calls == [(backend._sheet_url_for_login(), 1)]
 
 
 @pytest.mark.parametrize(

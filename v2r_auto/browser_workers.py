@@ -192,6 +192,7 @@ class BrowserWorkerPool:
             )
             for index in range(self.worker_count)
         ]
+        self._login_workers: tuple[BrowserWorker, ...] = tuple(self.workers)
 
     @property
     def coordinator(self) -> BrowserWorker:
@@ -203,43 +204,52 @@ class BrowserWorkerPool:
             *(worker.snapshot() for worker in self.workers),
         ]
 
-    def open_login_windows(self, sheet_url: str = "") -> None:
+    def open_login_windows(
+        self,
+        sheet_url: str = "",
+        *,
+        worker_limit: int | None = None,
+    ) -> None:
         started_at = time.monotonic()
         # region agent log
         open(os.environ.get("V2R_DEBUG_LOG", "/opt/cursor/logs/debug.log"), "a").write(json.dumps({"hypothesisId":"H1,H2,H3","location":"browser_workers.py:BrowserWorkerPool.open_login_windows:entry","message":"Login window fan-out starting","data":{"workerCount":self.worker_count,"coordinatorIncluded":True,"sheetRequested":bool(sheet_url)},"timestamp":time.time_ns()//1_000_000})+"\n")
         # endregion
-        futures = [
-            self.coordinator.submit(
-                lambda browser: browser.open_login_window(sheet_url),
+        selected_count = self.worker_count if worker_limit is None else worker_limit
+        if not 1 <= selected_count <= self.worker_count:
+            raise ValueError("로그인 작업 창 수가 올바르지 않습니다")
+        self._login_workers = tuple(self.workers[:selected_count])
+        futures: list[Future[Any]] = []
+        if sheet_url:
+            future = self.coordinator.submit(
+                lambda browser: browser.open_sheet_login_window(sheet_url),
                 state="로그인 대기",
             )
-        ]
-        for worker in self.workers:
-            futures.append(
-                worker.submit(
-                    lambda browser: browser.open_login_window(""),
-                    state="로그인 대기",
-                )
+            futures.append(future)
+            future.result()
+        for worker in self._login_workers:
+            future = worker.submit(
+                lambda browser: browser.open_login_window(""),
+                state="로그인 대기",
             )
-        for future in futures:
+            futures.append(future)
             future.result()
         # region agent log
         open(os.environ.get("V2R_DEBUG_LOG", "/opt/cursor/logs/debug.log"), "a").write(json.dumps({"hypothesisId":"H1,H3","location":"browser_workers.py:BrowserWorkerPool.open_login_windows:exit","message":"Login window fan-out completed","data":{"browserCount":len(futures),"elapsedMs":round((time.monotonic()-started_at)*1000)},"timestamp":time.time_ns()//1_000_000})+"\n")
         # endregion
-        for worker in (self.coordinator, *self.workers):
+        for worker in self._login_workers:
             worker.set_state("로그인 대기")
 
     def verify_logins(self) -> None:
         futures = [
             worker.submit(
-                lambda browser: browser.ensure_v2r_login("", ""),
+                lambda browser: browser.verify_current_v2r_login(),
                 state="로그인 확인 중",
             )
-            for worker in (self.coordinator, *self.workers)
+            for worker in self._login_workers
         ]
         for future in futures:
             future.result()
-        for worker in (self.coordinator, *self.workers):
+        for worker in self._login_workers:
             worker.set_state("로그인 완료")
 
     def run_partitions(

@@ -287,11 +287,15 @@ class UnifiedAutomationBackend:
 
     def _open_login(self) -> None:
         pool = self._ensure_pool()
-        pool.open_login_windows(self._sheet_url_for_login())
+        worker_limit = 1 if self.config.input_mode == "account_test" else None
+        pool.open_login_windows(
+            self._sheet_url_for_login(),
+            worker_limit=worker_limit,
+        )
         with self._lock:
             self._state = "로그인 대기"
             self._message = (
-                "시트·준비 창과 모든 작업 창에서 V2R 로그인을 완료한 뒤 "
+                "시트 창과 열린 각 작업 창에서 V2R 로그인을 완료한 뒤 "
                 "'로그인 확인'을 누르세요."
             )
 
@@ -299,7 +303,7 @@ class UnifiedAutomationBackend:
         self._ensure_pool().verify_logins()
         with self._lock:
             self._state = "로그인 완료"
-            self._message = "모든 V2R 작업 창의 로그인을 확인했습니다."
+            self._message = "열린 V2R 작업 창의 로그인을 확인했습니다."
 
     def _load_affiliate_data(self):
         if not self.config.sheet_url:
