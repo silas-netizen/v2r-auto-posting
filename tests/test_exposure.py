@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+from datetime import datetime
 from urllib.error import HTTPError
 
 from v2r_auto.exposure import (
@@ -11,6 +12,7 @@ from v2r_auto.exposure import (
     display_exposed_post_url,
     filter_exposed_rows,
     format_exposed_post_urls,
+    format_wait_remaining,
     is_exposed_status,
     unique_exposed_urls,
     brand_found,
@@ -29,10 +31,16 @@ from v2r_auto.exposure import (
     match_selected_rows,
     matching_cafe_name,
     apply_start_row,
+    next_cycle_wait_seconds,
+    next_daily_wait_seconds,
     parse_brands,
+    parse_daily_time,
+    parse_repeat_minutes,
+    parse_sheet_urls,
     parse_start_row,
     pick_kept_duplicate,
     row_page_number,
+    sheet_urls_from_settings,
     shift_row_page_ids,
     spacing_keyword_key,
     has_spacing_variants,
@@ -43,6 +51,7 @@ from v2r_auto.exposure import (
     same_search_query,
     strip_parenthetical,
     volume_from_result_cells,
+    wait_with_events,
 )
 
 
@@ -2023,6 +2032,11 @@ def test_exposure_gui_has_url_extract_controls() -> None:
     assert "노출완글링크.txt" in source
     assert "시작 위치" in source
     assert "parse_start_row" in source
+    assert "끝나면 다시" in source
+    assert "매일 이 시각에 시작" in source
+    assert "한 줄에 하나씩" in source
+    assert "parse_sheet_urls" in source
+    assert "next_cycle_wait_seconds" in source
 
 
 def test_parse_start_row_empty_means_top() -> None:
@@ -2096,6 +2110,128 @@ def test_checker_skips_rows_before_start_row(caplog) -> None:
         "201행 코숨핏부터 확인합니다. 앞 2건은 건너뜁니다" in message
         for message in caplog.messages
     )
+
+
+def test_parse_sheet_urls_keeps_one_address_per_line() -> None:
+    text = """
+    https://docs.google.com/spreadsheets/d/aaa/edit
+    https://docs.google.com/spreadsheets/d/bbb/edit#gid=0
+
+    # 메모
+    https://docs.google.com/spreadsheets/d/aaa/edit
+    """
+    assert parse_sheet_urls(text) == [
+        "https://docs.google.com/spreadsheets/d/aaa/edit",
+        "https://docs.google.com/spreadsheets/d/bbb/edit#gid=0",
+    ]
+    assert parse_sheet_urls("") == []
+
+
+def test_sheet_urls_from_settings_reads_old_single_url() -> None:
+    assert (
+        sheet_urls_from_settings(
+            {"sheet_url": "https://docs.google.com/spreadsheets/d/aaa/edit"}
+        )
+        == "https://docs.google.com/spreadsheets/d/aaa/edit"
+    )
+    assert sheet_urls_from_settings(
+        {
+            "sheet_url": "https://docs.google.com/spreadsheets/d/old/edit",
+            "sheet_urls": [
+                "https://docs.google.com/spreadsheets/d/aaa/edit",
+                "https://docs.google.com/spreadsheets/d/bbb/edit",
+            ],
+        }
+    ) == (
+        "https://docs.google.com/spreadsheets/d/aaa/edit\n"
+        "https://docs.google.com/spreadsheets/d/bbb/edit"
+    )
+
+
+def test_parse_repeat_minutes_and_daily_time() -> None:
+    assert parse_repeat_minutes("") == 60
+    assert parse_repeat_minutes("15") == 15
+    assert parse_daily_time("09:00") == (9, 0)
+    assert parse_daily_time("9:05") == (9, 5)
+    for value, needle in (("0", "1분 이상"), ("abc", "분만")):
+        try:
+            parse_repeat_minutes(value)
+        except ValueError as exc:
+            assert needle in str(exc)
+        else:
+            raise AssertionError(f"expected ValueError for {value!r}")
+    for value, needle in (("25:00", "00:00"), ("9시", "시:분"), ("", "시:분")):
+        try:
+            parse_daily_time(value)
+        except ValueError as exc:
+            assert needle in str(exc)
+        else:
+            raise AssertionError(f"expected ValueError for {value!r}")
+
+
+def test_next_cycle_wait_uses_daily_time_then_interval() -> None:
+    morning = datetime(2026, 9, 17, 8, 30, 0)
+    assert next_cycle_wait_seconds(
+        repeat_enabled=True,
+        repeat_minutes=15,
+        daily_enabled=True,
+        daily_time=(9, 0),
+        first_cycle=True,
+        now=morning,
+    ) == 30 * 60
+    assert next_cycle_wait_seconds(
+        repeat_enabled=True,
+        repeat_minutes=15,
+        daily_enabled=True,
+        daily_time=(9, 0),
+        first_cycle=False,
+        now=datetime(2026, 9, 17, 10, 0, 0),
+    ) == 15 * 60
+    assert next_cycle_wait_seconds(
+        repeat_enabled=False,
+        repeat_minutes=60,
+        daily_enabled=True,
+        daily_time=(9, 0),
+        first_cycle=False,
+        now=datetime(2026, 9, 17, 10, 0, 0),
+    ) == 23 * 3600
+    assert (
+        next_cycle_wait_seconds(
+            repeat_enabled=False,
+            repeat_minutes=60,
+            daily_enabled=False,
+            daily_time=None,
+            first_cycle=False,
+        )
+        is None
+    )
+    assert next_daily_wait_seconds(
+        9, 0, now=datetime(2026, 9, 17, 9, 0, 20), allow_grace=True
+    ) == 0
+    assert format_wait_remaining(90) == "1분 30초"
+
+
+def test_wait_with_events_stops_and_respects_pause() -> None:
+    stop = threading.Event()
+    threading.Timer(0.05, stop.set).start()
+    started = time.monotonic()
+    assert wait_with_events(2.0, stop_event=stop, step=0.02) is False
+    assert time.monotonic() - started < 1.0
+
+    stop = threading.Event()
+    pause = threading.Event()
+    pause.set()
+
+    def unpause() -> None:
+        time.sleep(0.08)
+        pause.clear()
+
+    threading.Thread(target=unpause, daemon=True).start()
+    started = time.monotonic()
+    assert (
+        wait_with_events(0.04, stop_event=stop, pause_event=pause, step=0.02) is True
+    )
+    assert time.monotonic() - started >= 0.08
 
 
 def test_checker_without_start_row_checks_from_top() -> None:

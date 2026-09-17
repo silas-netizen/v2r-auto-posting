@@ -443,6 +443,8 @@ class AutomationApp(tk.Tk):
                 completed, total, percent = payload
                 self.progress.configure(value=percent)
                 self.progress_text.set(f"{completed}/{total} ({percent}%)")
+            elif kind == "status":
+                self.progress_text.set(str(payload))
             elif kind == "info":
                 title, message = payload
                 messagebox.showinfo(title, message)
