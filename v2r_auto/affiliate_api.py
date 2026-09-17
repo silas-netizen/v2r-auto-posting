@@ -13,6 +13,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from .affiliate_errors import AffiliateDailyPending, AffiliateRunStopped
 from .cafe_catalog import CafeCatalogEntry, CafeCatalogService
 from .images import (
     GoogleDriveImageResolver,
@@ -64,14 +65,6 @@ CAFE_DESTINATIONS = {
 
 
 class AffiliateApiError(RuntimeError):
-    pass
-
-
-class AffiliateDailyPending(AffiliateApiError):
-    pass
-
-
-class AffiliateRunStopped(AffiliateApiError):
     pass
 
 

@@ -7,10 +7,9 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
-from .affiliate_api import AffiliateDailyPending, AffiliateRunStopped
-from .browser import V2RBrowser
+from .affiliate_errors import AffiliateDailyPending, AffiliateRunStopped
 from .cafe_catalog import TEST_CAFE_IDS
 from .daily_posts import assign_daily_posts
 from .history import HistoryStore
@@ -25,6 +24,9 @@ from .models import (
 from .photo_washer import needs_photo_wash
 from .report import write_report
 from .state import JobStateStore
+
+if TYPE_CHECKING:
+    from .browser import V2RBrowser
 
 
 @dataclass(slots=True)

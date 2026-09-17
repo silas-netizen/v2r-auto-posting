@@ -6,7 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence, TypeVar
 
-from .browser import BrowserConfig, V2RBrowser
+from .playwright_browser import (
+    BrowserConfig,
+    PlaywrightBrowser as V2RBrowser,
+)
 
 
 T = TypeVar("T")

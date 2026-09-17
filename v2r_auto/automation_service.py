@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,7 +15,6 @@ from .browser_workers import (
     validate_worker_count,
 )
 from .daily_posts import assign_daily_posts, load_daily_posts
-from .gui import app_data_dir
 from .images import load_sheet_brand
 from .immediate_inputs import (
     ACCOUNT_TEST_SHEET_GID,
@@ -30,6 +31,7 @@ from .photo_washer import (
     prepare_photo_wash_plan,
     preferred_photo_washer_executable,
 )
+from .playwright_edition import PlaywrightWebBrowser
 from .runner import AffiliateRunner, ImmediateRunner
 from .sheet import load_affiliate_jobs
 
@@ -43,6 +45,14 @@ ACCOUNT_TEST_SHEET_URL = (
     f"https://docs.google.com/spreadsheets/d/{ACCOUNT_TEST_SHEET_ID}/"
     f"edit?gid={ACCOUNT_TEST_SHEET_GID}#gid={ACCOUNT_TEST_SHEET_GID}"
 )
+
+
+def app_data_dir(product_name: str = "V2RPlaywrightWeb") -> Path:
+    if sys.platform == "win32":
+        root = Path(os.environ.get("LOCALAPPDATA", Path.home()))
+    else:
+        root = Path.home() / ".local" / "share"
+    return root / product_name
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,7 +113,7 @@ class UnifiedAutomationBackend:
     """Thread-safe backend used by the localhost HTTPS control page."""
 
     def __init__(self, logger: logging.Logger | None = None):
-        self.data_dir = app_data_dir("V2RUnifiedControl")
+        self.data_dir = app_data_dir("V2RPlaywrightWeb")
         self.download_dir = self.data_dir / "downloads"
         self.report_dir = self.data_dir / "reports"
         self.log_dir = self.data_dir / "logs"
@@ -152,6 +162,7 @@ class UnifiedAutomationBackend:
                     download_dir=self.download_dir,
                     worker_count=self.config.worker_count,
                     logger=self.logger,
+                    browser_factory=PlaywrightWebBrowser,
                 )
             return self.pool
 
