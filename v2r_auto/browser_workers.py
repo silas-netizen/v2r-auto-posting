@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -201,6 +204,10 @@ class BrowserWorkerPool:
         ]
 
     def open_login_windows(self, sheet_url: str = "") -> None:
+        started_at = time.monotonic()
+        # region agent log
+        open(os.environ.get("V2R_DEBUG_LOG", "/opt/cursor/logs/debug.log"), "a").write(json.dumps({"hypothesisId":"H1,H2,H3","location":"browser_workers.py:BrowserWorkerPool.open_login_windows:entry","message":"Login window fan-out starting","data":{"workerCount":self.worker_count,"coordinatorIncluded":True,"sheetRequested":bool(sheet_url)},"timestamp":time.time_ns()//1_000_000})+"\n")
+        # endregion
         futures = [
             self.coordinator.submit(
                 lambda browser: browser.open_login_window(sheet_url),
@@ -216,6 +223,9 @@ class BrowserWorkerPool:
             )
         for future in futures:
             future.result()
+        # region agent log
+        open(os.environ.get("V2R_DEBUG_LOG", "/opt/cursor/logs/debug.log"), "a").write(json.dumps({"hypothesisId":"H1,H3","location":"browser_workers.py:BrowserWorkerPool.open_login_windows:exit","message":"Login window fan-out completed","data":{"browserCount":len(futures),"elapsedMs":round((time.monotonic()-started_at)*1000)},"timestamp":time.time_ns()//1_000_000})+"\n")
+        # endregion
         for worker in (self.coordinator, *self.workers):
             worker.set_state("로그인 대기")
 

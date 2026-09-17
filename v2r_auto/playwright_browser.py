@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -88,6 +90,10 @@ class PlaywrightBrowser:
 
     def start(self) -> None:
         """Launch Chromium once, reusing ``profile_dir`` across process runs."""
+        started_at = time.monotonic()
+        # region agent log
+        open(os.environ.get("V2R_DEBUG_LOG", "/opt/cursor/logs/debug.log"), "a").write(json.dumps({"hypothesisId":"H3,H4","location":"playwright_browser.py:PlaywrightBrowser.start:entry","message":"Persistent browser start requested","data":{"profileRole":self.config.profile_dir.name,"contextExists":self.context is not None,"headless":self.config.headless,"channelConfigured":bool(self.config.channel)},"timestamp":time.time_ns()//1_000_000})+"\n")
+        # endregion
         if self.context is not None:
             return
         self.config.profile_dir.mkdir(parents=True, exist_ok=True)
@@ -117,6 +123,9 @@ class PlaywrightBrowser:
         self.v2r_page = self.context.pages[0] if self.context.pages else self._new_page()
         if self.context.pages:
             self._prepare_page(self.v2r_page)
+        # region agent log
+        open(os.environ.get("V2R_DEBUG_LOG", "/opt/cursor/logs/debug.log"), "a").write(json.dumps({"hypothesisId":"H3","location":"playwright_browser.py:PlaywrightBrowser.start:exit","message":"Persistent browser launch completed","data":{"profileRole":self.config.profile_dir.name,"pageCount":len(self.context.pages),"elapsedMs":round((time.monotonic()-started_at)*1000)},"timestamp":time.time_ns()//1_000_000})+"\n")
+        # endregion
         self.logger.info("지속 프로필로 Chromium을 시작했습니다")
 
     def close(self) -> None:
@@ -145,8 +154,17 @@ class PlaywrightBrowser:
         page.on("dialog", lambda dialog: dialog.dismiss())
 
     def _navigate(self, page: Page, url: str) -> None:
+        started_at = time.monotonic()
+        target = "v2r" if url == V2R_LIST_URL else "sheet"
+        # region agent log
+        open(os.environ.get("V2R_DEBUG_LOG", "/opt/cursor/logs/debug.log"), "a").write(json.dumps({"hypothesisId":"H1,H2,H4,H5","location":"playwright_browser.py:PlaywrightBrowser._navigate:before","message":"Browser navigation starting","data":{"profileRole":self.config.profile_dir.name,"target":target},"timestamp":time.time_ns()//1_000_000})+"\n")
+        # endregion
         page.bring_to_front()
-        page.goto(url, wait_until="domcontentloaded")
+        response = page.goto(url, wait_until="domcontentloaded")
+        status = getattr(response, "status", None)
+        # region agent log
+        open(os.environ.get("V2R_DEBUG_LOG", "/opt/cursor/logs/debug.log"), "a").write(json.dumps({"hypothesisId":"H1,H4,H5","location":"playwright_browser.py:PlaywrightBrowser._navigate:after","message":"Browser navigation completed","data":{"profileRole":self.config.profile_dir.name,"target":target,"status":status if isinstance(status,int) else None,"elapsedMs":round((time.monotonic()-started_at)*1000)},"timestamp":time.time_ns()//1_000_000})+"\n")
+        # endregion
 
     def open_login_window(self, sheet_url: str = "") -> None:
         """Open V2R and, optionally, Sheets in separate persistent tabs."""
