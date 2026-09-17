@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import json
-import os
 import threading
-import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -210,32 +207,20 @@ class BrowserWorkerPool:
         *,
         worker_limit: int | None = None,
     ) -> None:
-        started_at = time.monotonic()
-        # region agent log
-        open(os.environ.get("V2R_DEBUG_LOG", "/opt/cursor/logs/debug.log"), "a").write(json.dumps({"hypothesisId":"H1,H2,H3","location":"browser_workers.py:BrowserWorkerPool.open_login_windows:entry","message":"Login window fan-out starting","data":{"workerCount":self.worker_count,"coordinatorIncluded":True,"sheetRequested":bool(sheet_url)},"timestamp":time.time_ns()//1_000_000})+"\n")
-        # endregion
         selected_count = self.worker_count if worker_limit is None else worker_limit
         if not 1 <= selected_count <= self.worker_count:
             raise ValueError("로그인 작업 창 수가 올바르지 않습니다")
         self._login_workers = tuple(self.workers[:selected_count])
-        futures: list[Future[Any]] = []
         if sheet_url:
-            future = self.coordinator.submit(
+            self.coordinator.submit(
                 lambda browser: browser.open_sheet_login_window(sheet_url),
                 state="로그인 대기",
-            )
-            futures.append(future)
-            future.result()
+            ).result()
         for worker in self._login_workers:
-            future = worker.submit(
+            worker.submit(
                 lambda browser: browser.open_login_window(""),
                 state="로그인 대기",
-            )
-            futures.append(future)
-            future.result()
-        # region agent log
-        open(os.environ.get("V2R_DEBUG_LOG", "/opt/cursor/logs/debug.log"), "a").write(json.dumps({"hypothesisId":"H1,H3","location":"browser_workers.py:BrowserWorkerPool.open_login_windows:exit","message":"Login window fan-out completed","data":{"browserCount":len(futures),"elapsedMs":round((time.monotonic()-started_at)*1000)},"timestamp":time.time_ns()//1_000_000})+"\n")
-        # endregion
+            ).result()
         for worker in self._login_workers:
             worker.set_state("로그인 대기")
 
