@@ -133,3 +133,30 @@ def test_pool_runs_partitions_concurrently(tmp_path: Path) -> None:
         pool.close()
 
     assert sorted(results) == [(0, 2), (1, 3)]
+
+
+def test_worker_recycle_reopens_same_persistent_profile(tmp_path: Path) -> None:
+    FakeBrowser.created_profiles = []
+    pool = BrowserWorkerPool(
+        data_dir=tmp_path,
+        download_dir=tmp_path / "downloads",
+        worker_count=1,
+        logger=logging.getLogger("recycle-test"),
+        browser_factory=FakeBrowser,
+    )
+    worker = pool.workers[0]
+    original = worker.browser
+    try:
+        worker.submit(
+            lambda _browser: worker.recycle_inline(),
+            state="발행 중",
+        ).result()
+
+        replacement = worker.browser
+        assert replacement is not original
+        assert replacement.config.profile_dir == original.config.profile_dir
+        assert original.calls == [("close", "")]
+        assert replacement.calls[:2] == [("open", ""), ("verify", "")]
+        assert len(set(original.thread_ids + replacement.thread_ids)) == 1
+    finally:
+        pool.close()

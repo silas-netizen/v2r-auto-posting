@@ -30,6 +30,7 @@ def test_control_config_accepts_immediate_daily_settings() -> None:
             "publish_mode": "immediate",
             "auto_account_limit": 8,
             "immediate_interval_minutes": 4,
+            "browser_recycle_jobs": 30,
         }
     )
 
@@ -37,6 +38,7 @@ def test_control_config_accepts_immediate_daily_settings() -> None:
     assert config.publish_mode == "immediate"
     assert config.auto_account_limit == 8
     assert config.immediate_interval_minutes == 4
+    assert config.browser_recycle_jobs == 30
 
 
 @pytest.mark.parametrize(
@@ -48,6 +50,7 @@ def test_control_config_accepts_immediate_daily_settings() -> None:
         ("publish_mode", "other"),
         ("auto_account_limit", 1),
         ("immediate_interval_minutes", 16),
+        ("browser_recycle_jobs", 15),
     ],
 )
 def test_control_config_rejects_unsafe_values(field: str, value) -> None:
@@ -58,6 +61,7 @@ def test_control_config_rejects_unsafe_values(field: str, value) -> None:
         "publish_mode": "reserved",
         "auto_account_limit": 10,
         "immediate_interval_minutes": 1,
+        "browser_recycle_jobs": 20,
     }
     values[field] = value
     with pytest.raises(ValueError):

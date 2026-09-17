@@ -57,6 +57,7 @@ class ControlConfig:
     publish_mode: str = "reserved"
     auto_account_limit: int = 10
     immediate_interval_minutes: int = 1
+    browser_recycle_jobs: int = 20
 
     @classmethod
     def from_values(cls, values: dict[str, Any]) -> "ControlConfig":
@@ -78,6 +79,11 @@ class ControlConfig:
         interval = int(values.get("immediate_interval_minutes", 1))
         if not 1 <= interval <= 15:
             raise ValueError("즉시 발행 간격은 1분부터 15분까지 선택하세요")
+        browser_recycle_jobs = int(values.get("browser_recycle_jobs", 20))
+        if browser_recycle_jobs not in {0, 10, 20, 30, 50}:
+            raise ValueError(
+                "브라우저 메모리 회수 주기는 사용 안 함, 10, 20, 30, 50건 중 선택하세요"
+            )
         return cls(
             program=program,
             worker_count=worker_count,
@@ -89,6 +95,7 @@ class ControlConfig:
             publish_mode=publish_mode,
             auto_account_limit=auto_account_limit,
             immediate_interval_minutes=interval,
+            browser_recycle_jobs=browser_recycle_jobs,
         )
 
 
@@ -391,7 +398,11 @@ class UnifiedAutomationBackend:
             self._message = f"{pool.worker_count}개 작업 창에 원고를 배정했습니다."
 
         def execute(worker_id, worker_browser, rows):
-            browser = SheetDelegatingBrowser(worker_browser, pool)
+            browser = SheetDelegatingBrowser(
+                worker_browser,
+                pool,
+                worker_id=worker_id,
+            )
             last_progress = 0
 
             def progress(completed: int, total: int) -> None:
@@ -399,6 +410,20 @@ class UnifiedAutomationBackend:
                 delta = max(0, completed - last_progress)
                 last_progress = completed
                 self._progress(worker_id, delta, total)
+                recycle_jobs = self.config.browser_recycle_jobs
+                if (
+                    delta
+                    and recycle_jobs
+                    and completed < total
+                    and completed % recycle_jobs == 0
+                    and not self.stop_event.is_set()
+                ):
+                    self.logger.info(
+                        "작업 창 %s: %s건 완료 후 브라우저 메모리를 회수합니다",
+                        worker_id + 1,
+                        completed,
+                    )
+                    browser.recycle_worker_browser()
 
             if self.config.program == "affiliate":
                 runner = AffiliateRunner(

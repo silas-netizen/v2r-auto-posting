@@ -222,26 +222,11 @@ class AffiliateApiPublisher:
     def _capture_authorization(self) -> None:
         if self.authorization:
             return
-        driver = self.browser.driver
-        if driver is None:
+        if self.browser is None:
             raise AffiliateApiError("Chrome이 열려 있지 않습니다")
-        driver.get_log("performance")
-        driver.get("https://v2r.daboja.im/nc/board?view=list")
-        time.sleep(1)
-        for entry in driver.get_log("performance"):
-            try:
-                message = json.loads(entry["message"])["message"]
-                request = message["params"]["request"]
-            except (KeyError, TypeError, json.JSONDecodeError):
-                continue
-            if message.get("method") != "Network.requestWillBeSent":
-                continue
-            if "api-v2r.daboja.im" not in request.get("url", ""):
-                continue
-            headers = request.get("headers", {})
-            token = headers.get("Authorization") or headers.get("authorization")
-            if token:
-                self.authorization = token
+        self.authorization = str(
+            self.browser.capture_v2r_authorization() or ""
+        )
         if not self.authorization:
             raise AffiliateApiError("V2R 로그인 정보를 확인하지 못했습니다. 다시 로그인하세요")
 

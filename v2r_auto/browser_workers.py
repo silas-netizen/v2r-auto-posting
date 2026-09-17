@@ -71,6 +71,9 @@ class BrowserWorker:
         browser_factory: Callable[[BrowserConfig, Any], V2RBrowser] = V2RBrowser,
     ):
         self.worker_id = worker_id
+        self.config = config
+        self.logger = logger
+        self.browser_factory = browser_factory
         self.browser = browser_factory(config, logger)
         self._executor = ThreadPoolExecutor(
             max_workers=1,
@@ -124,6 +127,15 @@ class BrowserWorker:
             return result
 
         return self._executor.submit(run)
+
+    def recycle_inline(self) -> None:
+        """Recreate this worker browser at a job-safe point on its owner thread."""
+        self.set_state("메모리 회수 중")
+        self.browser.close()
+        self.browser = self.browser_factory(self.config, self.logger)
+        self.browser.open_login_window("")
+        self.browser.ensure_v2r_login("", "")
+        self.set_state("발행 중")
 
     def close(self) -> None:
         try:
@@ -255,6 +267,11 @@ class BrowserWorkerPool:
         with self.sheet_lock:
             return self.call_coordinator(callback, state="시트 기록 중")
 
+    def recycle_worker_inline(self, worker_id: int) -> None:
+        if not 0 <= worker_id < len(self.workers):
+            raise ValueError(f"작업 창 번호가 올바르지 않습니다: {worker_id}")
+        self.workers[worker_id].recycle_inline()
+
     def close(self) -> None:
         if self._closed:
             return
@@ -271,12 +288,24 @@ class SheetDelegatingBrowser:
         self,
         worker_browser: V2RBrowser,
         pool: BrowserWorkerPool,
+        worker_id: int | None = None,
     ):
         self._worker_browser = worker_browser
         self._pool = pool
+        self._worker_id = worker_id
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._worker_browser, name)
+        browser = (
+            self._pool.workers[self._worker_id].browser
+            if self._worker_id is not None
+            else self._worker_browser
+        )
+        return getattr(browser, name)
+
+    def recycle_worker_browser(self) -> None:
+        if self._worker_id is None:
+            raise RuntimeError("작업 창 번호가 없어 브라우저를 재시작할 수 없습니다")
+        self._pool.recycle_worker_inline(self._worker_id)
 
     def update_sheet_cell(self, *args: Any, **kwargs: Any) -> Any:
         return self._pool.write_sheet(

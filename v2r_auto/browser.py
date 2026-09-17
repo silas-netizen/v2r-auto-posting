@@ -423,6 +423,29 @@ class V2RBrowser:
             raise AutomationError("V2R 로그인에 실패했습니다. 계정 정보나 추가 인증을 확인하세요") from exc
         self.logger.info("V2R 로그인 완료")
 
+    def capture_v2r_authorization(self) -> str:
+        """Capture the current V2R bearer token without exposing the driver."""
+        self.start()
+        assert self.driver
+        self.driver.get_log("performance")
+        self._navigate(V2R_LIST_URL, self.v2r_handle)
+        time.sleep(1)
+        for entry in reversed(self.driver.get_log("performance")):
+            try:
+                message = json.loads(entry["message"])["message"]
+                request = message["params"]["request"]
+            except (KeyError, TypeError, json.JSONDecodeError):
+                continue
+            if message.get("method") != "Network.requestWillBeSent":
+                continue
+            if "api-v2r.daboja.im" not in request.get("url", ""):
+                continue
+            headers = request.get("headers", {})
+            token = headers.get("Authorization") or headers.get("authorization")
+            if token:
+                return str(token)
+        return ""
+
     @staticmethod
     def _xpath_literal(value: str) -> str:
         if "'" not in value:

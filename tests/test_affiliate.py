@@ -1488,3 +1488,18 @@ def test_completed_affiliate_source_is_probed_then_republished(
     assert browser.calls == 1
     assert result.jobs[0].status == JobStatus.SUCCESS
     assert result.jobs[0].revision_url.endswith("new-revision")
+
+
+def test_authorization_capture_uses_browser_engine_contract() -> None:
+    class Browser:
+        def capture_v2r_authorization(self):
+            return "Bearer playwright-session"
+
+    publisher = AffiliateApiPublisher(
+        Browser(),
+        logging.getLogger("authorization-contract-test"),
+    )
+
+    publisher._capture_authorization()
+
+    assert publisher.authorization == "Bearer playwright-session"

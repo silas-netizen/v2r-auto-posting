@@ -64,6 +64,15 @@ CONTROL_HTML = """<!doctype html>
             <option>4</option><option>5</option>
           </select>
         </label>
+        <label>브라우저 메모리 회수
+          <select id="browser_recycle_jobs">
+            <option value="0">사용 안 함</option>
+            <option value="10">10건마다</option>
+            <option value="20" selected>20건마다</option>
+            <option value="30">30건마다</option>
+            <option value="50">50건마다</option>
+          </select>
+        </label>
         <label>자사 입력 모드
           <select id="input_mode">
             <option value="brand">브랜드 Google Sheet</option>
@@ -169,8 +178,9 @@ header{display:block}.pill{display:inline-block;margin-top:12px}}
 
 
 CONTROL_JS = """
+const csrf = document.querySelector('meta[name="csrf-token"]')?.content || '';
 const api = (path, options={}) => fetch(`api/${path}`, {
-  headers: {'Content-Type':'application/json'}, ...options
+  headers: {'Content-Type':'application/json', 'X-CSRF-Token':csrf}, ...options
 }).then(async response => {
   const body = await response.json();
   if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
@@ -178,7 +188,7 @@ const api = (path, options={}) => fetch(`api/${path}`, {
 });
 const fields = ['program','worker_count','input_mode','auto_account_limit',
   'sheet_url','excel_path','photo_washer_path','dry_run','publish_mode',
-  'immediate_interval_minutes'];
+  'immediate_interval_minutes','browser_recycle_jobs'];
 let configured = false;
 
 function values() {
@@ -187,6 +197,7 @@ function values() {
   result.worker_count = Number(result.worker_count);
   result.auto_account_limit = Number(result.auto_account_limit);
   result.immediate_interval_minutes = Number(result.immediate_interval_minutes);
+  result.browser_recycle_jobs = Number(result.browser_recycle_jobs);
   result.dry_run = result.dry_run === 'true';
   return result;
 }
