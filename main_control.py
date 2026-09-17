@@ -14,7 +14,7 @@ def main() -> None:
     parser.add_argument(
         "--public-host",
         default=os.environ.get("V2R_CONTROL_PUBLIC_HOST", ""),
-        help="원격 PC가 접속할 공인 IP 주소",
+        help="HTTPS 프록시가 제공하는 공인 호스트 또는 IP",
     )
     parser.add_argument(
         "--port",
@@ -23,20 +23,13 @@ def main() -> None:
     )
     args = parser.parse_args()
     backend = UnifiedAutomationBackend()
-    try:
-        server = RemoteHttpsControlServer(
-            backend,
-            data_dir=backend.data_dir,
-            public_host=args.public_host,
-            port=args.port,
-        )
-    except OSError:
-        server = RemoteHttpsControlServer(
-            backend,
-            data_dir=backend.data_dir,
-            public_host=args.public_host,
-            port=0,
-        )
+    server = RemoteHttpsControlServer(
+        backend,
+        data_dir=backend.data_dir,
+        public_host=args.public_host,
+        bind_host="127.0.0.1",
+        port=args.port,
+    )
     server.start()
     launch_control_window(
         server.local_url,

@@ -67,6 +67,23 @@ dist\V2R-Auto-Posting.exe
 
 GitHub Actions의 **Build Windows EXE** 작업에서도 Windows 실행 파일을 자동으로 생성합니다. 작업 화면의 Artifacts에서 `V2R-Auto-Posting-Windows`를 내려받을 수 있습니다.
 
+## 원격 통합 제어
+
+통합 제어 서버는 보안을 위해 `127.0.0.1:8765`에만 연결됩니다. 인터넷에서
+여러 PC로 접속할 때는 공인 인증서를 사용하는 Caddy, nginx 또는 Tailscale
+Serve를 같은 메인 PC에 두고 HTTPS 요청을 이 루프백 주소로 전달하세요.
+
+```powershell
+py main_control.py --public-host control.example.com --port 8765
+```
+
+- 공유기와 Windows 방화벽에는 프록시의 HTTPS 포트(보통 443)만 엽니다.
+- 애플리케이션 포트 8765는 포트 포워딩하거나 외부에 직접 노출하지 않습니다.
+- 프록시는 외부 `Host`를 유지하고, 내부 인증서는 프로그램 데이터 폴더의
+  `https\remote-control-cert.pem`을 신뢰하도록 설정합니다.
+- 공인 IP를 직접 사용하는 경우에도 브라우저가 신뢰하는 IP-SAN 인증서와
+  자동 갱신이 필요합니다. 불가능하면 Tailscale 같은 사설 연결을 사용하세요.
+
 ## 개발 실행
 
 Python 3.11 이상과 Chrome이 필요합니다.

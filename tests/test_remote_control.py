@@ -6,7 +6,7 @@ import ssl
 from http.cookiejar import CookieJar
 from pathlib import Path
 from urllib.error import HTTPError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import (
     HTTPSHandler,
     HTTPCookieProcessor,
@@ -15,6 +15,7 @@ from urllib.request import (
     urlopen,
 )
 
+import pytest
 from cryptography import x509
 
 from v2r_auto.remote_control import (
@@ -41,11 +42,17 @@ def insecure_context() -> ssl.SSLContext:
 
 
 def post_form(url: str, values: dict[str, str], **headers) -> Request:
+    parsed = urlsplit(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
     return Request(
         url,
         method="POST",
         data=urlencode(values).encode(),
-        headers={"Content-Type": "application/x-www-form-urlencoded", **headers},
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Origin": origin,
+            **headers,
+        },
     )
 
 
@@ -127,7 +134,7 @@ def test_remote_server_requires_setup_login_and_csrf(tmp_path: Path) -> None:
         response = opener.open(login)
         body = response.read().decode()
         cookie = "; ".join(f"{item.name}={item.value}" for item in jar)
-        assert "v2r_session=" in cookie
+        assert "__Host-v2r_session=" in cookie
         assert "V2R 통합 제어" in body
         csrf = re.search(
             r'<meta name="csrf-token" content="([^"]+)"',
@@ -138,7 +145,11 @@ def test_remote_server_requires_setup_login_and_csrf(tmp_path: Path) -> None:
             base + "api/action/pause",
             method="POST",
             data=b"{}",
-            headers={"Cookie": cookie, "Content-Type": "application/json"},
+            headers={
+                "Cookie": cookie,
+                "Content-Type": "application/json",
+                "Origin": base.rstrip("/"),
+            },
         )
         try:
             urlopen(missing_csrf, context=context)
@@ -147,7 +158,7 @@ def test_remote_server_requires_setup_login_and_csrf(tmp_path: Path) -> None:
         else:
             raise AssertionError("missing CSRF token must be rejected")
 
-        valid = Request(
+        missing_origin = Request(
             base + "api/action/pause",
             method="POST",
             data=b"{}",
@@ -157,7 +168,37 @@ def test_remote_server_requires_setup_login_and_csrf(tmp_path: Path) -> None:
                 "X-CSRF-Token": csrf,
             },
         )
+        try:
+            urlopen(missing_origin, context=context)
+        except HTTPError as exc:
+            assert exc.code == 403
+            assert "요청 출처" in exc.read().decode()
+        else:
+            raise AssertionError("missing Origin must be rejected")
+
+        valid = Request(
+            base + "api/action/pause",
+            method="POST",
+            data=b"{}",
+            headers={
+                "Cookie": cookie,
+                "Content-Type": "application/json",
+                "X-CSRF-Token": csrf,
+                "Origin": base.rstrip("/"),
+            },
+        )
         with urlopen(valid, context=context) as response:
             assert json.load(response)["action"] == "pause"
     finally:
         server.close()
+
+
+def test_remote_server_refuses_public_bind(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="직접 노출"):
+        RemoteHttpsControlServer(
+            FakeBackend(),
+            data_dir=tmp_path,
+            public_host="203.0.113.10",
+            bind_host="0.0.0.0",
+            port=0,
+        )

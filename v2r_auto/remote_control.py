@@ -263,9 +263,18 @@ class RemoteHttpsControlServer:
         *,
         data_dir: Path,
         public_host: str = "",
-        bind_host: str = "0.0.0.0",
+        bind_host: str = "127.0.0.1",
         port: int = 8765,
     ):
+        try:
+            bind_address = ipaddress.ip_address(bind_host)
+        except ValueError as exc:
+            raise ValueError("제어 서버는 127.0.0.1에만 연결할 수 있습니다") from exc
+        if not bind_address.is_loopback:
+            raise ValueError(
+                "제어 서버를 인터넷에 직접 노출할 수 없습니다. "
+                "루프백 프록시를 사용하세요"
+            )
         self.backend = backend
         self.public_host = public_host.strip()
         self.credentials = AdminCredentialStore(data_dir / "admin-credential.json")
@@ -280,6 +289,10 @@ class RemoteHttpsControlServer:
 
             def log_message(self, _format: str, *_args: object) -> None:
                 return
+
+            def setup(self) -> None:
+                super().setup()
+                self.connection.settimeout(15)
 
             def _is_loopback(self) -> bool:
                 try:
@@ -297,11 +310,38 @@ class RemoteHttpsControlServer:
 
             def _session_id(self) -> str:
                 jar = cookies.SimpleCookie(self.headers.get("Cookie", ""))
-                morsel = jar.get("v2r_session")
+                morsel = jar.get("__Host-v2r_session")
                 return morsel.value if morsel else ""
 
             def _session(self) -> Session | None:
                 return server_ref.sessions.get(self._session_id())
+
+            def _origin_allowed(self) -> bool:
+                origin = self.headers.get("Origin", "")
+                allowed = {
+                    f"https://localhost:{server_ref.port}",
+                    f"https://127.0.0.1:{server_ref.port}",
+                }
+                if server_ref.public_host:
+                    allowed.add(f"https://{server_ref.public_host}")
+                    allowed.add(
+                        f"https://{server_ref.public_host}:{server_ref.port}"
+                    )
+                return origin in allowed
+
+            def _read_body(self) -> bytes:
+                if self.headers.get("Transfer-Encoding"):
+                    raise ValueError("분할 전송 요청은 허용되지 않습니다")
+                raw_length = self.headers.get("Content-Length")
+                if raw_length is None:
+                    raise ValueError("Content-Length가 필요합니다")
+                try:
+                    length = int(raw_length)
+                except ValueError as exc:
+                    raise ValueError("Content-Length가 올바르지 않습니다") from exc
+                if not 0 <= length <= 65536:
+                    raise ValueError("요청 본문은 64KB를 초과할 수 없습니다")
+                return self.rfile.read(length)
 
             def _send(
                 self,
@@ -320,13 +360,20 @@ class RemoteHttpsControlServer:
                 self.send_header("X-Frame-Options", "DENY")
                 self.send_header("Referrer-Policy", "no-referrer")
                 self.send_header(
+                    "Permissions-Policy",
+                    "camera=(), microphone=(), geolocation=()",
+                )
+                self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+                self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+                self.send_header(
                     "Strict-Transport-Security",
                     "max-age=31536000",
                 )
                 self.send_header(
                     "Content-Security-Policy",
                     "default-src 'self'; script-src 'self'; style-src 'self'; "
-                    "connect-src 'self'; frame-ancestors 'none'; form-action 'self'",
+                    "connect-src 'self'; object-src 'none'; base-uri 'none'; "
+                    "frame-ancestors 'none'; form-action 'self'",
                 )
                 if cookie:
                     self.send_header("Set-Cookie", cookie)
@@ -348,9 +395,8 @@ class RemoteHttpsControlServer:
             def _form(self) -> dict[str, str]:
                 from urllib.parse import parse_qs
 
-                length = min(int(self.headers.get("Content-Length", "0")), 65536)
                 parsed = parse_qs(
-                    self.rfile.read(length).decode("utf-8", errors="replace")
+                    self._read_body().decode("utf-8", errors="strict")
                 )
                 return {key: values[0] for key, values in parsed.items()}
 
@@ -403,12 +449,19 @@ class RemoteHttpsControlServer:
                 if not self._host_allowed():
                     self._json(421, {"error": "허용되지 않은 접속 주소입니다"})
                     return
+                if not self._origin_allowed():
+                    self._json(403, {"error": "요청 출처가 올바르지 않습니다"})
+                    return
                 address = self.client_address[0]
                 if self.path == "/auth/setup":
                     if server_ref.credentials.configured or not self._is_loopback():
                         self._json(403, {"error": "설정할 수 없습니다"})
                         return
-                    form = self._form()
+                    try:
+                        form = self._form()
+                    except (UnicodeDecodeError, ValueError) as exc:
+                        self._json(400, {"error": str(exc)})
+                        return
                     if form.get("password") != form.get("confirmation"):
                         body = SETUP_HTML.format(
                             message="비밀번호 확인이 일치하지 않습니다."
@@ -429,9 +482,12 @@ class RemoteHttpsControlServer:
                     if not server_ref.rate_limiter.allowed(address):
                         self._json(429, {"error": "로그인 시도가 잠시 제한됐습니다"})
                         return
-                    if not server_ref.credentials.verify(
-                        self._form().get("password", "")
-                    ):
+                    try:
+                        password = self._form().get("password", "")
+                    except (UnicodeDecodeError, ValueError) as exc:
+                        self._json(400, {"error": str(exc)})
+                        return
+                    if not server_ref.credentials.verify(password):
                         server_ref.rate_limiter.fail(address)
                         body = LOGIN_HTML.format(
                             message="비밀번호가 올바르지 않습니다."
@@ -442,7 +498,7 @@ class RemoteHttpsControlServer:
                     session_id, _session = server_ref.sessions.create()
                     self._redirect(
                         "/",
-                        "v2r_session="
+                        "__Host-v2r_session="
                         + session_id
                         + "; Path=/; Secure; HttpOnly; SameSite=Strict",
                     )
@@ -452,6 +508,21 @@ class RemoteHttpsControlServer:
                 if session is None:
                     self._json(401, {"error": "로그인이 필요합니다"})
                     return
+                if self.headers.get("Sec-Fetch-Site", "same-origin") not in {
+                    "same-origin",
+                    "none",
+                }:
+                    self._json(403, {"error": "교차 사이트 요청은 허용되지 않습니다"})
+                    return
+                if (
+                    self.headers.get("Content-Type", "")
+                    .split(";", 1)[0]
+                    .strip()
+                    .lower()
+                    != "application/json"
+                ):
+                    self._json(415, {"error": "JSON 요청만 허용됩니다"})
+                    return
                 if not hmac.compare_digest(
                     self.headers.get("X-CSRF-Token", ""),
                     session.csrf_token,
@@ -459,8 +530,7 @@ class RemoteHttpsControlServer:
                     self._json(403, {"error": "보안 토큰이 올바르지 않습니다"})
                     return
                 try:
-                    length = min(int(self.headers.get("Content-Length", "0")), 65536)
-                    payload = json.loads(self.rfile.read(length) or b"{}")
+                    payload = json.loads(self._read_body() or b"{}")
                     if self.path == "/api/configure":
                         result = server_ref.backend.configure(payload)
                     elif self.path.startswith("/api/action/"):
@@ -470,7 +540,12 @@ class RemoteHttpsControlServer:
                     else:
                         self._json(404, {"error": "not found"})
                         return
-                except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                except (
+                    UnicodeDecodeError,
+                    ValueError,
+                    TypeError,
+                    json.JSONDecodeError,
+                ) as exc:
                     self._json(400, {"error": str(exc)})
                     return
                 except Exception as exc:
