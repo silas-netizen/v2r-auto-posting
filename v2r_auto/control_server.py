@@ -49,80 +49,106 @@ CONTROL_HTML = """<!doctype html>
       <span id="server-state" class="pill">연결 중</span>
     </header>
 
-    <section class="panel settings">
-      <h2>작업 설정</h2>
-      <div class="grid">
-        <label>프로그램
-          <select id="program">
-            <option value="affiliate">제휴 수정 발행</option>
-            <option value="immediate">자사 발행</option>
-          </select>
-        </label>
-        <label>작업 창 수
-          <select id="worker_count">
-            <option>1</option><option>2</option><option selected>3</option>
-            <option>4</option><option>5</option>
-          </select>
-        </label>
-        <label>브라우저 메모리 회수
-          <select id="browser_recycle_jobs">
-            <option value="0">사용 안 함</option>
-            <option value="10">10건마다</option>
-            <option value="20" selected>20건마다</option>
-            <option value="30">30건마다</option>
-            <option value="50">50건마다</option>
-          </select>
-        </label>
-        <label>자사 입력 모드
-          <select id="input_mode">
-            <option value="brand">브랜드 Google Sheet</option>
-            <option value="daily">일상 글 Excel</option>
-            <option value="account_test">전체 계정 한 줄 테스트</option>
-          </select>
-        </label>
-        <label>자동 배정 ID 수
-          <select id="auto_account_limit">
-            <option>2</option><option>3</option><option>4</option>
-            <option>5</option><option>6</option><option>7</option>
-            <option>8</option><option>9</option><option selected>10</option>
-          </select>
-        </label>
-        <label class="wide">Google Sheet URL
-          <input id="sheet_url" type="url" placeholder="https://docs.google.com/spreadsheets/...">
-        </label>
-        <label class="wide">일상 글 Excel 경로
-          <input id="excel_path" type="text" placeholder="자사 일상 Excel 모드에서만 사용">
-        </label>
-        <label class="wide">포토워셔 main.exe 경로
-          <input id="photo_washer_path" type="text" placeholder="비워두면 저장된 경로 자동 사용">
-        </label>
-        <label>실행 모드
-          <select id="dry_run">
-            <option value="true">검증 모드</option>
-            <option value="false">실제 발행</option>
-          </select>
-        </label>
-        <label>자사 발행 방식
-          <select id="publish_mode">
-            <option value="reserved">예약 발행</option>
-            <option value="immediate">즉시 발행</option>
-          </select>
-        </label>
-        <label>즉시 발행 간격(분)
-          <select id="immediate_interval_minutes">
-            <option>1</option><option>2</option><option>3</option>
-            <option>4</option><option>5</option><option>6</option>
-            <option>7</option><option>8</option><option>9</option>
-            <option>10</option><option>11</option><option>12</option>
-            <option>13</option><option>14</option><option>15</option>
-          </select>
-        </label>
+    <nav class="major-nav" aria-label="큰 메뉴">
+      <a href="#settings"><span>01</span><strong>작업 설정</strong><small>입력과 발행 조건</small></a>
+      <a href="#controls"><span>02</span><strong>실행 제어</strong><small>로그인부터 시작</small></a>
+      <a href="#browser-status"><span>03</span><strong>브라우저 상태</strong><small>작업 창 진행률</small></a>
+    </nav>
+
+    <section id="settings" class="panel major-menu settings">
+      <div class="major-heading"><span class="major-index">01</span><div>
+        <p class="menu-level">큰 메뉴</p><h2>작업 설정</h2>
+        <p>작업 종류와 입력 자료, 발행 방식을 순서대로 설정합니다.</p>
+      </div></div>
+      <div class="sub-menu">
+        <div class="sub-heading"><span>작은 메뉴 1</span><h3>기본 작업</h3></div>
+        <div class="grid">
+          <label>프로그램
+            <select id="program">
+              <option value="affiliate">제휴 수정 발행</option>
+              <option value="immediate">자사 발행</option>
+            </select>
+          </label>
+          <label>작업 창 수
+            <select id="worker_count">
+              <option>1</option><option>2</option><option selected>3</option>
+              <option>4</option><option>5</option>
+            </select>
+          </label>
+          <label>브라우저 메모리 회수
+            <select id="browser_recycle_jobs">
+              <option value="0">사용 안 함</option>
+              <option value="10">10건마다</option>
+              <option value="20" selected>20건마다</option>
+              <option value="30">30건마다</option>
+              <option value="50">50건마다</option>
+            </select>
+          </label>
+          <label>자사 입력 모드
+            <select id="input_mode">
+              <option value="brand">브랜드 Google Sheet</option>
+              <option value="daily">일상 글 Excel</option>
+              <option value="account_test">전체 계정 한 줄 테스트</option>
+            </select>
+          </label>
+          <label>자동 배정 ID 수
+            <select id="auto_account_limit">
+              <option>2</option><option>3</option><option>4</option>
+              <option>5</option><option>6</option><option>7</option>
+              <option>8</option><option>9</option><option selected>10</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <div class="sub-menu">
+        <div class="sub-heading"><span>작은 메뉴 2</span><h3>입력 데이터</h3></div>
+        <div class="grid">
+          <label class="wide">Google Sheet URL
+            <input id="sheet_url" type="url" placeholder="https://docs.google.com/spreadsheets/...">
+          </label>
+          <label class="wide">일상 글 Excel 경로
+            <input id="excel_path" type="text" placeholder="자사 일상 Excel 모드에서만 사용">
+          </label>
+          <label class="wide">포토워셔 main.exe 경로
+            <input id="photo_washer_path" type="text" placeholder="비워두면 저장된 경로 자동 사용">
+          </label>
+        </div>
+      </div>
+      <div class="sub-menu">
+        <div class="sub-heading"><span>작은 메뉴 3</span><h3>발행 옵션</h3></div>
+        <div class="grid">
+          <label>실행 모드
+            <select id="dry_run">
+              <option value="true">검증 모드</option>
+              <option value="false">실제 발행</option>
+            </select>
+          </label>
+          <label>자사 발행 방식
+            <select id="publish_mode">
+              <option value="reserved">예약 발행</option>
+              <option value="immediate">즉시 발행</option>
+            </select>
+          </label>
+          <label>즉시 발행 간격(분)
+            <select id="immediate_interval_minutes">
+              <option>1</option><option>2</option><option>3</option>
+              <option>4</option><option>5</option><option>6</option>
+              <option>7</option><option>8</option><option>9</option>
+              <option>10</option><option>11</option><option>12</option>
+              <option>13</option><option>14</option><option>15</option>
+            </select>
+          </label>
+        </div>
       </div>
       <button id="save" class="secondary">설정 저장</button>
     </section>
 
-    <section class="panel">
-      <h2>실행 제어</h2>
+    <section id="controls" class="panel major-menu">
+      <div class="major-heading"><span class="major-index">02</span><div>
+        <p class="menu-level">큰 메뉴</p><h2>실행 제어</h2>
+        <p>번호 순서대로 준비한 뒤 작업을 시작합니다.</p>
+      </div></div>
+      <div class="sub-heading"><span>작은 메뉴</span><h3>작업 버튼</h3></div>
       <div class="actions">
         <button data-action="open_login">1. 로그인 창 열기</button>
         <button data-action="verify_login">2. 로그인 확인</button>
@@ -136,9 +162,12 @@ CONTROL_HTML = """<!doctype html>
       <p id="message" class="message">설정을 저장한 뒤 로그인 창을 열어주세요.</p>
     </section>
 
-    <section class="panel">
-      <div class="section-title">
-        <h2>브라우저 창 상태</h2>
+    <section id="browser-status" class="panel major-menu">
+      <div class="section-title major-heading">
+        <span class="major-index">03</span><div>
+          <p class="menu-level">큰 메뉴</p><h2>브라우저 창 상태</h2>
+          <p>각 Playwright 작업 창의 현재 단계와 처리 행을 확인합니다.</p>
+        </div>
         <span id="summary"></span>
       </div>
       <div id="workers" class="workers"></div>
@@ -172,8 +201,25 @@ justify-content:space-between;align-items:center}.workers{display:grid;
 grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}.worker{padding:14px;
 border:1px solid #e0e6ef;border-radius:12px;background:#f8fafc}.worker strong{display:block;
 margin-bottom:5px}.worker span{font-size:13px;color:#617086}.worker.error{border-color:#f1b3b3;
-background:#fff7f7}@media(max-width:680px){.grid{grid-template-columns:1fr}.wide{grid-column:auto}
-header{display:block}.pill{display:inline-block;margin-top:12px}}
+background:#fff7f7}.major-nav{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:0 0 18px}
+.major-nav a{display:grid;grid-template-columns:auto 1fr;column-gap:10px;align-items:center;padding:14px 16px;
+border:1px solid #d8e1ee;border-radius:14px;background:#fff;color:#172033;text-decoration:none}
+.major-nav a:hover{border-color:#3267d6;box-shadow:0 7px 18px rgba(50,103,214,.10)}
+.major-nav span{grid-row:1/3;font-size:12px;font-weight:900;color:#3267d6;background:#eaf1ff;
+border-radius:8px;padding:8px}.major-nav strong{font-size:15px}.major-nav small{color:#7a879b;margin-top:2px}
+.major-menu{padding:24px;border-top:5px solid #3267d6;scroll-margin-top:12px}.major-heading{display:flex;
+align-items:flex-start;gap:14px;margin-bottom:18px}.major-heading>div{flex:1}.major-heading h2{font-size:24px;
+margin:1px 0 5px}.major-heading p{margin:0;color:#6b778b;font-size:13px}.major-index{display:inline-flex;
+align-items:center;justify-content:center;min-width:46px;height:46px;border-radius:13px;background:#3267d6;
+color:#fff;font-size:15px;font-weight:900}.menu-level{font-size:10px!important;color:#3267d6!important;
+font-weight:900;letter-spacing:.12em;text-transform:uppercase}.sub-menu{padding:18px;margin:12px 0;
+border:1px solid #e1e7f0;border-radius:14px;background:#f8fafc}.sub-heading{display:flex;align-items:center;
+gap:9px;margin-bottom:13px}.sub-heading span{padding:5px 8px;border-radius:7px;background:#e8eef8;color:#52627a;
+font-size:10px;font-weight:900}.sub-heading h3{font-size:16px;margin:0;color:#283750}.section-title #summary{
+align-self:center;padding:8px 12px;border-radius:9px;background:#edf3ff;color:#315da8;font-weight:800}
+@media(max-width:680px){.grid{grid-template-columns:1fr}.wide{grid-column:auto}
+header{display:block}.pill{display:inline-block;margin-top:12px}.major-nav{grid-template-columns:1fr}
+.major-menu{padding:18px}.major-heading h2{font-size:21px}.section-title{align-items:flex-start;flex-wrap:wrap}}
 """
 
 

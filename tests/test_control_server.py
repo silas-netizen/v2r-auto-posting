@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 from cryptography import x509
 
 from v2r_auto.control_server import (
+    CONTROL_HTML,
     LocalHttpsControlServer,
     ensure_localhost_certificate,
 )
@@ -108,3 +109,20 @@ def test_control_server_rejects_missing_session_token(tmp_path: Path) -> None:
             raise AssertionError("missing token must be rejected")
     finally:
         server.close()
+
+
+def test_playwright_control_menu_hierarchy_is_visually_labeled() -> None:
+    assert 'class="major-nav"' in CONTROL_HTML
+    assert CONTROL_HTML.count('class="panel major-menu') == 3
+    assert all(
+        label in CONTROL_HTML
+        for label in (
+            "큰 메뉴",
+            "작은 메뉴 1",
+            "기본 작업",
+            "작은 메뉴 2",
+            "입력 데이터",
+            "작은 메뉴 3",
+            "발행 옵션",
+        )
+    )
