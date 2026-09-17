@@ -38,6 +38,7 @@ jobs:
           python -m PyInstaller --noconfirm --clean v2r-auto-posting.spec
           python -m PyInstaller --noconfirm --clean v2r-auto-affiliate.spec
           python -m PyInstaller --noconfirm --clean v2r-immediate-posting.spec
+          python -m PyInstaller --noconfirm --clean v2r-unified-control.spec
 
       - name: Publish verified executable ZIPs
         if: >-
