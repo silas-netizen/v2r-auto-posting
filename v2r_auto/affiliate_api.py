@@ -681,6 +681,7 @@ class AffiliateApiPublisher:
             status_data = self._request(
                 "GET", "/naver_cafes/naver_join_cafe", query={"cafe_id": cafe_id}
             )
+            self._member_status_cache[cafe_id] = status_data
             joined = {
                 str(item["login_id"]): item
                 for item in _walk_dicts(status_data)
@@ -851,11 +852,14 @@ class AffiliateApiPublisher:
         failed_jobs: list[Any] = []
         for (cafe_name, cafe_id), cafe_jobs in pending_by_cafe.items():
             assigned_accounts = {job.account for job in cafe_jobs}
-            status = self._request(
-                "GET",
-                "/naver_cafes/naver_join_cafe",
-                query={"cafe_id": cafe_id},
-            )
+            status = self._member_status_cache.get(cafe_id)
+            if status is None:
+                status = self._request(
+                    "GET",
+                    "/naver_cafes/naver_join_cafe",
+                    query={"cafe_id": cafe_id},
+                )
+                self._member_status_cache[cafe_id] = status
             rows = self._account_rows(status)
             missing = sorted(
                 account
@@ -909,6 +913,7 @@ class AffiliateApiPublisher:
                     "/naver_cafes/naver_join_cafe",
                     query={"cafe_id": cafe_id},
                 )
+                self._member_status_cache[cafe_id] = refreshed
                 refreshed_rows = self._account_rows(refreshed)
                 unresolved = {
                     account
@@ -1201,13 +1206,23 @@ class AffiliateApiPublisher:
         cafe_id: int,
         expected_start_at: datetime | None = None,
         wait_control=None,
-    ) -> datetime:
+        *,
+        return_detail: bool = False,
+    ) -> datetime | tuple[datetime, dict[str, Any]]:
         wait_seconds = 90.0
         if expected_start_at is not None:
             remaining = (
                 expected_start_at - datetime.now(timezone.utc)
             ).total_seconds()
             wait_seconds = max(wait_seconds, remaining + 30 * 60)
+            while remaining > 15:
+                if wait_control:
+                    wait_control()
+                time.sleep(min(30, remaining - 15))
+                remaining = (
+                    expected_start_at - datetime.now(timezone.utc)
+                ).total_seconds()
+            wait_seconds = 30 * 60 + 15
         deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline:
             if wait_control:
@@ -1217,10 +1232,18 @@ class AffiliateApiPublisher:
                     "GET",
                     "/naver_cafe_articles/article",
                     query={"source_id": source_id},
+                    max_attempts=1,
+                    request_timeout=8,
                 )
             except AffiliateApiError as exc:
-                if "(404)" in str(exc):
-                    time.sleep(2)
+                text = str(exc)
+                if (
+                    "(404)" in text
+                    or "(429)" in text
+                    or re.search(r"\(5\d\d\)", text)
+                    or "네트워크 요청 실패" in text
+                ):
+                    time.sleep(10 if "(429)" in text else 5)
                     continue
                 raise
             source = detail.get("naver_cafe_article_source") or {}
@@ -1235,11 +1258,14 @@ class AffiliateApiPublisher:
                 or source.get("created_at")
             )
             if history_status in {"DONE", "SUCCESS"}:
-                if written_raw:
-                    return datetime.fromisoformat(
+                written_at = (
+                    datetime.fromisoformat(
                         str(written_raw).replace("Z", "+00:00")
                     )
-                return datetime.now(timezone.utc)
+                    if written_raw
+                    else datetime.now(timezone.utc)
+                )
+                return (written_at, detail) if return_detail else written_at
             if history_status == "FAIL" or status == "FAIL":
                 reason = str(
                     article_history.get("fail_reason")
@@ -1250,8 +1276,9 @@ class AffiliateApiPublisher:
                 )
                 raise AffiliateApiError(f"일상 글 발행 실패: {reason}")
             if not article_history and status == "DONE":
-                return datetime.now(timezone.utc)
-            time.sleep(2)
+                written_at = datetime.now(timezone.utc)
+                return (written_at, detail) if return_detail else written_at
+            time.sleep(5)
         raise AffiliateDailyPending(
             "일상 글이 예약시간 이후 30분 동안 예약대기 상태입니다. "
             "예약은 유지하며 다음 실행에서 다시 확인합니다"
