@@ -94,6 +94,46 @@ def test_remote_certificate_contains_configured_public_ip(tmp_path: Path) -> Non
     assert {"127.0.0.1", "203.0.113.10"} <= addresses
 
 
+def test_null_origin_requires_same_origin_fetch_metadata(tmp_path: Path) -> None:
+    server = RemoteHttpsControlServer(
+        FakeBackend(),
+        data_dir=tmp_path,
+        public_host="127.0.0.1",
+        bind_host="127.0.0.1",
+        port=0,
+    )
+    server.credentials.set_password("correct horse battery")
+    server.start()
+    base = server.local_url
+    context = insecure_context()
+    opener = build_opener(
+        HTTPSHandler(context=context),
+        HTTPCookieProcessor(CookieJar()),
+    )
+    try:
+        cross_site = post_form(
+            base + "auth/login",
+            {"password": "correct horse battery"},
+            Origin="null",
+            **{"Sec-Fetch-Site": "cross-site"},
+        )
+        with pytest.raises(HTTPError) as rejected:
+            opener.open(cross_site)
+        assert rejected.value.code == 403
+
+        same_origin = post_form(
+            base + "auth/login",
+            {"password": "correct horse battery"},
+            Origin="null",
+            **{"Sec-Fetch-Site": "same-origin"},
+        )
+        response = opener.open(same_origin)
+        assert response.url == base
+        assert "V2R Playwright 웹 제어" in response.read().decode()
+    finally:
+        server.close()
+
+
 def test_remote_server_requires_setup_login_and_csrf(tmp_path: Path) -> None:
     server = RemoteHttpsControlServer(
         FakeBackend(),

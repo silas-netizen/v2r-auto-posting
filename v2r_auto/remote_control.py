@@ -318,6 +318,8 @@ class RemoteHttpsControlServer:
 
             def _origin_allowed(self) -> bool:
                 origin = self.headers.get("Origin", "")
+                if origin == "null":
+                    return self.headers.get("Sec-Fetch-Site") == "same-origin"
                 allowed = {
                     f"https://localhost:{server_ref.port}",
                     f"https://127.0.0.1:{server_ref.port}",
