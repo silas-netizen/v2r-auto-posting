@@ -1,0 +1,11 @@
+[
+  {"login_id": "own1", "work_type": "자사 카페", "linked": "V2R", "excluded": false, "grade": "", "nickname": "아침1", "shade": ""},
+  {"login_id": "own2", "work_type": "자사 카페", "linked": "V2R", "excluded": false, "grade": "", "nickname": "아침2", "shade": ""},
+  {"login_id": "own3", "work_type": "자사 카페", "linked": "V2R", "excluded": false, "grade": "", "nickname": "아침3", "shade": ""},
+  {"login_id": "own4", "work_type": "자사 카페", "linked": "V2R", "excluded": false, "grade": "", "nickname": "아침4", "shade": ""},
+  {"login_id": "own5", "work_type": "자사 카페", "linked": "V2R", "excluded": false, "grade": "", "nickname": "아침5", "shade": ""},
+  {"login_id": "aff1", "work_type": "제휴 작업", "linked": "V2R", "excluded": false, "grade": "", "nickname": "제휴1", "shade": ""},
+  {"login_id": "aff2", "work_type": "제휴 작업", "linked": "V2R", "excluded": false, "grade": "", "nickname": "제휴2", "shade": ""},
+  {"login_id": "gray1", "work_type": "자사 카페", "linked": "V2R", "excluded": false, "grade": "", "nickname": "회색", "shade": "회색"},
+  {"login_id": "mgr1", "work_type": "자사 카페", "linked": "V2R", "excluded": false, "grade": "매니저", "nickname": "매니저", "shade": ""}
+]
