@@ -130,3 +130,5 @@ class Manuscript:
     keyword: str = ""
     account: str = ""
     comments: list[dict[str, Any]] = field(default_factory=list)
+    source_row: int = 0
+    content_hash: str = ""

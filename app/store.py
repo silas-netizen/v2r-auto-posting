@@ -74,6 +74,17 @@ class JobStore:
                     path TEXT NOT NULL DEFAULT '',
                     PRIMARY KEY (source_sha256, slot)
                 );
+                CREATE TABLE IF NOT EXISTS source_publications (
+                    source_key TEXT NOT NULL,
+                    row_number INTEGER NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    url TEXT NOT NULL DEFAULT '',
+                    account TEXT NOT NULL DEFAULT '',
+                    cafe TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (source_key, row_number, content_hash)
+                );
                 """
             )
 
@@ -272,6 +283,78 @@ class JobStore:
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (cafe, board, title, body, url, self._stamp()),
+            )
+
+    def publication_exists(
+        self,
+        *,
+        source_key: str,
+        row_number: int,
+        content_hash: str,
+    ) -> bool:
+        if not source_key or not row_number or not content_hash:
+            return False
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM source_publications
+                WHERE source_key = ? AND row_number = ? AND content_hash = ?
+                  AND status IN ('registered', 'published')
+                """,
+                (source_key, row_number, content_hash),
+            ).fetchone()
+        return row is not None
+
+    def mark_publication(
+        self,
+        *,
+        source_key: str,
+        row_number: int,
+        content_hash: str,
+        status: str,
+        url: str = "",
+        account: str = "",
+        cafe: str = "",
+    ) -> None:
+        if status not in {"registered", "published", "failed", "uncertain"}:
+            raise ValueError(f"지원하지 않는 발행 상태입니다: {status}")
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO source_publications (
+                    source_key, row_number, content_hash, status, url,
+                    account, cafe, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_key, row_number, content_hash) DO UPDATE SET
+                    status = excluded.status,
+                    url = excluded.url,
+                    account = excluded.account,
+                    cafe = excluded.cafe,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    source_key,
+                    row_number,
+                    content_hash,
+                    status,
+                    url,
+                    account,
+                    cafe,
+                    self._stamp(),
+                ),
+            )
+
+    def publication_count(self, source_key: str) -> int:
+        with self._lock, self._connect() as connection:
+            return int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM source_publications
+                    WHERE source_key = ?
+                      AND status IN ('registered', 'published')
+                    """,
+                    (source_key,),
+                ).fetchone()[0]
             )
 
     def save_source(self, key: str, payload: Any, status: str = "ok") -> None:

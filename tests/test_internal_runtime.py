@@ -9,6 +9,7 @@ import pytest
 from app.alerts.telegram import TelegramChannel
 from app.browser.publish import RecordingBrowser, publish_planned_slots
 from app.collect.public import PublicPageReader
+from app.importers import load_adapted_csv, load_account_workbook
 from app.models import JobStatus, TaskSpec
 from app.providers.anthropic_provider import AnthropicProvider
 from app.providers.router import ModelRouter
@@ -280,3 +281,65 @@ def test_affiliate_publish_links_daily_revision_and_comments() -> None:
     assert result["url"] == result["revision_url"]
     assert any(step.startswith("reserve_revision:") for step in browser.steps)
     assert any(step.startswith("comment:제휴 댓글") for step in browser.steps)
+
+
+def test_adapted_csv_rows_have_stable_source_identity(tmp_path: Path) -> None:
+    path = tmp_path / "adapted.csv"
+    path.write_text(
+        "카페명,게시판명,게시판링크,작성계정,각색제목,각색본문,등록시각\n"
+        "고요한아침,자유게시판,,,첫 제목,첫 본문,#REF!\n",
+        encoding="utf-8-sig",
+    )
+    rows = load_adapted_csv(path, source_key="20260903_각색_전체_1.xlsx")
+    assert len(rows) == 1
+    assert rows[0].source_row == 2
+    assert rows[0].source == "20260903_각색_전체_1.xlsx"
+    assert len(rows[0].content_hash) == 64
+    assert rows[0].cafe == "고요한 아침"
+
+
+def test_account_workbook_excludes_gray_rows(tmp_path: Path) -> None:
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill
+
+    path = tmp_path / "accounts.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "아이디 리스트"
+    sheet.append(["번호", "ID", "PW", "이름", "", "", "", "작업 구분", "연동"])
+    sheet.append([1, "own-ok", "secret", "", "", "", "", "자사 카페", "V2R"])
+    sheet.append([2, "own-gray", "secret", "", "", "", "", "자사 카페", "V2R"])
+    sheet.cell(3, 2).fill = PatternFill("solid", fgColor="D9D9D9")
+    sheet.append([3, "affiliate-ok", "secret", "", "", "", "", "제휴 작업", "V2R"])
+    workbook.save(path)
+
+    accounts, counts = load_account_workbook(path)
+    assert counts["self_v2r"] == 1
+    assert counts["affiliate_v2r"] == 1
+    assert counts["gray_excluded"] == 1
+    assert accounts[1].excluded is True
+    assert all(not hasattr(account, "password") for account in accounts)
+
+
+def test_publication_identity_prevents_repeat(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "v2r.sqlite")
+    assert not store.publication_exists(
+        source_key="source",
+        row_number=2,
+        content_hash="abc",
+    )
+    store.mark_publication(
+        source_key="source",
+        row_number=2,
+        content_hash="abc",
+        status="registered",
+        url="https://v2r.example/posts/1",
+        account="own1",
+        cafe="고요한 아침",
+    )
+    assert store.publication_exists(
+        source_key="source",
+        row_number=2,
+        content_hash="abc",
+    )
+    assert store.publication_count("source") == 1

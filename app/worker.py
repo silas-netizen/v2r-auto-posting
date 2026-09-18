@@ -220,14 +220,29 @@ class CommandRuntime:
 
     def _publish(self, spec: TaskSpec) -> dict[str, Any]:
         manuscripts = [Manuscript(**item) for item in spec.manuscripts] if spec.manuscripts else self._cached_manuscripts()
+        if spec.source and not spec.manuscripts:
+            manuscripts = [
+                item for item in manuscripts if item.source == spec.source
+            ]
         if spec.task == "publish_brand" and not spec.manuscripts:
             manuscripts = [
                 item for item in manuscripts if item.source != "랜덤일상"
             ]
+        manuscripts = [
+            item
+            for item in manuscripts
+            if not self.store.publication_exists(
+                source_key=item.source,
+                row_number=item.source_row,
+                content_hash=item.content_hash,
+            )
+        ]
         if spec.count:
             manuscripts = manuscripts[: spec.count]
         if not manuscripts:
-            raise SourceError("발행할 원고가 없습니다. 먼저 원본을 동기화하거나 수집하세요.")
+            raise SourceError(
+                "발행할 신규 원고가 없습니다. 완료 이력의 원고는 재발행하지 않습니다."
+            )
         accounts = self._load_accounts()
         work_type = "자사 카페" if spec.task == "publish_info" else (
             "제휴 작업" if spec.task == "publish_brand" else "자사 카페"
@@ -274,6 +289,9 @@ class CommandRuntime:
                     "cafe": cafe,
                     "board": board,
                     "account": account.login_id,
+                    "source_key": manuscript.source,
+                    "source_row": manuscript.source_row,
+                    "content_hash": manuscript.content_hash,
                     "scheduled_at": scheduled_at,
                     "revision_at": (
                         revision_at(cafe, scheduled_at)
@@ -312,6 +330,15 @@ class CommandRuntime:
                     title=item["title"],
                     body=item["body"],
                     url=item.get("url") or "",
+                )
+                self.store.mark_publication(
+                    source_key=item.get("source_key") or "",
+                    row_number=int(item.get("source_row") or 0),
+                    content_hash=item.get("content_hash") or "",
+                    status="registered",
+                    url=item.get("url") or "",
+                    account=item["account"],
+                    cafe=item["cafe"],
                 )
         return {
             "planned": len(results),
@@ -369,10 +396,6 @@ class CommandRuntime:
         return manuscripts
 
     def _load_accounts(self) -> list[Account]:
-        path = self.config_dir / "accounts.json"
-        if path.exists():
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            return [Account(**item) for item in payload]
         for ref in self._source_refs():
             cached = self.store.load_source(ref.name)
             if not cached:
@@ -380,6 +403,15 @@ class CommandRuntime:
             rows = (cached.get("payload") or {}).get("accounts") or []
             if rows:
                 return [Account(**item) for item in rows]
+        cached = self.store.load_source("계정시트")
+        if cached:
+            rows = (cached.get("payload") or {}).get("accounts") or []
+            if rows:
+                return [Account(**item) for item in rows]
+        path = self.config_dir / "accounts.json"
+        if path.exists():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return [Account(**item) for item in payload]
         return [
             Account(login_id="demo1", work_type="자사 카페", linked="V2R"),
             Account(login_id="demo2", work_type="자사 카페", linked="V2R"),
