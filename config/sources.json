@@ -1,0 +1,37 @@
+{
+  "sources": [
+    {
+      "name": "일상글목록",
+      "kind": "sheet",
+      "url": "https://docs.google.com/spreadsheets/d/1vSON0Rej9anDQXcAOXyBrCr50B4MMqZ79FahF4cDPJw/edit",
+      "gid": "2015103906"
+    },
+    {
+      "name": "랜덤일상",
+      "kind": "sheet",
+      "url": "https://docs.google.com/spreadsheets/d/1vSON0Rej9anDQXcAOXyBrCr50B4MMqZ79FahF4cDPJw/edit",
+      "gid": "1842684291"
+    },
+    {
+      "name": "계정시트",
+      "kind": "accounts",
+      "url": "https://docs.google.com/spreadsheets/d/1UgcAvHFCpC5N9joC9T5WCATK834F3XAtRrepFv6XbEs/edit",
+      "gid": "218285244"
+    },
+    {
+      "name": "20260903_각색_전체_1.xlsx",
+      "kind": "sheet",
+      "url": "https://docs.google.com/spreadsheets/d/1WlNgw9Jzr7dWYAabqVB3yn220--uucVb/edit",
+      "gid": "21220889"
+    },
+    {
+      "name": "기존일상시트",
+      "kind": "sheet",
+      "url": "https://docs.google.com/spreadsheets/d/14N_Mjji4mWqi9ib_4T_AGI1ruYdHOeKT/edit",
+      "gid": "755409539"
+    }
+  ],
+  "excludedDocumentIds": [
+    "1DLQgLWBo1c4CDkgvH4fjkuDrRM1C03XT"
+  ]
+}

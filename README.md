@@ -1,101 +1,98 @@
-# V2R 자동 글 발행 프로그램
+# V2R internal command runtime
 
-Google Sheets의 제목·본문 데이터를 읽어 V2R 글쓰기 화면에 자동 입력하는 Windows 프로그램입니다.
+The execution PC now runs V2R work as local Python commands. Clear Korean
+instructions become a job JSON without spending model tokens. Telegram or Slack
+can send the same commands from another machine. Only daily-post collection and
+daily-post planning use Claude, and only when `ANTHROPIC_API_KEY` is set.
 
-## 제공 기능
-
-- Google Sheets 또는 로컬 CSV 읽기
-- 제목·본문·키워드·카페·게시판·계정·태그 인식
-- V2R 로그인 및 글쓰기 화면 자동 입력
-- 기본값 설정과 필수값 검증
-- 검증 모드(실제 저장·발행 없음)
-- 실제 발행 전 확인 창
-- 글 사이 최소 간격 설정
-- 중복 발행 방지
-- 중지 버튼과 진행률 표시
-- 프로그램 화면 및 파일 로그
-- 작업 완료 후 UTF-8 TXT 결과 생성
-
-조회수·좋아요 조작이나 CAPTCHA 우회 기능은 포함하지 않습니다. 네이버 카페 운영정책과 각 카페 규칙을 준수해서 사용해야 합니다.
-
-## 시트 열 이름
-
-첫 행에 다음 열을 사용합니다. `제목`과 `본문`은 필수입니다.
-
-| 열 | 필수 | 설명 |
-|---|---:|---|
-| 키워드 | 아니요 | 글 분류용 키워드 |
-| 제목 | 예 | 게시글 제목 |
-| 본문 | 예 | 여러 줄 본문 |
-| 카페명 | 조건부 | 없으면 프로그램 기본값 사용 |
-| 게시판명 | 조건부 | 없으면 프로그램 기본값 사용 |
-| 계정 | 아니요 | V2R 등록 계정 |
-| 예약시간 | 아니요 | 현재 기록만 하며 실제 예약 입력은 미지원 |
-| 태그 | 아니요 | 쉼표 또는 `#`로 구분, 최대 10개 |
-| 댓글1, 댓글2... | 아니요 | 계정 매핑 제공 후 댓글 단계에서 사용 |
-| 상태 | 아니요 | `완료`인 행은 건너뜀 |
-
-`sample-sheet.csv`에서 예시를 확인할 수 있습니다.
-
-## 사용 순서
-
-1. `V2R-Auto-Posting.exe`를 실행합니다.
-2. Google 시트 URL과 V2R 계정을 입력합니다.
-3. **로그인 준비**를 눌러 프로그램 전용 Chrome에서 Google과 V2R에 로그인합니다.
-   - 비공개 Google 시트는 최초 한 번 Google 로그인이 필요합니다.
-   - Chrome 로그인 상태는 프로그램 데이터 폴더에 유지됩니다.
-4. **데이터 확인**을 눌러 행 수와 누락값을 확인합니다.
-5. 처음에는 **검증 모드**를 켠 상태로 실행합니다.
-6. V2R 입력이 정상인지 확인한 뒤 검증 모드를 끄고 실제 발행합니다.
-7. 작업이 끝나면 **결과 폴더**에서 `실행결과_날짜_시간.txt`를 확인합니다.
-
-비밀번호는 설정 파일이나 Git 저장소에 저장하지 않습니다.
-
-## Windows EXE 만들기
-
-Windows PowerShell에서:
-
-```powershell
-.\build.ps1
-```
-
-완성 파일:
+Korean guide: [README.ko.md](README.ko.md)
 
 ```text
-dist\V2R-Auto-Posting.exe
+한국어 명령  →  규칙 파서(토큰 0)  →  SQLite 대기열  →  실행 PC 워커
+                     ↘ 모호한 명령만 Claude
+일상 글 수집/발행 계획  →  Claude
+V2R 등록/예약/계정/중복  →  Python
 ```
 
-GitHub Actions의 **Build Windows EXE** 작업에서도 Windows 실행 파일을 자동으로 생성합니다. 작업 화면의 Artifacts에서 `V2R-Auto-Posting-Windows`를 내려받을 수 있습니다.
+## What stays token-free
 
-## 개발 실행
+- command parsing for explicit Korean
+- Google Sheet / Excel source sync
+- account filtering and assignment
+- publish-window and interval math
+- duplicate checks
+- V2R browser steps, revision links, comment trees
+- SQLite history, backup, restore
 
-Python 3.11 이상과 Chrome이 필요합니다.
+## What Claude does
+
+- collect public daily-post material
+- rewrite that material into manuscripts
+- turn collected manuscripts into a `publish_daily` plan
+
+The worker still registers the plan on V2R. Claude does not receive API keys
+from chat, and it does not run arbitrary shell commands.
+
+## Command examples
 
 ```powershell
-py -m pip install ".[test]"
-py -m pytest
-py main.py
+.\start.cmd run "내일 오전 9시부터 오후 6시까지만 일상 글 20개 올려줘. 아이디 5개 자동으로 쓰고 10분 간격으로 해줘."
+.\start.cmd run "일상 글 수집해줘"
+.\start.cmd run "최근 실패 글 점검해줘"
+.\start.cmd status
+.\start.cmd stop
+.\start.cmd listen --once
 ```
 
-Selenium이 설치된 Chrome에 맞는 드라이버를 자동으로 준비합니다.
+Default publish mode is dry-run. Add `실제 발행` only after login and a successful
+verification run.
 
-## 로그와 결과 위치
+Set `V2R_BROWSER=playwright` on the execution PC to use the visible UI driver.
+Without it, the recording browser validates the complete workflow without
+touching V2R. Self-owned publishing verifies the final article URL. Affiliate
+publishing links the daily source, revision, and reserved comments. If V2R
+shows an abnormal-access warning, the driver stops and does not bypass it.
 
-Windows:
+## External messages
+
+Set these on the execution PC, never in the repository:
 
 ```text
-%LOCALAPPDATA%\V2RAutoPosting\logs\v2r-auto.log
-%LOCALAPPDATA%\V2RAutoPosting\reports\실행결과_*.txt
+TELEGRAM_BOT_TOKEN
+TELEGRAM_ALLOWED_CHAT_IDS
+SLACK_WEBHOOK_URL
+SLACK_ALLOWED_CHANNEL_IDS
+ANTHROPIC_API_KEY
 ```
 
-## 안전장치
+Unknown chats and unknown tasks are rejected. Remote messages cannot open a
+shell.
 
-- 기본값은 실제 발행하지 않는 검증 모드입니다.
-- 실제 발행 모드는 추가 확인을 요구합니다.
-- 성공한 글의 내용 해시를 기록해 동일 글의 중복 발행을 방지합니다.
-- 로그인 추가 인증 또는 CAPTCHA가 표시되면 자동 우회하지 않고 사용자가 직접 확인해야 합니다.
-- 댓글 자동화는 허용된 계정 목록과 매핑 규칙을 받은 뒤 활성화해야 합니다.
+## Public collection boundaries
 
-## 현재 확인이 필요한 부분
+The bundled reader is the README-equivalent collector for public pages:
 
-V2R은 공개 API 문서가 없는 화면 기반 서비스입니다. 사이트 UI가 변경되면 입력 요소 선택자를 조정해야 할 수 있습니다. 실제 계정으로 발행하기 전에 검증 모드와 소수의 테스트 행으로 확인하세요.
+- public HTML, RSS/Atom, Open Graph, JSON-LD
+- public Google Visualization CSV
+- stop at login or paywall
+- no TLS impersonation, CAPTCHA solving, or WAF bypass
+
+## Install on a new PC
+
+```powershell
+.\install.ps1
+.\backup.cmd
+.\restore.cmd data\backup_YYYYMMDD_HHMMSS.sqlite
+```
+
+Move code, `config\`, `data\v2r.sqlite`, and logs together. Re-enter API keys
+and V2R/Google logins on the new PC. Only one executor lease can run a job.
+
+## Safety
+
+- dry-run is the default
+- exact duplicates are blocked
+- high similarity requires review
+- grey-shaded and manager accounts are excluded
+- excluded document `1DLQgLWBo1c4CDkgvH4fjkuDrRM1C03XT` is never synced
+- V2R results must be re-read before a job is marked complete

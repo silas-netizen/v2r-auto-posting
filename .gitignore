@@ -10,3 +10,10 @@ dist/
 *.crdownload
 .idea/
 .vscode/
+data/*.sqlite
+data/backup_*.sqlite
+media-cache/
+browser-profile/
+config/config.json
+.env
+.env.*

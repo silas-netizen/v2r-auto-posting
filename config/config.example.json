@@ -1,0 +1,25 @@
+{
+  "timezone": "Asia/Seoul",
+  "dryRunDefault": true,
+  "channels": {
+    "telegram": {
+      "tokenEnv": "TELEGRAM_BOT_TOKEN",
+      "allowedChatIdsEnv": "TELEGRAM_ALLOWED_CHAT_IDS"
+    },
+    "slack": {
+      "webhookEnv": "SLACK_WEBHOOK_URL",
+      "allowedChannelIdsEnv": "SLACK_ALLOWED_CHANNEL_IDS"
+    }
+  },
+  "models": {
+    "dailyCollect": "claude",
+    "dailyPublishPlan": "claude",
+    "ambiguousCommand": "claude",
+    "commandParser": "rules-first"
+  },
+  "publicReader": {
+    "stopAtLogin": true,
+    "allowTlsImpersonation": false,
+    "allowCaptchaSolve": false
+  }
+}
