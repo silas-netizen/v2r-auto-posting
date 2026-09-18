@@ -4,7 +4,7 @@ import csv
 import io
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -158,12 +158,13 @@ def sync_source(
     try:
         csv_text = fetch_csv(visualization_csv_url(ref), opener=opener)
         rows = parse_daily_rows(csv_text) if ref.kind != "accounts" else []
+        rows = [replace(item, source=ref.name) for item in rows]
         accounts = parse_account_rows(csv_text) if ref.kind == "accounts" else []
         payload = {
             "name": ref.name,
             "url": ref.url,
-            "manuscripts": [item.__dict__ for item in rows],
-            "accounts": [item.__dict__ for item in accounts],
+            "manuscripts": [asdict(item) for item in rows],
+            "accounts": [asdict(item) for item in accounts],
         }
         store.save_source(ref.name, payload, "ok")
         return payload

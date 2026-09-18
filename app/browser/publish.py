@@ -12,6 +12,15 @@ class PublishBrowser(Protocol):
     def set_schedule(self, scheduled_at: datetime) -> None: ...
     def register(self) -> str: ...
     def verify(self, url: str) -> bool: ...
+    def open_article(self, url: str) -> None: ...
+    def reserve_revision(self, scheduled_at: datetime) -> None: ...
+    def reserve_comment(
+        self,
+        text: str,
+        *,
+        parent_text: str | None,
+        scheduled_at: datetime,
+    ) -> None: ...
 
 
 @dataclass
@@ -43,6 +52,80 @@ class RecordingBrowser:
         self.steps.append(f"verify:{url}")
         return url in self.registered
 
+    def open_article(self, url: str) -> None:
+        self.steps.append(f"open_article:{url}")
+
+    def reserve_revision(self, scheduled_at: datetime) -> None:
+        self.steps.append(f"reserve_revision:{scheduled_at.isoformat()}")
+
+    def reserve_comment(
+        self,
+        text: str,
+        *,
+        parent_text: str | None,
+        scheduled_at: datetime,
+    ) -> None:
+        self.steps.append(
+            f"comment:{text}:{parent_text or ''}:{scheduled_at.isoformat()}"
+        )
+
+
+def _register_and_verify(browser: PublishBrowser) -> str:
+    url = browser.register()
+    if not url or not browser.verify(url):
+        raise RuntimeError("V2R 등록 결과를 재확인하지 못했습니다")
+    return url
+
+
+def _reserve_comments(browser: PublishBrowser, slot: dict) -> None:
+    for comment in slot.get("comments") or []:
+        text = str(comment.get("text") or "").strip()
+        scheduled_at = comment.get("scheduled_at")
+        if not text or not isinstance(scheduled_at, datetime):
+            continue
+        browser.reserve_comment(
+            text,
+            parent_text=comment.get("parent_text"),
+            scheduled_at=scheduled_at,
+        )
+
+
+def _publish_affiliate(
+    browser: PublishBrowser,
+    slot: dict,
+    *,
+    dry_run: bool,
+) -> dict:
+    daily = slot.get("daily") or {}
+    if not daily.get("title") or not daily.get("body"):
+        raise RuntimeError("제휴 발행용 원본 일상 글이 없습니다")
+    browser.open_writer()
+    browser.select_destination(slot["cafe"], slot["account"], slot["board"])
+    browser.fill_article(daily["title"], daily["body"])
+    browser.set_schedule(slot["scheduled_at"])
+    if dry_run:
+        return {
+            **slot,
+            "daily_url": "",
+            "revision_url": "",
+            "url": "",
+            "status": "queued",
+        }
+    daily_url = _register_and_verify(browser)
+    browser.open_article(daily_url)
+    browser.reserve_revision(slot["revision_at"])
+    browser.fill_article(slot["title"], slot["body"])
+    revision_url = _register_and_verify(browser)
+    browser.open_article(revision_url)
+    _reserve_comments(browser, slot)
+    return {
+        **slot,
+        "daily_url": daily_url,
+        "revision_url": revision_url,
+        "url": revision_url,
+        "status": "registered",
+    }
+
 
 def publish_planned_slots(
     browser: PublishBrowser,
@@ -52,6 +135,9 @@ def publish_planned_slots(
 ) -> list[dict]:
     results: list[dict] = []
     for slot in slots:
+        if slot.get("workflow") == "affiliate":
+            results.append(_publish_affiliate(browser, slot, dry_run=dry_run))
+            continue
         browser.open_writer()
         browser.select_destination(slot["cafe"], slot["account"], slot["board"])
         browser.fill_article(slot["title"], slot["body"])
@@ -60,8 +146,8 @@ def publish_planned_slots(
         if dry_run:
             results.append({**slot, "url": "", "status": "queued"})
             continue
-        url = browser.register()
-        if not url or not browser.verify(url):
-            raise RuntimeError("V2R 등록 결과를 재확인하지 못했습니다")
+        url = _register_and_verify(browser)
+        browser.open_article(url)
+        _reserve_comments(browser, slot)
         results.append({**slot, "url": url, "status": "registered"})
     return results

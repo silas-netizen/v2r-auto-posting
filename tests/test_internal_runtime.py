@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from app.alerts.telegram import TelegramChannel
+from app.browser.publish import RecordingBrowser, publish_planned_slots
 from app.collect.public import PublicPageReader
 from app.models import JobStatus, TaskSpec
 from app.providers.anthropic_provider import AnthropicProvider
@@ -215,3 +217,66 @@ def test_parse_daily_rows_accepts_combined_title_body() -> None:
     rows = parse_daily_rows(csv_text)
     assert rows[0].title == "첫 글"
     assert "내용" in rows[0].body
+
+
+def test_self_owned_publish_registers_and_verifies_result() -> None:
+    browser = RecordingBrowser()
+    results = publish_planned_slots(
+        browser,
+        [
+            {
+                "title": "자사 테스트",
+                "body": "자사 본문",
+                "cafe": "고요한 아침",
+                "board": "자유게시판",
+                "account": "own1",
+                "scheduled_at": datetime(2026, 9, 19, 9, 0),
+                "comments": [
+                    {
+                        "text": "첫 댓글",
+                        "parent_text": None,
+                        "scheduled_at": datetime(2026, 9, 19, 9, 3),
+                    }
+                ],
+            }
+        ],
+        dry_run=False,
+    )
+    assert results[0]["status"] == "registered"
+    assert results[0]["url"].endswith("/1")
+    assert any(step.startswith("verify:") for step in browser.steps)
+    assert any(step.startswith("comment:첫 댓글") for step in browser.steps)
+
+
+def test_affiliate_publish_links_daily_revision_and_comments() -> None:
+    browser = RecordingBrowser()
+    results = publish_planned_slots(
+        browser,
+        [
+            {
+                "workflow": "affiliate",
+                "title": "브랜드 수정 글",
+                "body": "브랜드 본문",
+                "daily": {"title": "오늘 일상", "body": "오늘의 일상 본문"},
+                "cafe": "씨씨앙",
+                "board": "자유 수다방",
+                "account": "aff1",
+                "scheduled_at": datetime(2026, 9, 19, 9, 0),
+                "revision_at": datetime(2026, 9, 19, 13, 0),
+                "comments": [
+                    {
+                        "text": "제휴 댓글",
+                        "parent_text": None,
+                        "scheduled_at": datetime(2026, 9, 19, 13, 3),
+                    }
+                ],
+            }
+        ],
+        dry_run=False,
+    )
+    result = results[0]
+    assert result["daily_url"].endswith("/1")
+    assert result["revision_url"].endswith("/2")
+    assert result["url"] == result["revision_url"]
+    assert any(step.startswith("reserve_revision:") for step in browser.steps)
+    assert any(step.startswith("comment:제휴 댓글") for step in browser.steps)

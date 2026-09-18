@@ -47,6 +47,12 @@ from chat, and it does not run arbitrary shell commands.
 Default publish mode is dry-run. Add `실제 발행` only after login and a successful
 verification run.
 
+Set `V2R_BROWSER=playwright` on the execution PC to use the visible UI driver.
+Without it, the recording browser validates the complete workflow without
+touching V2R. Self-owned publishing verifies the final article URL. Affiliate
+publishing links the daily source, revision, and reserved comments. If V2R
+shows an abnormal-access warning, the driver stops and does not bypass it.
+
 ## External messages
 
 Set these on the execution PC, never in the repository:

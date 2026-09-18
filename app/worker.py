@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from .alerts.telegram import TelegramChannel
 from .browser.comments import plan_comment_tree
 from .browser.modification import revision_at
 from .browser.publish import RecordingBrowser, publish_planned_slots
+from .browser.playwright_v2r import PlaywrightV2RBrowser
 from .collect.daily import collect_daily_manuscripts, plan_daily_publish
 from .collect.public import PublicPageReader
 from .commands import describe_spec, parse_korean_command
@@ -42,7 +44,7 @@ class CommandRuntime:
         router: ModelRouter | None = None,
         telegram: TelegramChannel | None = None,
         slack: SlackChannel | None = None,
-        browser_factory=RecordingBrowser,
+        browser_factory=None,
         owner: str = "",
     ):
         self.root = root
@@ -50,9 +52,17 @@ class CommandRuntime:
         self.router = router or ModelRouter()
         self.telegram = telegram or TelegramChannel()
         self.slack = slack or SlackChannel()
-        self.browser_factory = browser_factory
+        self.browser_factory = browser_factory or self._default_browser_factory
         self.owner = owner or f"pc-{uuid4().hex[:8]}"
         self.config_dir = root / "config"
+
+    def _default_browser_factory(self):
+        if os.environ.get("V2R_BROWSER", "").strip().casefold() == "playwright":
+            return PlaywrightV2RBrowser(
+                self.root / "browser-profile",
+                self.root / "data" / "downloads",
+            )
+        return RecordingBrowser()
 
     def handle_text(self, text: str, *, idempotency_key: str = "") -> dict[str, Any]:
         spec = parse_korean_command(text)
@@ -138,7 +148,11 @@ class CommandRuntime:
         if spec.task == "inspect_failures":
             return self._inspect()
         if spec.task == "open_login":
-            return {"login": "브라우저 프로필에서 수동 로그인 대기"}
+            browser = self.browser_factory()
+            if not isinstance(browser, PlaywrightV2RBrowser):
+                return {"login": "검증 브라우저에서는 로그인 창을 열지 않습니다"}
+            browser.open_login()
+            return {"login": "실행 PC의 V2R 로그인 창을 열었습니다"}
         if spec.task.startswith("publish"):
             return self._publish(spec)
         raise ValueError(f"실행기가 아직 이 작업을 처리하지 않습니다: {spec.task}")
@@ -206,6 +220,10 @@ class CommandRuntime:
 
     def _publish(self, spec: TaskSpec) -> dict[str, Any]:
         manuscripts = [Manuscript(**item) for item in spec.manuscripts] if spec.manuscripts else self._cached_manuscripts()
+        if spec.task == "publish_brand" and not spec.manuscripts:
+            manuscripts = [
+                item for item in manuscripts if item.source != "랜덤일상"
+            ]
         if spec.count:
             manuscripts = manuscripts[: spec.count]
         if not manuscripts:
@@ -230,6 +248,15 @@ class CommandRuntime:
             interval_minutes=spec.interval_minutes,
         )
         history = self.store.history_corpus()
+        daily_pool = (
+            self._cached_manuscripts("랜덤일상")
+            if spec.task == "publish_brand"
+            else []
+        )
+        if spec.task == "publish_brand" and len(daily_pool) < len(manuscripts):
+            raise SourceError(
+                "제휴 원본 일상 글이 부족합니다. 랜덤일상 원본을 먼저 동기화하세요."
+            )
         planned: list[dict[str, Any]] = []
         for index, manuscript in enumerate(manuscripts):
             verdict = highest_match(manuscript.title, manuscript.body, history)
@@ -241,8 +268,7 @@ class CommandRuntime:
             cafe = manuscript.cafe or spec.cafe or "고요한 아침"
             board = manuscript.board or spec.board or AFFILIATE_BOARDS.get(cafe, "자유게시판")
             scheduled_at = slots_at[index]
-            planned.append(
-                {
+            slot = {
                     "title": manuscript.title,
                     "body": manuscript.body,
                     "cafe": cafe,
@@ -254,11 +280,30 @@ class CommandRuntime:
                         if cafe in AFFILIATE_BOARDS
                         else None
                     ),
-                    "comments": plan_comment_tree(scheduled_at),
+                    "comments": self._scheduled_comments(
+                        manuscript.comments,
+                        scheduled_at,
+                    ),
                 }
-            )
+            if spec.task == "publish_brand":
+                daily = daily_pool[index]
+                slot.update(
+                    {
+                        "workflow": "affiliate",
+                        "daily": {
+                            "title": daily.title,
+                            "body": daily.body,
+                        },
+                    }
+                )
+            planned.append(slot)
         browser = self.browser_factory()
-        results = publish_planned_slots(browser, planned, dry_run=spec.dry_run)
+        try:
+            results = publish_planned_slots(browser, planned, dry_run=spec.dry_run)
+        finally:
+            close = getattr(browser, "close", None)
+            if callable(close):
+                close()
         if not spec.dry_run:
             for item in results:
                 self.store.record_history(
@@ -290,7 +335,27 @@ class CommandRuntime:
             return []
         return load_source_config(path)
 
-    def _cached_manuscripts(self) -> list[Manuscript]:
+    @staticmethod
+    def _scheduled_comments(
+        comments: list[dict[str, Any]],
+        published_at: datetime,
+    ) -> list[dict[str, Any]]:
+        schedule = plan_comment_tree(published_at)
+        prepared: list[dict[str, Any]] = []
+        for index, comment in enumerate(comments[: len(schedule)]):
+            text = str(comment.get("text") or "").strip()
+            if not text:
+                continue
+            prepared.append(
+                {
+                    **comment,
+                    "text": text,
+                    "scheduled_at": schedule[index]["scheduled_at"],
+                }
+            )
+        return prepared
+
+    def _cached_manuscripts(self, source_name: str = "") -> list[Manuscript]:
         manuscripts: list[Manuscript] = []
         for ref in self._source_refs():
             cached = self.store.load_source(ref.name)
@@ -298,6 +363,8 @@ class CommandRuntime:
                 continue
             payload = cached.get("payload") or {}
             for item in payload.get("manuscripts") or []:
+                if source_name and item.get("source") != source_name:
+                    continue
                 manuscripts.append(Manuscript(**item))
         return manuscripts
 
