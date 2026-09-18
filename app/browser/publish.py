@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Protocol
+from typing import Callable, Protocol
 
 
 class PublishBrowser(Protocol):
@@ -95,6 +95,7 @@ def _publish_affiliate(
     slot: dict,
     *,
     dry_run: bool,
+    checkpoint: Callable[[str, dict], None] | None = None,
 ) -> dict:
     daily = slot.get("daily") or {}
     if not daily.get("title") or not daily.get("body"):
@@ -111,20 +112,32 @@ def _publish_affiliate(
             "url": "",
             "status": "queued",
         }
+    if checkpoint:
+        checkpoint("daily_submitting", slot)
     daily_url = _register_and_verify(browser)
+    if checkpoint:
+        checkpoint("daily_registered", {**slot, "daily_url": daily_url})
     browser.open_article(daily_url)
     browser.reserve_revision(slot["revision_at"])
     browser.fill_article(slot["title"], slot["body"])
+    if checkpoint:
+        checkpoint(
+            "revision_submitting",
+            {**slot, "daily_url": daily_url},
+        )
     revision_url = _register_and_verify(browser)
     browser.open_article(revision_url)
     _reserve_comments(browser, slot)
-    return {
+    result = {
         **slot,
         "daily_url": daily_url,
         "revision_url": revision_url,
         "url": revision_url,
         "status": "registered",
     }
+    if checkpoint:
+        checkpoint("published", result)
+    return result
 
 
 def publish_planned_slots(
@@ -132,11 +145,19 @@ def publish_planned_slots(
     slots: list[dict],
     *,
     dry_run: bool,
+    checkpoint: Callable[[str, dict], None] | None = None,
 ) -> list[dict]:
     results: list[dict] = []
     for slot in slots:
         if slot.get("workflow") == "affiliate":
-            results.append(_publish_affiliate(browser, slot, dry_run=dry_run))
+            results.append(
+                _publish_affiliate(
+                    browser,
+                    slot,
+                    dry_run=dry_run,
+                    checkpoint=checkpoint,
+                )
+            )
             continue
         browser.open_writer()
         browser.select_destination(slot["cafe"], slot["account"], slot["board"])
@@ -146,8 +167,13 @@ def publish_planned_slots(
         if dry_run:
             results.append({**slot, "url": "", "status": "queued"})
             continue
+        if checkpoint:
+            checkpoint("submitting", slot)
         url = _register_and_verify(browser)
         browser.open_article(url)
         _reserve_comments(browser, slot)
-        results.append({**slot, "url": url, "status": "registered"})
+        result = {**slot, "url": url, "status": "registered"}
+        results.append(result)
+        if checkpoint:
+            checkpoint("published", result)
     return results

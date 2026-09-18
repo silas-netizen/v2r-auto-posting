@@ -83,17 +83,31 @@ class PlaywrightV2RBrowser:
 
     def verify_login(self) -> None:
         self.start()
-        source = self.page.content()
-        if BLOCK_TEXT in source:
+        status = self.session_status()
+        if status == "blocked":
             raise V2RBrowserError(
                 "V2R이 자동화 브라우저 접근을 차단했습니다. 우회하지 않고 중단합니다."
             )
-        if self.page.locator("input[type='password']").count():
+        if status == "login_required":
             raise V2RBrowserError(
                 "V2R 로그인이 필요합니다. 실행 PC의 전용 창에서 직접 로그인하세요."
             )
-        if "/nc/board" not in self.page.url:
+        if status != "authenticated":
             raise V2RBrowserError("V2R 게시글 목록 로그인 상태를 확인하지 못했습니다")
+
+    def session_status(self) -> str:
+        """Inspect current persistent state without keep-alive navigation."""
+        self.start()
+        if self.page.is_closed():
+            return "disconnected"
+        source = self.page.content()
+        if BLOCK_TEXT in source:
+            return "blocked"
+        if self.page.locator("input[type='password']").count():
+            return "login_required"
+        if "/nc/" in self.page.url and "/login" not in self.page.url:
+            return "authenticated"
+        return "unknown"
 
     def open_writer(self) -> None:
         self.verify_login()

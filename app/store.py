@@ -299,7 +299,7 @@ class JobStore:
                 """
                 SELECT 1 FROM source_publications
                 WHERE source_key = ? AND row_number = ? AND content_hash = ?
-                  AND status IN ('registered', 'published')
+                  AND status IN ('registered', 'published', 'uncertain')
                 """,
                 (source_key, row_number, content_hash),
             ).fetchone()

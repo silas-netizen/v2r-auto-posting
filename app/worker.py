@@ -316,8 +316,35 @@ class CommandRuntime:
                 )
             planned.append(slot)
         browser = self.browser_factory()
+        def checkpoint(stage: str, item: dict[str, Any]) -> None:
+            source_key = str(item.get("source_key") or "")
+            row_number = int(item.get("source_row") or 0)
+            content_hash = str(item.get("content_hash") or "")
+            if not source_key or not row_number or not content_hash:
+                return
+            final = stage == "published"
+            self.store.mark_publication(
+                source_key=source_key,
+                row_number=row_number,
+                content_hash=content_hash,
+                status="registered" if final else "uncertain",
+                url=str(
+                    item.get("url")
+                    or item.get("revision_url")
+                    or item.get("daily_url")
+                    or ""
+                ),
+                account=str(item.get("account") or ""),
+                cafe=str(item.get("cafe") or ""),
+            )
+
         try:
-            results = publish_planned_slots(browser, planned, dry_run=spec.dry_run)
+            results = publish_planned_slots(
+                browser,
+                planned,
+                dry_run=spec.dry_run,
+                checkpoint=checkpoint,
+            )
         finally:
             close = getattr(browser, "close", None)
             if callable(close):

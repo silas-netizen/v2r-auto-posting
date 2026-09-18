@@ -343,3 +343,49 @@ def test_publication_identity_prevents_repeat(tmp_path: Path) -> None:
         content_hash="abc",
     )
     assert store.publication_count("source") == 1
+
+
+def test_uncertain_checkpoint_blocks_automatic_repeat(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "v2r.sqlite")
+    store.mark_publication(
+        source_key="source",
+        row_number=3,
+        content_hash="def",
+        status="uncertain",
+        account="own1",
+        cafe="고요한 아침",
+    )
+    assert store.publication_exists(
+        source_key="source",
+        row_number=3,
+        content_hash="def",
+    )
+    assert store.publication_count("source") == 0
+
+
+def test_checkpoint_is_written_before_registration_attempt() -> None:
+    class DisconnectingBrowser(RecordingBrowser):
+        def register(self) -> str:
+            raise ConnectionError("network disconnected")
+
+    events: list[str] = []
+    with pytest.raises(ConnectionError):
+        publish_planned_slots(
+            DisconnectingBrowser(),
+            [
+                {
+                    "title": "끊김 테스트",
+                    "body": "본문",
+                    "cafe": "고요한 아침",
+                    "board": "자유게시판",
+                    "account": "own1",
+                    "source_key": "source",
+                    "source_row": 2,
+                    "content_hash": "abc",
+                    "scheduled_at": datetime(2026, 9, 19, 9, 0),
+                }
+            ],
+            dry_run=False,
+            checkpoint=lambda stage, _item: events.append(stage),
+        )
+    assert events == ["submitting"]
