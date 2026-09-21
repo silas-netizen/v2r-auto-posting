@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import random
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -40,6 +41,7 @@ AFFILIATE_COMMENT_CATEGORIES = {"제휴 댓", "제휴댓", "제휴 댓글", "제
 SELF_AUTHOR_CATEGORIES = {"자사"}
 SELF_COMMENT_CATEGORIES = {"자사 댓", "자사댓", "자사 댓글", "자사댓글"}
 AFFILIATE_CAFES = {"씨씨앙", "양평맘"}
+CHROME_SPLIT_PATTERN = re.compile(r"[\s,/;|]+")
 
 
 def _proxy_error(message: str) -> Exception:
@@ -327,6 +329,130 @@ def normalize_auto_id_count(value: object) -> int:
     return count
 
 
+def _chrome_key(value: object) -> str:
+    if value is None or value == "":
+        return ""
+    if isinstance(value, bool):
+        return str(value).strip().casefold()
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    text = str(value).strip()
+    if not text:
+        return ""
+    if text.isdigit():
+        return str(int(text))
+    return text.casefold()
+
+
+def parse_chrome_numbers(value: object) -> list[int | str]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, bool):
+        return []
+    if isinstance(value, int):
+        return [value]
+    if isinstance(value, float) and value.is_integer():
+        return [int(value)]
+    if isinstance(value, (list, tuple)):
+        parsed: list[int | str] = []
+        for item in value:
+            parsed.extend(parse_chrome_numbers(item))
+        return parsed
+    text = str(value).strip()
+    if not text:
+        return []
+    parsed = []
+    for part in CHROME_SPLIT_PATTERN.split(text):
+        if not part:
+            continue
+        parsed.append(int(part) if part.isdigit() else part)
+    return parsed
+
+
+def _unique_accounts(accounts: list[ProxyAccount]) -> list[ProxyAccount]:
+    seen: set[str] = set()
+    unique: list[ProxyAccount] = []
+    for item in accounts:
+        key = item.account.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+    return unique
+
+
+def accounts_for_chrome_numbers(
+    pool: list[ProxyAccount],
+    chromes: object,
+    pool_label: str,
+    role: str,
+    required: int | None = None,
+    *,
+    allow_partial: bool = True,
+) -> list[ProxyAccount]:
+    wanted = parse_chrome_numbers(chromes)
+    if not wanted:
+        return []
+    by_chrome: dict[str, ProxyAccount] = {}
+    for item in pool:
+        key = _chrome_key(item.chrome_number)
+        if not key or key in by_chrome:
+            continue
+        by_chrome[key] = item
+    found: list[ProxyAccount] = []
+    missing: list[str] = []
+    for chrome in wanted:
+        item = by_chrome.get(_chrome_key(chrome))
+        if item is None:
+            missing.append(str(chrome).strip())
+            continue
+        found.append(item)
+    if missing and (not allow_partial or not found):
+        shown = ", ".join(str(item) for item in wanted) if not found else ", ".join(missing)
+        raise _proxy_error(
+            f"{pool_label} {role} 아이디에서 크롬번호 {shown}을(를) 찾지 못했습니다"
+        )
+    if required is not None and len(found) < required:
+        raise _proxy_error(
+            f"{pool_label} {role} 아이디가 크롬번호로 {required}개 필요합니다. "
+            f"지금 {len(found)}개입니다"
+        )
+    return found
+
+
+def author_accounts_for_chromes(
+    pool: list[ProxyAccount],
+    chromes: object,
+    pool_label: str,
+) -> list[ProxyAccount]:
+    return _unique_accounts(
+        accounts_for_chrome_numbers(
+            pool, chromes, pool_label, "작성", allow_partial=True
+        )
+    )
+
+
+def comment_accounts_for_chromes(
+    pool: list[ProxyAccount],
+    chromes: object,
+    pool_label: str,
+) -> list[ProxyAccount]:
+    found = accounts_for_chrome_numbers(
+        pool, chromes, pool_label, "댓글", allow_partial=True
+    )
+    if not found:
+        return []
+    if len(found) < MIN_AUTO_ID_COUNT or len(found) > MAX_AUTO_ID_COUNT:
+        raise _proxy_error(
+            f"{pool_label} 댓글 아이디가 크롬번호로 "
+            f"{MIN_AUTO_ID_COUNT}~{MAX_AUTO_ID_COUNT}개여야 합니다. "
+            f"지금 {len(found)}개입니다"
+        )
+    return found
+
+
 def comment_auto_labels(article_type: str, count: int) -> list[str]:
     needed = normalize_auto_id_count(count)
     special = "대대댓글2" if article_kind(article_type) == "후기형" else "대대대댓글2"
@@ -347,9 +473,18 @@ def _comment_id_map(
     *,
     pool_label: str,
     comment_id_count: int = COMMENT_ID_COUNT,
+    comment_chrome_numbers: object = None,
 ) -> dict[str, ProxyAccount]:
     if not job.article.comments:
         return {}
+    chromes = parse_chrome_numbers(comment_chrome_numbers)
+    if chromes:
+        chosen = comment_accounts_for_chromes(
+            comment_accounts, chromes, pool_label
+        )
+        labels = comment_auto_labels(job.article_type, len(chosen))
+        chosen = rng.sample(chosen, len(chosen))
+        return dict(zip(labels, chosen))
     needed = normalize_auto_id_count(comment_id_count)
     if len(comment_accounts) < needed:
         raise _proxy_error(
@@ -408,10 +543,14 @@ def sample_author_accounts(
     cafe: str,
     rng: random.Random,
     author_id_count: int = DEFAULT_AUTO_ID_COUNT,
+    author_chrome_numbers: object = None,
 ) -> list[ProxyAccount]:
-    needed = normalize_auto_id_count(author_id_count)
     pool = author_pool_for_cafe(book, cafe)
     label = author_pool_label(cafe)
+    chromes = parse_chrome_numbers(author_chrome_numbers)
+    if chromes:
+        return author_accounts_for_chromes(pool, chromes, label)
+    needed = normalize_auto_id_count(author_id_count)
     if len(pool) < needed:
         raise _proxy_error(
             f"{label} 작성 아이디가 {needed}개 필요합니다. "
@@ -426,11 +565,11 @@ def assign_auto_authors(
     rng: random.Random | None = None,
     *,
     author_id_count: int = DEFAULT_AUTO_ID_COUNT,
+    author_chrome_numbers: object = None,
 ) -> None:
     """작성계정이 비어 있으면 제휴/자사 본문 아이디를 수량만큼 뽑아 돌려 가며 넣는다."""
     if book is None:
         return
-    needed = normalize_auto_id_count(author_id_count)
     rng = rng or random.SystemRandom()
     groups = (
         [job for job in jobs if _is_affiliate_cafe(job.cafe) and not (job.account or "").strip()],
@@ -444,10 +583,15 @@ def assign_auto_authors(
         if not empty_jobs:
             continue
         chosen = sample_author_accounts(
-            book, empty_jobs[0].cafe, rng, needed
+            book,
+            empty_jobs[0].cafe,
+            rng,
+            author_id_count,
+            author_chrome_numbers=author_chrome_numbers,
         )
+        cycle = len(chosen)
         for index, job in enumerate(empty_jobs):
-            job.account = chosen[index % needed].account
+            job.account = chosen[index % cycle].account
 
 
 def resolve_job_accounts(
@@ -457,11 +601,19 @@ def resolve_job_accounts(
     *,
     comment_id_count: int = COMMENT_ID_COUNT,
     author_id_count: int = DEFAULT_AUTO_ID_COUNT,
+    author_chrome_numbers: object = None,
+    comment_chrome_numbers: object = None,
 ) -> tuple[ProxyAccount | None, dict[str, ProxyAccount]]:
     rng = rng or random.SystemRandom()
     author = author_from_sheet(job, book)
     if author is None and book is not None:
-        author = sample_author_accounts(book, job.cafe, rng, author_id_count)[0]
+        author = sample_author_accounts(
+            book,
+            job.cafe,
+            rng,
+            author_id_count,
+            author_chrome_numbers=author_chrome_numbers,
+        )[0]
     comment_map: dict[str, ProxyAccount] = {}
     if book is None or not job.article.comments:
         return author, comment_map
@@ -473,6 +625,7 @@ def resolve_job_accounts(
             rng,
             pool_label="양평맘·씨씨앙",
             comment_id_count=needed,
+            comment_chrome_numbers=comment_chrome_numbers,
         )
     else:
         comment_map = _comment_id_map(
@@ -481,5 +634,6 @@ def resolve_job_accounts(
             rng,
             pool_label="자사 카페",
             comment_id_count=needed,
+            comment_chrome_numbers=comment_chrome_numbers,
         )
     return author, comment_map

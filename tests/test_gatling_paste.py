@@ -6,8 +6,10 @@ from openpyxl import Workbook, load_workbook
 
 from v2r_auto.content import CommentNode, ParsedArticle, parse_article
 from v2r_auto.gatling_accounts import (
+    comment_accounts_for_chromes,
     comment_auto_labels,
     normalize_auto_id_count,
+    parse_chrome_numbers,
     recognize_proxy_workbook,
 )
 from v2r_auto.images import ResolvedImage
@@ -1602,6 +1604,203 @@ def test_too_few_authors_for_auto_assign_raises(tmp_path: Path) -> None:
             manuscript_only=True,
             proxy_book=book,
             author_id_count=2,
+        )
+
+
+def test_parse_chrome_numbers_splits_common_separators() -> None:
+    assert parse_chrome_numbers("") == []
+    assert parse_chrome_numbers("  ") == []
+    assert parse_chrome_numbers("1,3,5") == [1, 3, 5]
+    assert parse_chrome_numbers("1 3 5") == [1, 3, 5]
+    assert parse_chrome_numbers("1;3|5") == [1, 3, 5]
+    assert parse_chrome_numbers("1, 3 / 5") == [1, 3, 5]
+    assert parse_chrome_numbers([1, "3", "5,7"]) == [1, 3, 5, 7]
+    assert parse_chrome_numbers(10) == [10]
+
+
+def test_author_chromes_pick_affiliate_ids_in_typed_order(tmp_path: Path) -> None:
+    first = QUESTION_SOURCE.replace("실제 원고 제목", "첫째 제목").replace("실제 원고 본문", "첫째 본문")
+    second = QUESTION_SOURCE.replace("실제 원고 제목", "둘째 제목").replace("실제 원고 본문", "둘째 본문")
+    third = QUESTION_SOURCE.replace("실제 원고 제목", "셋째 제목").replace("실제 원고 본문", "셋째 본문")
+    fourth = QUESTION_SOURCE.replace("실제 원고 제목", "넷째 제목").replace("실제 원고 본문", "넷째 본문")
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{first}",씨씨앙,,질문형,,,,,자유수다방\n'
+        f'"단식원 후기","{second}",씨씨앙,,질문형,,,,,자유수다방\n'
+        f'"단식원 비용","{third}",씨씨앙,,질문형,,,,,자유수다방\n'
+        f'"단식원 비교","{fourth}",씨씨앙,,질문형,,,,,자유수다방\n',
+    )
+    book = recognize_proxy_workbook(
+        write_proxy_xlsx(tmp_path, affiliate_author_count=6)
+    )
+    result = build_gatling_master(
+        brand,
+        manuscript_only=True,
+        proxy_book=book,
+        author_chrome_numbers="101,1",
+        rng=random.Random(1),
+    )
+    edits = [row for row in result.rows if row.type == TYPE_EDIT_POST]
+    assert [row.account for row in edits] == [
+        "writer2",
+        "writer",
+        "writer2",
+        "writer",
+    ]
+
+
+def test_author_chromes_allow_one_id_for_all_posts(tmp_path: Path) -> None:
+    first = QUESTION_SOURCE.replace("실제 원고 제목", "첫째 제목").replace("실제 원고 본문", "첫째 본문")
+    second = QUESTION_SOURCE.replace("실제 원고 제목", "둘째 제목").replace("실제 원고 본문", "둘째 본문")
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{first}",씨씨앙,,질문형,,,,,자유수다방\n'
+        f'"단식원 후기","{second}",씨씨앙,,질문형,,,,,자유수다방\n',
+    )
+    book = recognize_proxy_workbook(
+        write_proxy_xlsx(tmp_path, affiliate_author_count=6)
+    )
+    result = build_gatling_master(
+        brand,
+        manuscript_only=True,
+        proxy_book=book,
+        author_chrome_numbers="1",
+    )
+    edits = [row for row in result.rows if row.type == TYPE_EDIT_POST]
+    assert [row.account for row in edits] == ["writer", "writer"]
+
+
+def test_author_chromes_skip_other_pool_numbers(tmp_path: Path) -> None:
+    first = QUESTION_SOURCE.replace("실제 원고 제목", "첫째 제목").replace("실제 원고 본문", "첫째 본문")
+    second = QUESTION_SOURCE.replace("실제 원고 제목", "둘째 제목").replace("실제 원고 본문", "둘째 본문")
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{first}",씨씨앙,,질문형,,,,,자유수다방\n'
+        f'"단식원 후기","{second}",씨씨앙,,질문형,,,,,자유수다방\n',
+    )
+    book = recognize_proxy_workbook(
+        write_proxy_xlsx(tmp_path, affiliate_author_count=6)
+    )
+    result = build_gatling_master(
+        brand,
+        manuscript_only=True,
+        proxy_book=book,
+        author_chrome_numbers="1,10,101",
+    )
+    edits = [row for row in result.rows if row.type == TYPE_EDIT_POST]
+    assert [row.account for row in edits] == ["writer", "writer2"]
+
+
+def test_sheet_author_wins_over_author_chromes(tmp_path: Path) -> None:
+    first = QUESTION_SOURCE.replace("실제 원고 제목", "첫째 제목").replace("실제 원고 본문", "첫째 본문")
+    second = QUESTION_SOURCE.replace("실제 원고 제목", "둘째 제목").replace("실제 원고 본문", "둘째 본문")
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{first}",씨씨앙,writer,질문형,,,,,자유수다방\n'
+        f'"단식원 후기","{second}",씨씨앙,,질문형,,,,,자유수다방\n',
+    )
+    book = recognize_proxy_workbook(
+        write_proxy_xlsx(tmp_path, affiliate_author_count=6)
+    )
+    result = build_gatling_master(
+        brand,
+        manuscript_only=True,
+        proxy_book=book,
+        author_chrome_numbers="101",
+    )
+    edits = [row for row in result.rows if row.type == TYPE_EDIT_POST]
+    assert [row.account for row in edits] == ["writer", "writer2"]
+
+
+def test_comment_chromes_are_shuffled(tmp_path: Path) -> None:
+    job = make_job(cafe="씨씨앙", board="자유수다방")
+    job.account = "writer"
+    job.article_type = "질문형"
+    book = recognize_proxy_workbook(write_proxy_xlsx(tmp_path))
+    picked = comment_accounts_for_chromes(
+        book.comment_accounts(),
+        "11,13,15,12,14,16",
+        "양평맘·씨씨앙",
+    )
+    expected = random.Random(4).sample(picked, len(picked))
+    rows = build_master_rows(
+        job,
+        proxy_book=book,
+        rng=random.Random(4),
+        comment_chrome_numbers="11,13,15,12,14,16",
+    )
+    comments = [row for row in rows if row.type == TYPE_COMMENT]
+    replies = [row for row in rows if row.type == TYPE_REPLY]
+    assert comments[0].account == expected[0].account
+    assert comments[1].account == expected[1].account
+    assert replies[2].account == expected[1].account
+    assert replies[3].account == expected[2].account
+    assert {row.account for row in comments} | {
+        replies[2].account,
+        replies[3].account,
+    } <= {item.account for item in picked}
+    assert [item.account for item in expected] != [
+        "c1",
+        "c3",
+        "c5",
+        "c2",
+        "c4",
+        "c6",
+    ]
+
+
+def test_comment_chromes_skip_generic_pool_size(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{QUESTION_SOURCE}",씨씨앙,writer,질문형,,,,,자유수다방\n',
+    )
+    book = recognize_proxy_workbook(write_proxy_xlsx(tmp_path, comment_count=2))
+    result = build_gatling_master(
+        brand,
+        manuscript_only=True,
+        proxy_book=book,
+        comment_chrome_numbers="11,12",
+    )
+    comments = [row for row in result.rows if row.type == TYPE_COMMENT]
+    assert {row.account for row in comments} == {"c1", "c2"}
+
+
+def test_missing_author_chrome_raises(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{QUESTION_SOURCE}",씨씨앙,,질문형,,,,,자유수다방\n',
+    )
+    book = recognize_proxy_workbook(
+        write_proxy_xlsx(tmp_path, affiliate_author_count=6)
+    )
+    with pytest.raises(GatlingPasteError, match="크롬번호 999"):
+        build_gatling_master(
+            brand,
+            manuscript_only=True,
+            proxy_book=book,
+            author_chrome_numbers="999",
+        )
+
+
+def test_comment_chromes_from_wrong_pool_raise(tmp_path: Path) -> None:
+    brand = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{QUESTION_SOURCE}",씨씨앙,writer,질문형,,,,,자유수다방\n',
+    )
+    book = recognize_proxy_workbook(write_proxy_xlsx(tmp_path))
+    with pytest.raises(GatlingPasteError, match="양평맘·씨씨앙 댓글 아이디에서 크롬번호"):
+        build_gatling_master(
+            brand,
+            manuscript_only=True,
+            proxy_book=book,
+            comment_chrome_numbers="31,32",
         )
 
 

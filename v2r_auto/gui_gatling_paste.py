@@ -11,6 +11,7 @@ from .gatling_accounts import (
     MAX_AUTO_ID_COUNT,
     MIN_AUTO_ID_COUNT,
     normalize_auto_id_count,
+    parse_chrome_numbers,
     recognize_proxy_workbook,
     require_proxy_workbook,
 )
@@ -58,8 +59,8 @@ class GatlingPasteApp(AutomationApp):
             messagebox.showerror("중복 실행", str(exc))
             self.destroy()
             raise SystemExit(1) from exc
-        self.geometry("860x920")
-        self.minsize(800, 800)
+        self.geometry("860x1000")
+        self.minsize(800, 880)
         self.photo_wash_plan: PhotoWashPlan | None = None
 
     def _create_variables(self) -> None:
@@ -68,6 +69,8 @@ class GatlingPasteApp(AutomationApp):
         self.gatling_path = tk.StringVar()
         self.proxy_path = tk.StringVar()
         self.auto_id_count = tk.IntVar(value=DEFAULT_AUTO_ID_COUNT)
+        self.author_chromes = tk.StringVar()
+        self.comment_chromes = tk.StringVar()
         self.export_mode = tk.StringVar(value=EXPORT_EXCEL)
         self.txt_dir = tk.StringVar()
         detected = preferred_photo_washer_executable()
@@ -80,7 +83,7 @@ class GatlingPasteApp(AutomationApp):
         outer = ttk.Frame(self, padding=16)
         outer.pack(fill=tk.BOTH, expand=True)
         outer.columnconfigure(1, weight=1)
-        outer.rowconfigure(12, weight=1)
+        outer.rowconfigure(14, weight=1)
 
         ttk.Label(outer, text=self.app_name, font=("", 18, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
@@ -116,6 +119,10 @@ class GatlingPasteApp(AutomationApp):
                 "2~10개 중 고를 수 있고, 기본은 6개입니다. "
                 "제휴 카페는 프록시 제휴 아이디를, 자사 카페는 자사 아이디를 돌려 가며 넣습니다. "
                 "시트에 작성계정이 있으면 그 아이디를 그대로 씁니다. "
+                "본문 작성 크롬번호·댓글 크롬번호를 넣으면 그 번호 아이디만 씁니다. "
+                "예: 1,3,5. 비워 두면 지금처럼 자동 배정합니다. "
+                "제휴·자사 번호를 같이 넣어도 그 카페에 맞는 아이디만 고릅니다. "
+                "댓글 크롬번호를 넣으면 그 아이디만 고르고, 글마다 순서는 랜덤입니다. "
                 "댓글 아이디는 댓글 넣을 때만 제휴 댓·제휴 댓글 / 자사 댓·자사 댓글에서 6개를 씁니다. "
                 "제휴 댓과 자사 댓은 서로 다른 아이디를 씁니다. "
                 "작성자 비번·크롬번호는 그 아이디가 프록시에 있을 때만 채웁니다. "
@@ -165,11 +172,39 @@ class GatlingPasteApp(AutomationApp):
             text="아이디를 고르지 않으면 이 개수만큼 본문 작성 아이디를 자동으로 넣습니다. 제휴 카페는 제휴, 자사 카페는 자사에서 고릅니다",
         ).pack(side=tk.LEFT, padx=(8, 0))
 
-        ttk.Label(outer, text="받는 형식", width=17).grid(
+        ttk.Label(outer, text="본문 작성 크롬번호", width=17).grid(
             row=7, column=0, sticky="w", pady=3
         )
+        author_chrome_row = ttk.Frame(outer)
+        author_chrome_row.grid(row=7, column=1, columnspan=2, sticky="ew", pady=3)
+        author_chrome_row.columnconfigure(0, weight=1)
+        ttk.Entry(author_chrome_row, textvariable=self.author_chromes).grid(
+            row=0, column=0, sticky="ew"
+        )
+        ttk.Label(
+            author_chrome_row,
+            text="예: 1,3,5  비우면 자동",
+        ).grid(row=0, column=1, sticky="w", padx=(8, 0))
+
+        ttk.Label(outer, text="댓글 크롬번호", width=17).grid(
+            row=8, column=0, sticky="w", pady=3
+        )
+        comment_chrome_row = ttk.Frame(outer)
+        comment_chrome_row.grid(row=8, column=1, columnspan=2, sticky="ew", pady=3)
+        comment_chrome_row.columnconfigure(0, weight=1)
+        ttk.Entry(comment_chrome_row, textvariable=self.comment_chromes).grid(
+            row=0, column=0, sticky="ew"
+        )
+        ttk.Label(
+            comment_chrome_row,
+            text="예: 11,13,15  고른 아이디를 랜덤으로 넣습니다. 비우면 자동",
+        ).grid(row=0, column=1, sticky="w", padx=(8, 0))
+
+        ttk.Label(outer, text="받는 형식", width=17).grid(
+            row=9, column=0, sticky="w", pady=3
+        )
         mode_row = ttk.Frame(outer)
-        mode_row.grid(row=7, column=1, columnspan=2, sticky="w", pady=3)
+        mode_row.grid(row=9, column=1, columnspan=2, sticky="w", pady=3)
         ttk.Radiobutton(
             mode_row, text="엑셀", variable=self.export_mode, value=EXPORT_EXCEL
         ).pack(side=tk.LEFT)
@@ -186,21 +221,21 @@ class GatlingPasteApp(AutomationApp):
 
         self._entry_row(
             outer,
-            8,
+            10,
             "TXT 저장 폴더",
             self.txt_dir,
             button=("폴더", self._choose_txt_dir),
         )
         self._entry_row(
             outer,
-            9,
+            11,
             "포토워셔 main.exe",
             self.photo_washer_path,
             button=("찾기", self._choose_photo_washer),
         )
 
         actions = ttk.Frame(outer)
-        actions.grid(row=10, column=0, columnspan=3, sticky="ew", pady=(8, 10))
+        actions.grid(row=12, column=0, columnspan=3, sticky="ew", pady=(8, 10))
         ttk.Button(actions, text="구글 시트 열기", command=self._open_sheet).pack(
             side=tk.LEFT
         )
@@ -223,7 +258,7 @@ class GatlingPasteApp(AutomationApp):
         self.stop_button.pack(side=tk.LEFT, padx=(8, 0))
 
         progress_frame = ttk.Frame(outer)
-        progress_frame.grid(row=11, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+        progress_frame.grid(row=13, column=0, columnspan=3, sticky="ew", pady=(0, 6))
         progress_frame.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_frame, maximum=100)
         self.progress.grid(row=0, column=0, sticky="ew")
@@ -232,7 +267,7 @@ class GatlingPasteApp(AutomationApp):
         )
 
         log_frame = ttk.LabelFrame(outer, text="진행 기록", padding=8)
-        log_frame.grid(row=12, column=0, columnspan=3, sticky="nsew")
+        log_frame.grid(row=14, column=0, columnspan=3, sticky="nsew")
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
         self.log_text = tk.Text(log_frame, wrap="word", state=tk.DISABLED)
@@ -292,6 +327,12 @@ class GatlingPasteApp(AutomationApp):
 
     def _auto_id_count(self) -> int:
         return normalize_auto_id_count(self.auto_id_count.get())
+
+    def _author_chrome_numbers(self) -> list[int | str]:
+        return parse_chrome_numbers(self.author_chromes.get())
+
+    def _comment_chrome_numbers(self) -> list[int | str]:
+        return parse_chrome_numbers(self.comment_chromes.get())
 
     def _open_sheet(self) -> None:
         sheet_url = self.sheet_url.get().strip()
@@ -436,6 +477,8 @@ class GatlingPasteApp(AutomationApp):
                 existing_keys=existing_keys,
                 proxy_book=self._proxy_book() if want_excel else None,
                 author_id_count=self._auto_id_count(),
+                author_chrome_numbers=self._author_chrome_numbers(),
+                comment_chrome_numbers=self._comment_chrome_numbers(),
                 need_master_rows=want_excel,
             )
             wash_note = ""
@@ -537,6 +580,8 @@ class GatlingPasteApp(AutomationApp):
                     ),
                     proxy_book=self._proxy_book() if want_excel else None,
                     author_id_count=self._auto_id_count(),
+                    author_chrome_numbers=self._author_chrome_numbers(),
+                    comment_chrome_numbers=self._comment_chrome_numbers(),
                     need_master_rows=want_excel,
                 )
                 washed_images = (
@@ -554,6 +599,8 @@ class GatlingPasteApp(AutomationApp):
                     image_dir=gatling_image_folder(gatling_path) if gatling_path else None,
                     proxy_book=self._proxy_book() if want_excel else None,
                     author_id_count=self._auto_id_count(),
+                    author_chrome_numbers=self._author_chrome_numbers(),
+                    comment_chrome_numbers=self._comment_chrome_numbers(),
                     washed_images=washed_images,
                 )
                 result = exported.build
