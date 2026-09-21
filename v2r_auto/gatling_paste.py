@@ -105,7 +105,6 @@ MASTER_HEADERS = (
     "말머리",
     "게시판이름",
     "멤버공개",
-    "댓글비허용",
     "첨부비디오위치",
     "첨부이미지위치",
     "결과",
@@ -120,7 +119,7 @@ TYPE_COMMENT = "댓글"
 TYPE_REPLY = "대댓글"
 TYPE_DELAY = "딜레이"
 ARTICLE_TYPES = {TYPE_NEW_POST, TYPE_EDIT_POST}
-COMMENT_ALLOWED = "허용"
+MEMBER_PUBLIC_MARK = "O"
 REQUIRED_MASTER_HEADERS = MASTER_HEADERS[:4]
 WRITABLE_KINDS = {"xlsx", "xlsm"}
 IMAGE_PLACEHOLDER = "{이미지}"
@@ -181,7 +180,7 @@ class MasterRow:
     hashtag: str = ""
     prefix: str = ""
     board_name: str = ""
-    comment_policy: str = ""
+    member_public: str = ""
     result_link: str = ""
     image_location: str = ""
     ip: str = ""
@@ -198,8 +197,7 @@ class MasterRow:
             self.hashtag,
             self.prefix,
             self.board_name,
-            None,
-            self.comment_policy,
+            self.member_public or None,
             None,
             self.image_location or None,
             None,
@@ -1004,7 +1002,7 @@ def _article_row(
             hashtag=job.keyword if with_hashtag else "",
             prefix=job.prefix,
             board_name=board_name,
-            comment_policy=COMMENT_ALLOWED,
+            member_public=MEMBER_PUBLIC_MARK,
             image_location=image_location if with_hashtag else "",
         ),
         author,

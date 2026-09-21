@@ -31,6 +31,7 @@ from v2r_auto.gatling_paste import (
     TYPE_REPLY,
     GatlingBrandJob,
     GatlingPasteError,
+    append_master_rows,
     assign_daily_posts,
     build_and_write_master,
     build_gatling_master,
@@ -371,8 +372,19 @@ def test_build_assigns_daily_posts_and_writes_master_columns(tmp_path: Path) -> 
 
     workbook = load_workbook(output)
     sheet = workbook["마스터"]
-    headers = [sheet.cell(MASTER_HEADER_ROW, column).value for column in range(1, 20)]
+    headers = [
+        sheet.cell(MASTER_HEADER_ROW, column).value
+        for column in range(1, len(MASTER_HEADERS) + 1)
+    ]
     assert headers == list(MASTER_HEADERS)
+    assert "댓글비허용" not in headers
+    assert headers[10:15] == [
+        "멤버공개",
+        "첨부비디오위치",
+        "첨부이미지위치",
+        "결과",
+        "결과링크",
+    ]
 
     reply_row = None
     for row_number in range(MASTER_HEADER_ROW + 1, sheet.max_row + 1):
@@ -381,6 +393,7 @@ def test_build_assigns_daily_posts_and_writes_master_columns(tmp_path: Path) -> 
             break
     assert reply_row is not None
     assert sheet.cell(reply_row, 4).value == "깊은 답글"
+    assert sheet.cell(reply_row, 15).value is None
     assert sheet.cell(reply_row, 16).value is None
     assert sheet.cell(reply_row, 7).value is None
 
@@ -391,6 +404,8 @@ def test_build_assigns_daily_posts_and_writes_master_columns(tmp_path: Path) -> 
     )
     assert sheet.cell(edit_row, 3).value == "실제 원고 제목"
     assert sheet.cell(edit_row, 10).value == "자유 수다방"
+    assert sheet.cell(edit_row, 11).value == "O"
+    assert sheet.cell(edit_row, 12).value is None
 
 
 def test_assign_daily_posts_does_not_reuse_same_cafe_template(tmp_path: Path) -> None:
@@ -899,7 +914,10 @@ def test_manuscript_row_gets_hashtag_and_image_location() -> None:
     assert rows[0].image_location == ""
     assert rows[1].hashtag == "단식원 가격"
     assert rows[1].image_location == r"G:\image\1.jpg|G:\image\31.jpg"
-    assert rows[1].cells()[13] == r"G:\image\1.jpg|G:\image\31.jpg"
+    assert rows[1].cells()[12] == r"G:\image\1.jpg|G:\image\31.jpg"
+    assert rows[0].cells()[10] == "O"
+    assert rows[1].cells()[10] == "O"
+    assert rows[2].cells()[10] is None
     assert all(not row.hashtag and not row.image_location for row in rows[2:])
 
 
@@ -1946,3 +1964,60 @@ def test_txt_export_keeps_only_complete_rows(tmp_path: Path) -> None:
     assert [job.keyword for job in exported.build.jobs] == ["첫째"]
     assert any("본문" in item for item in exported.build.skipped)
     assert any("완료 링크" in item for item in exported.build.skipped)
+
+
+def test_updated_master_has_no_comment_block_column(tmp_path: Path) -> None:
+    path = write_gatling_xlsx(tmp_path)
+    info = recognize_gatling_workbook(path)
+    assert info.recognized
+    assert info.headers[:18] == list(MASTER_HEADERS)
+    assert "댓글비허용" not in info.headers
+
+    job = make_job(
+        cafe="러브인썸",
+        board="뷰티&미용",
+        cafe_article_url="https://cafe.naver.com/fik50kjkc/1763",
+        with_daily=False,
+    )
+    rows = build_master_rows(job, image_location=r"G:\image\1.jpg")
+    article = next(row for row in rows if row.type == TYPE_NEW_POST)
+    comment = next(row for row in rows if row.type == TYPE_COMMENT)
+    reply = next(row for row in rows if row.type == TYPE_REPLY)
+    assert article.member_public == "O"
+    assert article.cells()[10] == "O"
+    assert article.cells()[12] == r"G:\image\1.jpg"
+    assert article.cells()[14] is None
+    assert comment.member_public == ""
+    assert comment.cells()[10] is None
+    assert comment.cells()[0] == "https://cafe.naver.com/fik50kjkc/1763"
+    assert comment.cells()[14] is None
+    assert reply.cells()[14] == "https://cafe.naver.com/fik50kjkc/1763"
+
+    append_master_rows(path, rows)
+    workbook = load_workbook(path)
+    sheet = workbook["마스터"]
+    new_post = next(
+        row_number
+        for row_number in range(MASTER_HEADER_ROW + 1, sheet.max_row + 1)
+        if sheet.cell(row_number, 2).value == TYPE_NEW_POST
+        and sheet.cell(row_number, 3).value == "실제 원고 제목"
+    )
+    assert sheet.cell(new_post, 11).value == "O"
+    assert sheet.cell(new_post, 12).value is None
+    assert sheet.cell(new_post, 13).value == r"G:\image\1.jpg"
+    assert sheet.cell(new_post, 14).value is None
+    assert sheet.cell(new_post, 15).value is None
+    comment_row = next(
+        row_number
+        for row_number in range(new_post + 1, sheet.max_row + 1)
+        if sheet.cell(row_number, 2).value == TYPE_COMMENT
+    )
+    assert sheet.cell(comment_row, 1).value == "https://cafe.naver.com/fik50kjkc/1763"
+    assert sheet.cell(comment_row, 11).value is None
+    assert sheet.cell(comment_row, 15).value is None
+    reply_row = next(
+        row_number
+        for row_number in range(comment_row + 1, sheet.max_row + 1)
+        if sheet.cell(row_number, 2).value == TYPE_REPLY
+    )
+    assert sheet.cell(reply_row, 15).value == "https://cafe.naver.com/fik50kjkc/1763"
