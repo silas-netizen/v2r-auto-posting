@@ -26,6 +26,7 @@ from .images import (
     ResolvedImage,
     brand_from_sheet_title,
 )
+from .photo_washer import photo_job_key
 from .models import DailyPost
 
 
@@ -1380,21 +1381,27 @@ def _resolve_job_images(
     image_resolver: GoogleDriveImageResolver | None,
     image_dir: str | Path | None,
     skipped: list[str],
+    washed_images: dict[str, list[ResolvedImage]] | None = None,
 ) -> tuple[str, int]:
-    if job.image_disabled or image_resolver is None or not (job.brand or "").strip():
+    if job.image_disabled or not (job.brand or "").strip():
         return "", 0
-    source = f"{job.article.title}\n{job.article.body}"
-    try:
-        resolved = image_resolver.resolve_body(
-            brand=job.brand,
-            keyword=job.keyword,
-            body=source,
-            image_disabled=job.image_disabled,
-            row_number=job.row_number,
-        )
-    except Exception as exc:
-        skipped.append(f"행 {job.row_number}: 이미지 생략 ({exc})")
-        return "", 0
+    if washed_images is not None:
+        resolved = list(washed_images.get(photo_job_key(job), []))
+    else:
+        if image_resolver is None:
+            return "", 0
+        source = f"{job.article.title}\n{job.article.body}"
+        try:
+            resolved = image_resolver.resolve_body(
+                brand=job.brand,
+                keyword=job.keyword,
+                body=source,
+                image_disabled=job.image_disabled,
+                row_number=job.row_number,
+            )
+        except Exception as exc:
+            skipped.append(f"행 {job.row_number}: 이미지 생략 ({exc})")
+            return "", 0
     if not resolved:
         return "", 0
     if image_dir:
@@ -1418,6 +1425,7 @@ def build_gatling_master(
     comment_id_count: int = COMMENT_ID_COUNT,
     author_id_count: int = DEFAULT_AUTO_ID_COUNT,
     need_master_rows: bool = True,
+    washed_images: dict[str, list[ResolvedImage]] | None = None,
 ) -> GatlingBuildResult:
     jobs, skipped = load_gatling_brand_jobs(
         brand_path,
@@ -1495,6 +1503,7 @@ def build_gatling_master(
             image_resolver=image_resolver,
             image_dir=image_dir,
             skipped=skipped,
+            washed_images=washed_images,
         )
         image_count += count
         rows.extend(
@@ -1603,6 +1612,7 @@ def paste_manuscripts_into_gatling(
     proxy_book: ProxyBook | None = None,
     comment_id_count: int = COMMENT_ID_COUNT,
     author_id_count: int = DEFAULT_AUTO_ID_COUNT,
+    washed_images: dict[str, list[ResolvedImage]] | None = None,
 ) -> tuple[GatlingBuildResult, int]:
     """Append Google Sheet title/body/comments into a recognized 기관총 마스터."""
     result = build_gatling_master(
@@ -1619,6 +1629,7 @@ def paste_manuscripts_into_gatling(
         proxy_book=proxy_book,
         comment_id_count=comment_id_count,
         author_id_count=author_id_count,
+        washed_images=washed_images,
     )
     if not result.rows:
         preview = "\n".join(result.skipped[:8])
@@ -1647,6 +1658,7 @@ def export_gatling_output(
     proxy_book: ProxyBook | None = None,
     comment_id_count: int = COMMENT_ID_COUNT,
     author_id_count: int = DEFAULT_AUTO_ID_COUNT,
+    washed_images: dict[str, list[ResolvedImage]] | None = None,
 ) -> GatlingExportResult:
     chosen = parse_export_mode(mode)
     want_excel = chosen in {EXPORT_EXCEL, EXPORT_BOTH}
@@ -1673,6 +1685,7 @@ def export_gatling_output(
         comment_id_count=comment_id_count,
         author_id_count=author_id_count,
         need_master_rows=want_excel,
+        washed_images=washed_images,
     )
     start_row = None
     txt_paths: list[Path] = []

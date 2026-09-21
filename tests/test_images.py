@@ -121,6 +121,72 @@ def test_patsooni_keyword_matches_filename_without_spaces(tmp_path: Path) -> Non
     assert [item.occurrence for item in resolved] == [0, 1]
 
 
+def test_kosumpit_keyword_uses_matching_subfolder(tmp_path: Path) -> None:
+    job = make_job("{키워드}", brand="코숨핏", keyword="코골이")
+
+    class FakeResolver(GoogleDriveImageResolver):
+        def __init__(self):
+            super().__init__(
+                tmp_path,
+                logging.getLogger("test"),
+                root_folder_id="root",
+                rng=random.Random(1),
+            )
+            self.items = {
+                "root": [DriveItem("brand", "코숨핏", True)],
+                "brand": [DriveItem("keyword", "키워드", True)],
+                "keyword": [
+                    DriveItem("rhinitis", "비염", True),
+                    DriveItem("snore", "코골이", True),
+                ],
+                "rhinitis": [DriveItem("wrong", "1.jpg", False)],
+                "snore": [
+                    DriveItem("right1", "3.jpg", False),
+                    DriveItem("right2", "7.jpg", False),
+                ],
+            }
+
+        def _list_folder(self, folder_id: str):
+            return self.items[folder_id]
+
+        def _download(self, item: DriveItem) -> Path:
+            return tmp_path / item.name
+
+    resolved = FakeResolver().resolve(job)
+
+    assert resolved[0].file_id in {"right1", "right2"}
+    assert resolved[0].file_name.endswith(".jpg")
+
+
+def test_kosumpit_named_placeholder_uses_keyword_subfolder(tmp_path: Path) -> None:
+    job = make_job("{비염}", brand="코숨핏", keyword="다른값")
+
+    class FakeResolver(GoogleDriveImageResolver):
+        def __init__(self):
+            super().__init__(
+                tmp_path,
+                logging.getLogger("test"),
+                root_folder_id="root",
+                rng=random.Random(1),
+            )
+            self.items = {
+                "root": [DriveItem("brand", "코숨핏", True)],
+                "brand": [DriveItem("keyword", "키워드", True)],
+                "keyword": [DriveItem("rhinitis", "비염", True)],
+                "rhinitis": [DriveItem("right", "4.jpg", False)],
+            }
+
+        def _list_folder(self, folder_id: str):
+            return self.items[folder_id]
+
+        def _download(self, item: DriveItem) -> Path:
+            return tmp_path / item.name
+
+    resolved = FakeResolver().resolve(job)
+
+    assert [item.file_id for item in resolved] == ["right"]
+
+
 def test_list_folder_reads_embedded_view_before_first_screen(tmp_path: Path) -> None:
     embed = """
     <div class="flip-entry" id="entry-right" role="link">
