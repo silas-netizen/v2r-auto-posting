@@ -47,6 +47,7 @@ from v2r_auto.gatling_paste import (
     gatling_image_folder,
     gatling_txt_folder,
     load_gatling_brand_jobs,
+    normalize_brand_paths,
     normalize_gatling_source,
     parse_completion_cafe_article,
     parse_export_mode,
@@ -1802,6 +1803,78 @@ def test_comment_chromes_from_wrong_pool_raise(tmp_path: Path) -> None:
             proxy_book=book,
             comment_chrome_numbers="31,32",
         )
+
+
+def test_normalize_brand_paths_keeps_filled_only(tmp_path: Path) -> None:
+    first = tmp_path / "a.csv"
+    second = tmp_path / "b.csv"
+    first.write_text("x", encoding="utf-8")
+    second.write_text("y", encoding="utf-8")
+    assert normalize_brand_paths([first, "", second]) == [first, second]
+    with pytest.raises(GatlingPasteError, match="브랜드 시트"):
+        normalize_brand_paths(["", "  "])
+
+
+def test_two_brand_sheets_are_merged(tmp_path: Path) -> None:
+    first_body = QUESTION_SOURCE.replace("실제 원고 제목", "첫째 제목").replace(
+        "실제 원고 본문", "첫째 본문"
+    )
+    second_body = QUESTION_SOURCE.replace("실제 원고 제목", "둘째 제목").replace(
+        "실제 원고 본문", "둘째 본문"
+    )
+    first = tmp_path / "first.csv"
+    second = tmp_path / "second.csv"
+    header = "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+    first.write_text(
+        header + f'"단식원 가격","{first_body}",고요한아침,writer,질문형,,,,,가입인사\n',
+        encoding="utf-8-sig",
+    )
+    second.write_text(
+        header + f'"단식원 후기","{second_body}",고요한아침,writer,질문형,,,,,가입인사\n',
+        encoding="utf-8-sig",
+    )
+    result = build_gatling_master([first, second], manuscript_only=True)
+    assert [job.keyword for job in result.jobs] == ["단식원 가격", "단식원 후기"]
+    posts = [row for row in result.rows if row.type == TYPE_NEW_POST]
+    assert [row.title for row in posts] == ["첫째 제목", "둘째 제목"]
+
+
+def test_empty_extra_sheet_is_skipped(tmp_path: Path) -> None:
+    first = write_brand_csv(
+        tmp_path,
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+        f'"단식원 가격","{QUESTION_SOURCE}",고요한아침,writer,질문형,,,,,가입인사\n',
+    )
+    empty = tmp_path / "empty.csv"
+    empty.write_text(
+        "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n",
+        encoding="utf-8-sig",
+    )
+    result = build_gatling_master([first, empty], manuscript_only=True)
+    assert [job.keyword for job in result.jobs] == ["단식원 가격"]
+    assert any("시트2" in item and "원고가 없습니다" in item for item in result.skipped)
+
+
+def test_sheet_brands_stay_separate(tmp_path: Path) -> None:
+    first_body = QUESTION_SOURCE.replace("실제 원고 제목", "팥순이 제목").replace(
+        "실제 원고 본문", "팥순이 본문"
+    )
+    second_body = QUESTION_SOURCE.replace("실제 원고 제목", "코숨핏 제목").replace(
+        "실제 원고 본문", "코숨핏 본문"
+    )
+    header = "키워드,본문,카페명,작성계정,원고유형,완료 링크,말머리,계정유형,이미지 없음,게시판명\n"
+    first = tmp_path / "원고 (팥순이).csv"
+    second = tmp_path / "원고 (코숨핏).csv"
+    first.write_text(
+        header + f'"단식원 가격","{first_body}",고요한아침,writer,질문형,,,,,가입인사\n',
+        encoding="utf-8-sig",
+    )
+    second.write_text(
+        header + f'"코골이","{second_body}",고요한아침,writer,질문형,,,,,가입인사\n',
+        encoding="utf-8-sig",
+    )
+    result = build_gatling_master([first, second], manuscript_only=True)
+    assert [job.brand for job in result.jobs] == ["팥순이", "코숨핏"]
 
 
 def test_comment_categories_accept_댓_and_댓글(tmp_path: Path) -> None:

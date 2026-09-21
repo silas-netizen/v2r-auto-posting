@@ -37,6 +37,7 @@ DAILY_POST_SHEET_URL = (
     "https://docs.google.com/spreadsheets/d/"
     "1vSON0Rej9anDQXcAOXyBrCr50B4MMqZ79FahF4cDPJw/edit?gid=1842684291#gid=1842684291"
 )
+MAX_BRAND_SHEETS = 5
 AFFILIATE_CAFES = {"씨씨앙", "양평맘"}
 AFFILIATE_EXACT_BOARDS = {
     "씨씨앙": "자유 수다방",
@@ -866,11 +867,41 @@ def append_master_rows(path: str | Path, rows: list[MasterRow]) -> int:
         workbook.close()
 
 
+def normalize_brand_paths(
+    brand_path: str | Path | list[str | Path] | tuple[str | Path, ...],
+) -> list[Path]:
+    if isinstance(brand_path, (list, tuple)):
+        paths = [Path(item) for item in brand_path if str(item or "").strip()]
+    elif str(brand_path or "").strip():
+        paths = [Path(brand_path)]
+    else:
+        paths = []
+    if not paths:
+        raise GatlingPasteError("브랜드 시트 주소 또는 CSV 파일을 넣어 주세요")
+    return paths
+
+
+def normalize_brand_names(
+    brand: str | list[str] | tuple[str, ...],
+    count: int,
+) -> list[str]:
+    if isinstance(brand, (list, tuple)):
+        names = [str(item or "").strip() for item in brand]
+    else:
+        names = [str(brand or "").strip()]
+    if len(names) == 1 and count > 1:
+        names = names * count
+    if len(names) < count:
+        names.extend([""] * (count - len(names)))
+    return names[:count]
+
+
 def load_gatling_brand_jobs(
     path: str | Path,
     *,
     skip_completed: bool = False,
     brand: str = "",
+    require_jobs: bool = True,
 ) -> tuple[list[GatlingBrandJob], list[str]]:
     csv_path = Path(path)
     if not csv_path.exists():
@@ -935,6 +966,8 @@ def load_gatling_brand_jobs(
                 )
             )
     if not jobs:
+        if not require_jobs:
+            return [], skipped
         if skipped:
             preview = "\n".join(skipped[:8])
             extra = f"\n외 {len(skipped) - 8}건" if len(skipped) > 8 else ""
@@ -1417,14 +1450,14 @@ def _resolve_job_images(
 
 
 def build_gatling_master(
-    brand_path: str | Path,
+    brand_path: str | Path | list[str | Path] | tuple[str | Path, ...],
     daily_path: str | Path | None = None,
     *,
     skip_completed: bool = False,
     rng: random.Random | None = None,
     extra_exact_names: list[str] | tuple[str, ...] = (),
     manuscript_only: bool = False,
-    brand: str = "",
+    brand: str | list[str] | tuple[str, ...] = "",
     image_resolver: GoogleDriveImageResolver | None = None,
     image_dir: str | Path | None = None,
     existing_keys: set[tuple[str, str]] | None = None,
@@ -1436,11 +1469,35 @@ def build_gatling_master(
     need_master_rows: bool = True,
     washed_images: dict[str, list[ResolvedImage]] | None = None,
 ) -> GatlingBuildResult:
-    jobs, skipped = load_gatling_brand_jobs(
-        brand_path,
-        skip_completed=skip_completed,
-        brand=brand,
-    )
+    paths = normalize_brand_paths(brand_path)
+    brands = normalize_brand_names(brand, len(paths))
+    jobs: list[GatlingBrandJob] = []
+    skipped: list[str] = []
+    many = len(paths) > 1
+    for index, (path, sheet_brand) in enumerate(zip(paths, brands), start=1):
+        prefix = f"시트{index} " if many else ""
+        try:
+            loaded, sheet_skipped = load_gatling_brand_jobs(
+                path,
+                skip_completed=skip_completed,
+                brand=sheet_brand,
+                require_jobs=not many,
+            )
+        except GatlingPasteError as exc:
+            if many:
+                raise GatlingPasteError(f"{prefix}{exc}") from exc
+            raise
+        skipped.extend(f"{prefix}{item}" for item in sheet_skipped)
+        if many and not loaded:
+            skipped.append(f"{prefix}넣을 원고가 없습니다")
+        jobs.extend(loaded)
+    if not jobs:
+        preview = "\n".join(skipped[:8])
+        extra = f"\n외 {len(skipped) - 8}건" if len(skipped) > 8 else ""
+        raise GatlingPasteError(
+            "붙여넣을 브랜드 원고가 없습니다."
+            + (f"\n{preview}{extra}" if preview else " 시트에 키워드·본문·카페명이 있는 행이 있는지 확인하세요.")
+        )
     if not need_master_rows:
         jobs, txt_skipped = pick_txt_jobs(jobs)
         skipped.extend(txt_skipped)
@@ -1607,7 +1664,7 @@ def write_master_xlsx(path: str | Path, rows: list[MasterRow]) -> Path:
 
 
 def build_and_write_master(
-    brand_path: str | Path,
+    brand_path: str | Path | list[str | Path] | tuple[str | Path, ...],
     output_path: str | Path,
     daily_path: str | Path | None = None,
     *,
@@ -1647,7 +1704,7 @@ def build_and_write_master(
 
 
 def paste_manuscripts_into_gatling(
-    brand_path: str | Path,
+    brand_path: str | Path | list[str | Path] | tuple[str | Path, ...],
     gatling_path: str | Path,
     daily_path: str | Path | None = None,
     *,
@@ -1655,7 +1712,7 @@ def paste_manuscripts_into_gatling(
     rng: random.Random | None = None,
     extra_exact_names: list[str] | tuple[str, ...] = (),
     manuscript_only: bool = True,
-    brand: str = "",
+    brand: str | list[str] | tuple[str, ...] = "",
     image_resolver: GoogleDriveImageResolver | None = None,
     image_dir: str | Path | None = None,
     proxy_book: ProxyBook | None = None,
@@ -1696,7 +1753,7 @@ def paste_manuscripts_into_gatling(
 
 
 def export_gatling_output(
-    brand_path: str | Path,
+    brand_path: str | Path | list[str | Path] | tuple[str | Path, ...],
     *,
     mode: str,
     gatling_path: str | Path | None = None,
@@ -1705,7 +1762,7 @@ def export_gatling_output(
     skip_completed: bool = False,
     rng: random.Random | None = None,
     extra_exact_names: list[str] | tuple[str, ...] = (),
-    brand: str = "",
+    brand: str | list[str] | tuple[str, ...] = "",
     image_resolver: GoogleDriveImageResolver | None = None,
     image_dir: str | Path | None = None,
     proxy_book: ProxyBook | None = None,
