@@ -5,13 +5,14 @@ from PyInstaller.utils.hooks import collect_all
 selenium_datas, selenium_binaries, selenium_hiddenimports = collect_all("selenium")
 openpyxl_datas, openpyxl_binaries, openpyxl_hiddenimports = collect_all("openpyxl")
 pyxlsb_datas, pyxlsb_binaries, pyxlsb_hiddenimports = collect_all("pyxlsb")
+pillow_datas, pillow_binaries, pillow_hiddenimports = collect_all("PIL")
 
 a = Analysis(
     ["main_gatling_paste.py"],
     pathex=[],
-    binaries=selenium_binaries + openpyxl_binaries + pyxlsb_binaries,
-    datas=selenium_datas + openpyxl_datas + pyxlsb_datas,
-    hiddenimports=selenium_hiddenimports + openpyxl_hiddenimports + pyxlsb_hiddenimports,
+    binaries=selenium_binaries + openpyxl_binaries + pyxlsb_binaries + pillow_binaries,
+    datas=selenium_datas + openpyxl_datas + pyxlsb_datas + pillow_datas,
+    hiddenimports=selenium_hiddenimports + openpyxl_hiddenimports + pyxlsb_hiddenimports + pillow_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -18,6 +18,8 @@ DRIVE_EMBEDDED_FOLDER_URL = "https://drive.google.com/embeddedfolderview?id={fol
 DRIVE_DOWNLOAD_URL = "https://drive.usercontent.google.com/download"
 PLACEHOLDER_PATTERN = re.compile(r"\{([^{}\r\n]+)\}")
 SHEET_BRAND_PATTERN = re.compile(r"\(([^()]+)\)")
+KEYWORD_FILENAME_BRANDS = frozenset({"팥순이"})
+KEYWORD_SUBFOLDER_BRANDS = frozenset({"코숨핏"})
 EMBEDDED_ENTRY_PATTERN = re.compile(
     r'<div class="flip-entry"[^>]*\bid="entry-([^"]+)"(.*?)(?=<div class="flip-entry"|\Z)',
     flags=re.DOTALL,
@@ -61,6 +63,21 @@ def strip_placeholders(body: str) -> str:
 def brand_from_sheet_title(title: str) -> str:
     matches = SHEET_BRAND_PATTERN.findall(html.unescape(title or ""))
     return matches[-1].strip() if matches else ""
+
+
+def uses_keyword_filename(brand: str) -> bool:
+    return (brand or "").strip() in KEYWORD_FILENAME_BRANDS
+
+
+def uses_keyword_subfolder(brand: str) -> bool:
+    return (brand or "").strip() in KEYWORD_SUBFOLDER_BRANDS
+
+
+def job_image_source(job: object) -> str:
+    article = getattr(job, "article", None)
+    if article is not None:
+        return f"{getattr(article, 'title', '')}\n{getattr(article, 'body', '')}"
+    return f"{getattr(job, 'title', '')}\n{getattr(job, 'body', '')}"
 
 
 def load_sheet_brand(sheet_url: str, timeout: int = 20) -> str:
@@ -209,7 +226,13 @@ class GoogleDriveImageResolver:
         target.write_bytes(data)
         return target
 
-    def _image_folder(self, brand_folder_id: str, marker: str) -> DriveItem | None:
+    def _image_folder(
+        self,
+        brand_folder_id: str,
+        marker: str,
+        *,
+        brand: str = "",
+    ) -> DriveItem | None:
         normalized = normalize_image_marker(marker)
         names = [normalized]
         if normalized == "B/A":
@@ -220,7 +243,41 @@ class GoogleDriveImageResolver:
             found = self._folder(brand_folder_id, name)
             if found:
                 return found
+        if uses_keyword_subfolder(brand) and normalized != "키워드":
+            keyword_root = self._folder(brand_folder_id, "키워드")
+            if keyword_root:
+                return self._folder(keyword_root.item_id, marker)
         return None
+
+    def _keyword_candidates(
+        self,
+        *,
+        brand: str,
+        keyword: str,
+        folder: DriveItem,
+        files: list[DriveItem],
+        items: list[DriveItem],
+    ) -> list[DriveItem]:
+        wanted = re.sub(r"\s+", "", keyword).casefold()
+        if uses_keyword_filename(brand):
+            return [item for item in files if self._file_key(item.name) == wanted]
+        if uses_keyword_subfolder(brand):
+            sub = next(
+                (
+                    item
+                    for item in items
+                    if item.is_folder and self._file_key(item.name) == wanted
+                ),
+                None,
+            )
+            if sub:
+                return [
+                    item
+                    for item in self._list_folder(sub.item_id)
+                    if not item.is_folder
+                ]
+            return [item for item in files if self._file_key(item.name) == wanted]
+        return files
 
     def resolve_body(
         self,
@@ -230,10 +287,12 @@ class GoogleDriveImageResolver:
         body: str,
         image_disabled: bool = False,
         row_number: int = 0,
+        excluded_file_ids: set[str] | None = None,
     ) -> list[ResolvedImage]:
         markers = placeholders(body)
         if image_disabled or not markers:
             return []
+        excluded = excluded_file_ids or set()
         brand_folder = self._folder(self.root_folder_id, brand)
         if not brand_folder:
             self.logger.warning(
@@ -246,7 +305,7 @@ class GoogleDriveImageResolver:
         resolved: list[ResolvedImage] = []
         for occurrence, marker in enumerate(markers):
             normalized = normalize_image_marker(marker)
-            folder = self._image_folder(brand_folder.item_id, marker)
+            folder = self._image_folder(brand_folder.item_id, marker, brand=brand)
             if not folder:
                 self.logger.warning(
                     "행 %s {%s} 폴더를 찾지 못해 해당 이미지 생략",
@@ -254,10 +313,26 @@ class GoogleDriveImageResolver:
                     marker,
                 )
                 continue
-            files = [item for item in self._list_folder(folder.item_id) if not item.is_folder]
-            if brand == "팥순이" and normalized == "키워드":
-                wanted = re.sub(r"\s+", "", keyword).casefold()
-                candidates = [item for item in files if self._file_key(item.name) == wanted]
+            items = self._list_folder(folder.item_id)
+            files = [
+                item
+                for item in items
+                if not item.is_folder and item.item_id not in excluded
+            ]
+            if normalized == "키워드" and (
+                uses_keyword_filename(brand) or uses_keyword_subfolder(brand)
+            ):
+                candidates = [
+                    item
+                    for item in self._keyword_candidates(
+                        brand=brand,
+                        keyword=keyword,
+                        folder=folder,
+                        files=files,
+                        items=items,
+                    )
+                    if item.item_id not in excluded
+                ]
             else:
                 candidates = files
             if not candidates:
@@ -289,11 +364,17 @@ class GoogleDriveImageResolver:
             )
         return resolved
 
-    def resolve(self, job: AffiliateJob) -> list[ResolvedImage]:
+    def resolve(
+        self,
+        job: AffiliateJob,
+        *,
+        excluded_file_ids: set[str] | None = None,
+    ) -> list[ResolvedImage]:
         return self.resolve_body(
             brand=job.brand,
             keyword=job.keyword,
-            body=job.body,
+            body=job_image_source(job),
             image_disabled=job.image_disabled,
             row_number=job.row_number,
+            excluded_file_ids=excluded_file_ids,
         )
