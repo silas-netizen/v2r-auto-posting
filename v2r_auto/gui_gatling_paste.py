@@ -20,6 +20,7 @@ from .gatling_paste import (
     EXPORT_BOTH,
     EXPORT_EXCEL,
     EXPORT_TXT,
+    MAX_BRAND_SHEETS,
     GatlingPasteError,
     build_gatling_master,
     export_gatling_output,
@@ -59,12 +60,13 @@ class GatlingPasteApp(AutomationApp):
             messagebox.showerror("중복 실행", str(exc))
             self.destroy()
             raise SystemExit(1) from exc
-        self.geometry("860x1000")
-        self.minsize(800, 880)
+        self.geometry("860x1120")
+        self.minsize(800, 960)
         self.photo_wash_plan: PhotoWashPlan | None = None
 
     def _create_variables(self) -> None:
-        self.sheet_url = tk.StringVar()
+        self.sheet_urls = [tk.StringVar() for _ in range(MAX_BRAND_SHEETS)]
+        self.sheet_url = self.sheet_urls[0]
         self.local_csv = tk.StringVar()
         self.gatling_path = tk.StringVar()
         self.proxy_path = tk.StringVar()
@@ -126,13 +128,31 @@ class GatlingPasteApp(AutomationApp):
                 "댓글 아이디는 댓글 넣을 때만 제휴 댓·제휴 댓글 / 자사 댓·자사 댓글에서 6개를 씁니다. "
                 "제휴 댓과 자사 댓은 서로 다른 아이디를 씁니다. "
                 "작성자 비번·크롬번호는 그 아이디가 프록시에 있을 때만 채웁니다. "
-                "구글 시트 주소를 쓰면 '구글 시트 열기'로 시트를 엽니다. "
+                "구글 시트 주소를 최대 5개까지 한 줄씩 넣을 수 있습니다. "
+                "비운 칸은 건너뛰고, 넣은 시트는 한 번에 같이 넣습니다. "
+                "'구글 시트 열기'는 맨 위 주소를 엽니다. "
                 "V2R은 쓰지 않습니다. 기관총 파일은 엑셀에서 닫아 둔 .xlsm을 고르세요."
             ),
             wraplength=800,
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
 
-        self._entry_row(outer, 2, "브랜드 시트 URL", self.sheet_url)
+        ttk.Label(outer, text="브랜드 시트 URL", width=17).grid(
+            row=2, column=0, sticky="nw", pady=3
+        )
+        sheet_box = ttk.Frame(outer)
+        sheet_box.grid(row=2, column=1, columnspan=2, sticky="ew", pady=3)
+        sheet_box.columnconfigure(1, weight=1)
+        for index, variable in enumerate(self.sheet_urls, start=1):
+            ttk.Label(sheet_box, text=str(index), width=2).grid(
+                row=index - 1, column=0, sticky="w"
+            )
+            ttk.Entry(sheet_box, textvariable=variable).grid(
+                row=index - 1, column=1, sticky="ew", pady=1
+            )
+        ttk.Label(
+            sheet_box,
+            text="한 줄에 시트 하나씩. 비운 칸은 건너뜁니다",
+        ).grid(row=MAX_BRAND_SHEETS, column=0, columnspan=2, sticky="w", pady=(2, 0))
         self._entry_row(
             outer,
             3,
@@ -334,51 +354,92 @@ class GatlingPasteApp(AutomationApp):
     def _comment_chrome_numbers(self) -> list[int | str]:
         return parse_chrome_numbers(self.comment_chromes.get())
 
+    def _filled_sheet_urls(self) -> list[str]:
+        seen: set[str] = set()
+        urls: list[str] = []
+        for variable in self.sheet_urls:
+            url = variable.get().strip()
+            key = url.casefold()
+            if not url or key in seen:
+                continue
+            seen.add(key)
+            urls.append(url)
+        return urls
+
     def _open_sheet(self) -> None:
-        sheet_url = self.sheet_url.get().strip()
-        if not sheet_url:
+        urls = self._filled_sheet_urls()
+        if not urls:
             messagebox.showerror("입력 오류", "브랜드 시트 URL을 넣어 주세요")
             return
-        self._run_background(lambda: self.browser.open_google_sheet(sheet_url))
+        self._run_background(lambda: self.browser.open_google_sheet(urls[0]))
 
-    def _brand_path(self) -> Path:
-        local_csv = self.local_csv.get().strip()
-        if local_csv:
-            return Path(local_csv)
-        sheet_url = self.sheet_url.get().strip()
-        if not sheet_url:
-            raise GatlingPasteError("브랜드 시트 주소 또는 CSV 파일을 넣어 주세요")
-        return self.browser.download_sheet(sheet_url)
-
-    def _brand_and_daily_paths(self) -> tuple[Path, Path | None]:
-        brand_path = self._brand_path()
-        jobs, _ = load_gatling_brand_jobs(brand_path, skip_completed=False)
-        if any(is_affiliate_cafe(job.cafe) for job in jobs):
-            self.logger.info("제휴 카페용 일상 글 시트를 내려받습니다")
-            daily_path = self.browser.download_sheet(
-                DAILY_POST_SHEET_URL,
-                ignore_paths=[brand_path],
-            )
-            if not looks_like_daily_sheet(daily_path):
-                self.logger.info("일상 글 시트가 아니라 한 번 더 받습니다")
-                daily_path = self.browser.download_sheet(
-                    DAILY_POST_SHEET_URL,
-                    ignore_paths=[brand_path, daily_path],
-                )
-            return brand_path, daily_path
-        return brand_path, None
-
-    def _brand_name(self, brand_path: Path) -> str:
+    def _brand_name(self, brand_path: Path, sheet_url: str = "") -> str:
         name = brand_from_sheet_title(brand_path.stem)
         if name:
             return name
-        url = self.sheet_url.get().strip()
+        url = (sheet_url or "").strip()
         if not url:
             return ""
         try:
             return load_sheet_brand(url)
         except Exception:
             return ""
+
+    def _brand_inputs(self) -> tuple[list[Path], list[str]]:
+        local_csv = self.local_csv.get().strip()
+        urls = self._filled_sheet_urls()
+        paths: list[Path] = []
+        brands: list[str] = []
+        ignore: list[Path] = []
+        if local_csv:
+            path = Path(local_csv)
+            paths.append(path)
+            brands.append(self._brand_name(path))
+            ignore.append(path)
+        for url in urls:
+            path = self.browser.download_sheet(url, ignore_paths=ignore)
+            paths.append(path)
+            brands.append(self._brand_name(path, url))
+            ignore.append(path)
+        if not paths:
+            raise GatlingPasteError("브랜드 시트 주소 또는 CSV 파일을 넣어 주세요")
+        return paths, brands
+
+    def _brand_path(self) -> Path:
+        paths, _brands = self._brand_inputs()
+        return paths[0]
+
+    def _daily_path_for(self, brand_paths: list[Path], brands: list[str]) -> Path | None:
+        need_daily = False
+        for path, brand in zip(brand_paths, brands):
+            jobs, _ = load_gatling_brand_jobs(
+                path,
+                skip_completed=False,
+                brand=brand,
+                require_jobs=False,
+            )
+            if any(is_affiliate_cafe(job.cafe) for job in jobs):
+                need_daily = True
+                break
+        if not need_daily:
+            return None
+        self.logger.info("제휴 카페용 일상 글 시트를 내려받습니다")
+        ignore = list(brand_paths)
+        daily_path = self.browser.download_sheet(
+            DAILY_POST_SHEET_URL,
+            ignore_paths=ignore,
+        )
+        if not looks_like_daily_sheet(daily_path):
+            self.logger.info("일상 글 시트가 아니라 한 번 더 받습니다")
+            daily_path = self.browser.download_sheet(
+                DAILY_POST_SHEET_URL,
+                ignore_paths=[*ignore, daily_path],
+            )
+        return daily_path
+
+    def _brand_and_daily_paths(self) -> tuple[list[Path], list[str], Path | None]:
+        paths, brands = self._brand_inputs()
+        return paths, brands, self._daily_path_for(paths, brands)
 
     def _image_resolver(self) -> GoogleDriveImageResolver:
         return GoogleDriveImageResolver(self.data_dir / "data", self.logger)
@@ -457,9 +518,9 @@ class GatlingPasteApp(AutomationApp):
             mode = parse_export_mode(self.export_mode.get())
             want_excel = mode in {EXPORT_EXCEL, EXPORT_BOTH}
             if want_excel:
-                brand_path, daily_path = self._brand_and_daily_paths()
+                brand_paths, brands, daily_path = self._brand_and_daily_paths()
             else:
-                brand_path = self._brand_path()
+                brand_paths, brands = self._brand_inputs()
                 daily_path = None
             gatling_path = self.gatling_path.get().strip()
             existing_keys = (
@@ -468,11 +529,11 @@ class GatlingPasteApp(AutomationApp):
                 else None
             )
             result = build_gatling_master(
-                brand_path,
+                brand_paths,
                 daily_path,
                 manuscript_only=not want_excel,
                 skip_completed=False,
-                brand=self._brand_name(brand_path),
+                brand=brands,
                 image_resolver=None,
                 existing_keys=existing_keys,
                 proxy_book=self._proxy_book() if want_excel else None,
@@ -561,17 +622,17 @@ class GatlingPasteApp(AutomationApp):
             try:
                 self._set_progress(1, 3)
                 if want_excel:
-                    brand_path, daily_path = self._brand_and_daily_paths()
+                    brand_paths, brands, daily_path = self._brand_and_daily_paths()
                 else:
-                    brand_path = self._brand_path()
+                    brand_paths, brands = self._brand_inputs()
                     daily_path = None
                 self._set_progress(2, 3)
                 preview = build_gatling_master(
-                    brand_path,
+                    brand_paths,
                     daily_path,
                     manuscript_only=not want_excel,
                     skip_completed=False,
-                    brand=self._brand_name(brand_path),
+                    brand=brands,
                     image_resolver=None,
                     existing_keys=(
                         load_existing_manuscript_keys(gatling_path)
@@ -588,13 +649,13 @@ class GatlingPasteApp(AutomationApp):
                     self._washed_images_or_raise(preview.jobs) if want_excel else None
                 )
                 exported = export_gatling_output(
-                    brand_path,
+                    brand_paths,
                     mode=mode,
                     gatling_path=gatling_path or None,
                     txt_dir=txt_dir or None,
                     daily_path=daily_path,
                     skip_completed=False,
-                    brand=self._brand_name(brand_path),
+                    brand=brands,
                     image_resolver=self._image_resolver(),
                     image_dir=gatling_image_folder(gatling_path) if gatling_path else None,
                     proxy_book=self._proxy_book() if want_excel else None,
