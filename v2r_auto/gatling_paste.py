@@ -18,7 +18,10 @@ from .gatling_accounts import (
     ProxyBook,
     account_for_comment_node,
     assign_auto_authors,
+    author_accounts_for_chromes,
+    comment_accounts_for_chromes,
     normalize_auto_id_count,
+    parse_chrome_numbers,
     resolve_job_accounts,
 )
 from .images import (
@@ -1065,6 +1068,8 @@ def build_master_rows(
     rng: random.Random | None = None,
     comment_id_count: int = COMMENT_ID_COUNT,
     author_id_count: int = DEFAULT_AUTO_ID_COUNT,
+    author_chrome_numbers: object = None,
+    comment_chrome_numbers: object = None,
 ) -> list[MasterRow]:
     board_name = exact_board_name(
         job.board,
@@ -1078,6 +1083,8 @@ def build_master_rows(
         rng=rng,
         comment_id_count=comment_id_count,
         author_id_count=author_id_count,
+        author_chrome_numbers=author_chrome_numbers,
+        comment_chrome_numbers=comment_chrome_numbers,
     )
     rows: list[MasterRow] = []
 
@@ -1424,6 +1431,8 @@ def build_gatling_master(
     proxy_book: ProxyBook | None = None,
     comment_id_count: int = COMMENT_ID_COUNT,
     author_id_count: int = DEFAULT_AUTO_ID_COUNT,
+    author_chrome_numbers: object = None,
+    comment_chrome_numbers: object = None,
     need_master_rows: bool = True,
     washed_images: dict[str, list[ResolvedImage]] | None = None,
 ) -> GatlingBuildResult:
@@ -1452,43 +1461,77 @@ def build_gatling_master(
                 "제휴 카페 원고가 있어 일상 글 시트가 필요합니다"
             )
         assign_daily_posts(jobs, load_daily_posts(daily_path), rng=rng)
+    author_chromes = parse_chrome_numbers(author_chrome_numbers)
+    comment_chromes = parse_chrome_numbers(comment_chrome_numbers)
     needed_comments = normalize_auto_id_count(comment_id_count)
     needed_authors = normalize_auto_id_count(author_id_count)
-    if proxy_book and affiliate_jobs and any(job.article.comments for job in affiliate_jobs):
-        comment_count = len(proxy_book.comment_accounts())
-        if comment_count < needed_comments:
-            raise GatlingPasteError(
-                f"양평맘·씨씨앙 댓글 아이디가 {needed_comments}개 필요합니다. "
-                f"지금 {comment_count}개입니다"
-            )
     self_jobs = [job for job in jobs if not is_affiliate_cafe(job.cafe)]
-    if proxy_book and self_jobs and any(job.article.comments for job in self_jobs):
-        self_comment_count = len(proxy_book.self_comment_accounts())
-        if self_comment_count < needed_comments:
-            raise GatlingPasteError(
-                f"자사 카페 댓글 아이디가 {needed_comments}개 필요합니다. "
-                f"지금 {self_comment_count}개입니다"
+    if proxy_book and affiliate_jobs and any(job.article.comments for job in affiliate_jobs):
+        if comment_chromes:
+            comment_accounts_for_chromes(
+                proxy_book.comment_accounts(),
+                comment_chromes,
+                "양평맘·씨씨앙",
             )
+        else:
+            comment_count = len(proxy_book.comment_accounts())
+            if comment_count < needed_comments:
+                raise GatlingPasteError(
+                    f"양평맘·씨씨앙 댓글 아이디가 {needed_comments}개 필요합니다. "
+                    f"지금 {comment_count}개입니다"
+                )
+    if proxy_book and self_jobs and any(job.article.comments for job in self_jobs):
+        if comment_chromes:
+            comment_accounts_for_chromes(
+                proxy_book.self_comment_accounts(),
+                comment_chromes,
+                "자사 카페",
+            )
+        else:
+            self_comment_count = len(proxy_book.self_comment_accounts())
+            if self_comment_count < needed_comments:
+                raise GatlingPasteError(
+                    f"자사 카페 댓글 아이디가 {needed_comments}개 필요합니다. "
+                    f"지금 {self_comment_count}개입니다"
+                )
     empty_affiliate = [
         job for job in affiliate_jobs if not (job.account or "").strip()
     ]
     empty_self = [job for job in self_jobs if not (job.account or "").strip()]
     if proxy_book and empty_affiliate:
-        affiliate_author_count = len(proxy_book.affiliate_authors())
-        if affiliate_author_count < needed_authors:
-            raise GatlingPasteError(
-                f"제휴 작성 아이디가 {needed_authors}개 필요합니다. "
-                f"지금 {affiliate_author_count}개입니다"
+        if author_chromes:
+            author_accounts_for_chromes(
+                proxy_book.affiliate_authors(),
+                author_chromes,
+                "제휴",
             )
+        else:
+            affiliate_author_count = len(proxy_book.affiliate_authors())
+            if affiliate_author_count < needed_authors:
+                raise GatlingPasteError(
+                    f"제휴 작성 아이디가 {needed_authors}개 필요합니다. "
+                    f"지금 {affiliate_author_count}개입니다"
+                )
     if proxy_book and empty_self:
-        self_author_count = len(proxy_book.self_authors())
-        if self_author_count < needed_authors:
-            raise GatlingPasteError(
-                f"자사 작성 아이디가 {needed_authors}개 필요합니다. "
-                f"지금 {self_author_count}개입니다"
+        if author_chromes:
+            author_accounts_for_chromes(
+                proxy_book.self_authors(),
+                author_chromes,
+                "자사",
             )
+        else:
+            self_author_count = len(proxy_book.self_authors())
+            if self_author_count < needed_authors:
+                raise GatlingPasteError(
+                    f"자사 작성 아이디가 {needed_authors}개 필요합니다. "
+                    f"지금 {self_author_count}개입니다"
+                )
     assign_auto_authors(
-        jobs, proxy_book, rng, author_id_count=needed_authors
+        jobs,
+        proxy_book,
+        rng,
+        author_id_count=needed_authors,
+        author_chrome_numbers=author_chromes,
     )
 
     rows: list[MasterRow] = []
@@ -1516,6 +1559,8 @@ def build_gatling_master(
                 rng=rng,
                 comment_id_count=needed_comments,
                 author_id_count=needed_authors,
+                author_chrome_numbers=author_chromes,
+                comment_chrome_numbers=comment_chromes,
             )
         )
     return GatlingBuildResult(
@@ -1577,6 +1622,8 @@ def build_and_write_master(
     proxy_book: ProxyBook | None = None,
     comment_id_count: int = COMMENT_ID_COUNT,
     author_id_count: int = DEFAULT_AUTO_ID_COUNT,
+    author_chrome_numbers: object = None,
+    comment_chrome_numbers: object = None,
 ) -> GatlingBuildResult:
     result = build_gatling_master(
         brand_path,
@@ -1592,6 +1639,8 @@ def build_and_write_master(
         proxy_book=proxy_book,
         comment_id_count=comment_id_count,
         author_id_count=author_id_count,
+        author_chrome_numbers=author_chrome_numbers,
+        comment_chrome_numbers=comment_chrome_numbers,
     )
     write_master_xlsx(output_path, result.rows)
     return result
@@ -1612,6 +1661,8 @@ def paste_manuscripts_into_gatling(
     proxy_book: ProxyBook | None = None,
     comment_id_count: int = COMMENT_ID_COUNT,
     author_id_count: int = DEFAULT_AUTO_ID_COUNT,
+    author_chrome_numbers: object = None,
+    comment_chrome_numbers: object = None,
     washed_images: dict[str, list[ResolvedImage]] | None = None,
 ) -> tuple[GatlingBuildResult, int]:
     """Append Google Sheet title/body/comments into a recognized 기관총 마스터."""
@@ -1629,6 +1680,8 @@ def paste_manuscripts_into_gatling(
         proxy_book=proxy_book,
         comment_id_count=comment_id_count,
         author_id_count=author_id_count,
+        author_chrome_numbers=author_chrome_numbers,
+        comment_chrome_numbers=comment_chrome_numbers,
         washed_images=washed_images,
     )
     if not result.rows:
@@ -1658,6 +1711,8 @@ def export_gatling_output(
     proxy_book: ProxyBook | None = None,
     comment_id_count: int = COMMENT_ID_COUNT,
     author_id_count: int = DEFAULT_AUTO_ID_COUNT,
+    author_chrome_numbers: object = None,
+    comment_chrome_numbers: object = None,
     washed_images: dict[str, list[ResolvedImage]] | None = None,
 ) -> GatlingExportResult:
     chosen = parse_export_mode(mode)
@@ -1684,6 +1739,8 @@ def export_gatling_output(
         proxy_book=proxy_book,
         comment_id_count=comment_id_count,
         author_id_count=author_id_count,
+        author_chrome_numbers=author_chrome_numbers,
+        comment_chrome_numbers=comment_chrome_numbers,
         need_master_rows=want_excel,
         washed_images=washed_images,
     )
