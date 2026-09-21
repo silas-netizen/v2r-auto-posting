@@ -58,6 +58,33 @@ def test_drive_folder_page_parses_folders_and_images() -> None:
     ]
 
 
+def test_embedded_folder_page_includes_later_keyword_images() -> None:
+    source = """
+    <div class="flip-entry" id="entry-early" role="link">
+      <a href="https://drive.google.com/file/d/early/view?usp=drive_web">
+        <div class="flip-entry-title">갓비움.jpg</div>
+      </a>
+    </div>
+    <div class="flip-entry" id="entry-keyword" role="link">
+      <a href="https://drive.google.com/file/d/keyword/view?usp=drive_web">
+        <div class="flip-entry-title">요즘 그릭요거트.jpg</div>
+      </a>
+    </div>
+    <div class="flip-entry" id="entry-folder" role="link">
+      <a href="https://drive.google.com/drive/folders/folder1">
+        <div aria-label="Folder"></div>
+        <div class="flip-entry-title">키워드</div>
+      </a>
+    </div>
+    """
+
+    assert GoogleDriveImageResolver.parse_embedded_folder_page(source) == [
+        DriveItem("early", "갓비움.jpg", False),
+        DriveItem("keyword", "요즘 그릭요거트.jpg", False),
+        DriveItem("folder", "키워드", True),
+    ]
+
+
 def test_patsooni_keyword_matches_filename_without_spaces(tmp_path: Path) -> None:
     job = make_job("{A열 키워드}\n{B/A}")
 
@@ -92,6 +119,156 @@ def test_patsooni_keyword_matches_filename_without_spaces(tmp_path: Path) -> Non
 
     assert [item.file_id for item in resolved] == ["right", "before-after"]
     assert [item.occurrence for item in resolved] == [0, 1]
+
+
+def test_list_folder_reads_embedded_view_before_first_screen(tmp_path: Path) -> None:
+    embed = """
+    <div class="flip-entry" id="entry-right" role="link">
+      <a href="https://drive.google.com/file/d/right/view">
+        <div class="flip-entry-title">요즘 그릭요거트.jpg</div>
+      </a>
+    </div>
+    """
+    first_screen = """
+    <div data-id="early"><div aria-label="갓비움.jpg Image Shared"></div></div>
+    """
+
+    class FakeResponse:
+        def __init__(self, body: str):
+            self.body = body.encode()
+
+        def read(self):
+            return self.body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def opener(request, timeout=30):
+        url = getattr(request, "full_url", str(request))
+        if "embeddedfolderview" in url:
+            return FakeResponse(embed)
+        return FakeResponse(first_screen)
+
+    resolver = GoogleDriveImageResolver(
+        tmp_path,
+        logging.getLogger("test"),
+        opener=opener,
+    )
+    items = resolver._list_folder("keyword-folder")
+    assert items == [DriveItem("right", "요즘 그릭요거트.jpg", False)]
+
+
+def test_list_folder_falls_back_to_first_screen_when_embed_is_empty(tmp_path: Path) -> None:
+    first_screen = """
+    <div data-id="early"><div aria-label="갓비움.jpg Image Shared"></div></div>
+    """
+
+    class FakeResponse:
+        def __init__(self, body: str):
+            self.body = body.encode()
+
+        def read(self):
+            return self.body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def opener(request, timeout=30):
+        url = getattr(request, "full_url", str(request))
+        if "embeddedfolderview" in url:
+            raise OSError("embed unavailable")
+        return FakeResponse(first_screen)
+
+    resolver = GoogleDriveImageResolver(
+        tmp_path,
+        logging.getLogger("test"),
+        opener=opener,
+    )
+    items = resolver._list_folder("keyword-folder")
+    assert items == [DriveItem("early", "갓비움.jpg", False)]
+
+
+def test_resolve_body_finds_later_patsooni_keyword_from_embedded_list(tmp_path: Path) -> None:
+    embed_root = """
+    <div class="flip-entry" id="entry-brand" role="link">
+      <a href="https://drive.google.com/drive/folders/brand">
+        <div aria-label="Folder"></div>
+        <div class="flip-entry-title">팥순이</div>
+      </a>
+    </div>
+    """
+    embed_brand = """
+    <div class="flip-entry" id="entry-keyword" role="link">
+      <a href="https://drive.google.com/drive/folders/keyword">
+        <div aria-label="Folder"></div>
+        <div class="flip-entry-title">키워드</div>
+      </a>
+    </div>
+    """
+    embed_keyword = """
+    <div class="flip-entry" id="entry-early" role="link">
+      <a href="https://drive.google.com/file/d/early/view">
+        <div class="flip-entry-title">갓비움.jpg</div>
+      </a>
+    </div>
+    <div class="flip-entry" id="entry-later" role="link">
+      <a href="https://drive.google.com/file/d/later/view">
+        <div class="flip-entry-title">요즘 그릭요거트.jpg</div>
+      </a>
+    </div>
+    """
+    first_screen = """
+    <div data-id="early"><div aria-label="갓비움.jpg Image Shared"></div></div>
+    """
+
+    class FakeResponse:
+        def __init__(self, body: str):
+            self.body = body.encode()
+
+        def read(self):
+            return self.body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def opener(request, timeout=30):
+        url = getattr(request, "full_url", str(request))
+        if "embeddedfolderview" not in url:
+            return FakeResponse(first_screen)
+        if url.endswith("root"):
+            return FakeResponse(embed_root)
+        if url.endswith("brand"):
+            return FakeResponse(embed_brand)
+        if url.endswith("keyword"):
+            return FakeResponse(embed_keyword)
+        return FakeResponse("")
+
+    resolver = GoogleDriveImageResolver(
+        tmp_path,
+        logging.getLogger("test"),
+        root_folder_id="root",
+        rng=random.Random(1),
+        opener=opener,
+    )
+    resolver._download = lambda item: tmp_path / item.name  # type: ignore[method-assign]
+    resolved = resolver.resolve_body(
+        brand="팥순이",
+        keyword="요즘 그릭요거트",
+        body="{키워드}",
+        row_number=78,
+    )
+
+    assert [item.file_id for item in resolved] == ["later"]
+    assert resolved[0].file_name == "요즘 그릭요거트.jpg"
 
 
 def test_content_json_inserts_image_at_placeholder_and_keeps_blank_line() -> None:
