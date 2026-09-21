@@ -483,6 +483,7 @@ def _comment_id_map(
             comment_accounts, chromes, pool_label
         )
         labels = comment_auto_labels(job.article_type, len(chosen))
+        chosen = rng.sample(chosen, len(chosen))
         return dict(zip(labels, chosen))
     needed = normalize_auto_id_count(comment_id_count)
     if len(comment_accounts) < needed:

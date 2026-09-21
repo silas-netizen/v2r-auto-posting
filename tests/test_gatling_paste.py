@@ -6,6 +6,7 @@ from openpyxl import Workbook, load_workbook
 
 from v2r_auto.content import CommentNode, ParsedArticle, parse_article
 from v2r_auto.gatling_accounts import (
+    comment_accounts_for_chromes,
     comment_auto_labels,
     normalize_auto_id_count,
     parse_chrome_numbers,
@@ -1715,22 +1716,41 @@ def test_sheet_author_wins_over_author_chromes(tmp_path: Path) -> None:
     assert [row.account for row in edits] == ["writer", "writer2"]
 
 
-def test_comment_chromes_used_in_typed_order(tmp_path: Path) -> None:
+def test_comment_chromes_are_shuffled(tmp_path: Path) -> None:
     job = make_job(cafe="씨씨앙", board="자유수다방")
     job.account = "writer"
     job.article_type = "질문형"
     book = recognize_proxy_workbook(write_proxy_xlsx(tmp_path))
+    picked = comment_accounts_for_chromes(
+        book.comment_accounts(),
+        "11,13,15,12,14,16",
+        "양평맘·씨씨앙",
+    )
+    expected = random.Random(4).sample(picked, len(picked))
     rows = build_master_rows(
         job,
         proxy_book=book,
+        rng=random.Random(4),
         comment_chrome_numbers="11,13,15,12,14,16",
     )
     comments = [row for row in rows if row.type == TYPE_COMMENT]
     replies = [row for row in rows if row.type == TYPE_REPLY]
-    assert comments[0].account == "c1"
-    assert comments[1].account == "c3"
-    assert replies[2].account == "c3"
-    assert replies[3].account == "c5"
+    assert comments[0].account == expected[0].account
+    assert comments[1].account == expected[1].account
+    assert replies[2].account == expected[1].account
+    assert replies[3].account == expected[2].account
+    assert {row.account for row in comments} | {
+        replies[2].account,
+        replies[3].account,
+    } <= {item.account for item in picked}
+    assert [item.account for item in expected] != [
+        "c1",
+        "c3",
+        "c5",
+        "c2",
+        "c4",
+        "c6",
+    ]
 
 
 def test_comment_chromes_skip_generic_pool_size(tmp_path: Path) -> None:
@@ -1747,7 +1767,7 @@ def test_comment_chromes_skip_generic_pool_size(tmp_path: Path) -> None:
         comment_chrome_numbers="11,12",
     )
     comments = [row for row in result.rows if row.type == TYPE_COMMENT]
-    assert [row.account for row in comments] == ["c1", "c2"]
+    assert {row.account for row in comments} == {"c1", "c2"}
 
 
 def test_missing_author_chrome_raises(tmp_path: Path) -> None:
